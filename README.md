@@ -5,6 +5,8 @@ is the **render overhaul**, which spreads the engine's draw submission over seve
 contexts, so the GPU is no longer kept waiting on a single CPU thread. None of the game's own files are changed: the
 fixes load through a `d3d11.dll` placed next to the game and patch the engine in memory only.
 
+This is an unofficial project, not affiliated with or endorsed by SEGA or Creative Assembly.
+
 On the test machine, in a heavy battle with many effects, the overhaul took the game from **76.8 to 107.5 fps** and the
 GPU from 50% to 71% busy (same session, switched on and off every 2 seconds).
 
@@ -92,3 +94,7 @@ To build yourself, with that MinGW-w64 on the path and a POSIX shell (Git Bash w
 ```
 
 The sort test: `x86_64-w64-mingw32-gcc -O2 -I. -o test_itemsort.exe tests/test_itemsort.c && ./test_itemsort.exe`.
+
+## License
+
+GNU General Public License v3.0; see `LICENSE`.

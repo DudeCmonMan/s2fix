@@ -15,5 +15,6 @@ with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as archive:
     archive.write("s2prof.dll", "s2prof.dll")
     archive.write("s2prof.ini", "s2prof.ini")
     archive.write("README.md", "s2fix-README.md")
+    archive.write("LICENSE", "s2fix-LICENSE.txt")
     for path in sorted(sys.argv[2:]): archive.write(path, "fixes/" + os.path.basename(path))' "$ZIP" modules/*.dll
 echo "$(pwd)/$ZIP"
