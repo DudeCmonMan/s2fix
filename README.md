@@ -29,9 +29,12 @@ s2prof.ini       settings
 fixes\           one DLL per fix
 ```
 
-Start the game as usual. To uninstall, delete those four entries and the `perf-logs` folder.
+Start the game as usual. **Every fix is on by default and `s2prof.ini` comes preconfigured, so there is nothing to set
+up or switch on.** To uninstall, delete those four entries and the `perf-logs` folder.
 
 ## In game
+
+You don't need any hotkeys to play. They exist to compare the game with the fixes off and on:
 
 | Hotkey | Does |
 |---|---|
@@ -39,6 +42,20 @@ Start the game as usual. To uninstall, delete those four entries and the `perf-l
 | Ctrl+Shift+F10 | switch the other fixes off and on (on at start) |
 | Ctrl+Shift+F9 | 20-second A/B capture: the other fixes alternate every 2 s, the summary goes to the log |
 | Ctrl+Shift+F8 | 20-second capture without switching anything |
+
+### Seeing the difference
+
+The most reliable test is to switch the fixes off and on live:
+
+1. Turn on an fps counter (the Steam overlay's, for example).
+2. In a busy battle, keep the camera still: fps depends heavily on what is on screen.
+3. Press Ctrl+Shift+F7 (the overhaul) or Ctrl+Shift+F10 (the other fixes) a few times, and compare the fps each way.
+
+The fps in the F9 and F8 capture summaries can mislead. They are averages over the whole capture, so camera movement,
+loading and stutters all blend into one number, and F9 switches only the other fixes, never the overhaul. Treat the
+captures as diagnostics to attach to a bug report, not as the benchmark.
+
+### The log
 
 The log is `perf-logs\<date-time>_s2prof.log` in the game folder, one per run. It records which fixes installed, the
 hotkeys used, capture results and, if the game crashes, where. Captures also write thread and stack files there.
