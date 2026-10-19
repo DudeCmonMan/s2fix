@@ -1,0 +1,4 @@
+# Built by build.sh and package.sh.
+*.dll
+/dist/
+proxy/d3d11.def

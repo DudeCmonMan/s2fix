@@ -1,0 +1,2 @@
+# Git Bash fails on CRLF shell scripts, and build.sh's sed reads the export list.
+* text=auto eol=lf
