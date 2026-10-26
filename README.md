@@ -19,7 +19,8 @@ This is an unofficial project, not affiliated with or endorsed by SEGA or Creati
    `fixes\` folder.
 2. Start the game as usual.
 
-Every fix is on by default and `s2prof.ini` comes preconfigured. There is nothing to set up.
+Every fix is on by default and `s2prof.ini` comes preconfigured. There is nothing to set up. The one opt-in is the
+original game's borderless windowed mode (`[window] borderless=1`, see its settings).
 
 To uninstall, delete the proxy DLL, `s2prof.dll`, `s2prof.ini`, the `fixes\` folder and the `perf-logs\` folder.
 
@@ -133,6 +134,8 @@ before the device is made.
 | `[flipmodel] enabled` | 1 | at start: creates the swap chain with the flip model instead of the 2011 blt model; 0 keeps the game's |
 | `[flipmodel] buffers` | 3 | at start: flip-model back buffers, 2 to 4 |
 | `[flipmodel] tearing` | 1 | at start: allows tearing (an uncapped frame rate, variable refresh in a window) when Windows supports it |
+| `[window] borderless` | 0 | at start: 1 runs the game's windowed mode in a borderless window that covers its monitor, at the monitor's native resolution; set the game to windowed, not fullscreen |
+| `[window] clip_cursor` | 1 | with borderless: keeps the cursor on the game's monitor while the game has focus, so edge scrolling works with several monitors |
 | `[s2prof] console` | 0 | 1 opens a window that shows the log live |
 
 ### The fixes
@@ -160,6 +163,7 @@ before the device is made.
 | `focuscache` | asks Windows for the foreground window once per frame instead of on every key query |
 | `scenelock` | spins longer on the unit emission lock instead of sleeping in the kernel |
 | `flipmodel` | creates the swap chain with the flip model, which avoids the 2011 blt model's Present stalls |
+| `borderless` | with `[window] borderless=1`: borderless windowed mode at the monitor's native resolution (the game itself has only a framed window or exclusive fullscreen) |
 | `cpuplace` | keeps the game's threads on the CCD `[cpu] ccd` names |
 | `maincore` | keeps the game's other threads off the main thread's CPU core, so the main thread has the whole core |
 
