@@ -33,6 +33,7 @@ You don't need any hotkeys to play. They exist to compare the game with the fixe
 | Ctrl+Shift+F10 | switches all fixes off and on (on at start) |
 | Ctrl+Shift+F9 | 20-second A/B capture: all fixes switch off and on every 2 s; the summary goes to the log |
 | Ctrl+Shift+F8 | 20-second capture without switching anything |
+| Ctrl+Shift+F6 | debug report, the original game only for now (see "Reporting a problem" below) |
 
 A few settings apply when the game starts (marked "at start" below). The hotkeys don't switch those.
 
@@ -49,6 +50,18 @@ blend into one number. Use the captures as diagnostics for a bug report, not as 
 
 Each run writes `perf-logs\<date-time>_s2prof.log` in the game folder. It lists which fixes installed, the hotkeys used,
 capture results and, if the game crashes, where. Captures also write thread and stack files there.
+
+### Reporting a problem (the original game)
+
+1. In a battle, put the camera somewhere busy and keep it still.
+2. Press Ctrl+Shift+F6. You hear a beep. Don't touch the camera until the second beep, about 3 minutes later.
+3. Attach `perf-logs\report_<date-time>.zip` from the game folder to your issue.
+
+The report records your system (CPU, memory, GPUs and drivers, displays), the game's settings, the fixes and how they
+installed, every program module loaded into the game, its threads, and timings with all the fixes on and off and then
+each fix on and off. It also takes screenshots of the game (only the game's own picture, never your desktop) with the
+fixes on and off. While it works, files go to `perf-logs\temp`; it packs them into the zip and removes them. Your user
+name and computer name are replaced in everything it writes. Nothing is sent anywhere: you decide what to share.
 
 ## Shogun 2 — Complete Edition
 

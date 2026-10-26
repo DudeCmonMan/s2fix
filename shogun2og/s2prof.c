@@ -15,6 +15,11 @@
 #include <wchar.h>
 #include "s2module.h"
 #include "hook.h"
+#include "report.h"
+
+#ifndef S2FIX_VERSION
+#define S2FIX_VERSION "local build"
+#endif
 
 #define CAPTURE_SECONDS 20
 #define PROGRESS_SECONDS 5
@@ -773,11 +778,13 @@ static BOOL sample(HANDLE timer, CaptureStats *stats, int seconds) {
 }
 
 // ab is the switch an A/B capture alternates, or NULL for a plain capture, whose profile splits by the fix switch.
+static BOOL capture_quiet;
+
 static void capture(int seconds, Switch *ab) {
     int number = capture_number++;
     BOOL alternating = ab != NULL;
     Switch *mode_switch = ab ? ab : &switches[0];
-    MessageBeep(MB_OK);
+    if (!capture_quiet) MessageBeep(MB_OK);
     LONG enabled_before = *mode_switch->flag;
     log_line("capture %d: sampling for %d s%s%s...", number, seconds, alternating ? ", switching every 2 s: " : "; Ctrl+Shift+F10 still toggles Apply Fixes",
              alternating ? ab->name : "");
@@ -791,7 +798,7 @@ static void capture(int seconds, Switch *ab) {
         log_line("capture %d: setup failed: %lu", number, GetLastError());
         if (timer) CloseHandle(timer);
         release_capture();
-        MessageBeep(MB_ICONHAND);
+        if (!capture_quiet) MessageBeep(MB_ICONHAND);
         return;
     }
     CaptureStats stats = {.alternating = alternating, .mode_switch = mode_switch};
@@ -807,11 +814,50 @@ static void capture(int seconds, Switch *ab) {
     log_line("capture %d: %s (%d threads, %zu unique stacks) -> %s_s2prof_%d_threads.tsv, %s_s2prof_%d_stacks.txt; %s now %s", number,
              ok ? "done" : "FAILED", thread_count, entry_count, run_id, number, run_id, number, mode_switch->name, *mode_switch->flag ? "ON" : "OFF");
     release_capture();
-    MessageBeep(ok ? MB_ICONASTERISK : MB_ICONHAND);
+    if (!capture_quiet) MessageBeep(ok ? MB_ICONASTERISK : MB_ICONHAND);
+}
+
+// The debug report drives these: the switches, and the A/B capture without its own beeps (the report beeps once at its
+// start and once at its end).
+
+static int report_switch_count(void) {
+    return switch_count;
+}
+
+static ReportSwitch report_switch_at(int index) {
+    return (ReportSwitch){switches[index].name, switches[index].flag, switches[index].report};
+}
+
+static int report_capture(int seconds, int switch_index) {
+    int number = capture_number;
+    capture_quiet = TRUE;
+    capture(seconds, &switches[switch_index]);
+    capture_quiet = FALSE;
+    return number;
+}
+
+static void start_report(void) {
+    static BOOL initialised;
+    if (!initialised) {
+        report_init(&(ReportHost){.engine = engine,
+                                  .engine_is_analysed_build = engine_is_analysed_build,
+                                  .output_dir = output_dir,
+                                  .config_path = config_path,
+                                  .run_id = run_id,
+                                  .version = S2FIX_VERSION,
+                                  .log_line = log_line,
+                                  .switch_count = report_switch_count,
+                                  .switch_at = report_switch_at,
+                                  .capture = report_capture,
+                                  .output_path = output_path});
+        initialised = TRUE;
+    }
+    report_start();
 }
 
 static void log_help(void) {
-    log_line("Hotkeys (in game): Ctrl+Shift+F9 A/B capture %d s (Apply Fixes alternates every %d s) | Ctrl+Shift+F10 toggle Apply Fixes | Ctrl+Shift+F8 plain capture",
+    log_line("Hotkeys (in game): Ctrl+Shift+F9 A/B capture %d s (Apply Fixes alternates every %d s) | Ctrl+Shift+F10 toggle Apply Fixes | Ctrl+Shift+F8 plain capture"
+             " | Ctrl+Shift+F6 debug report (keep the camera still, about 3 minutes)",
              CAPTURE_SECONDS, AB_SEGMENT_SECONDS);
 }
 
@@ -829,7 +875,10 @@ static void start_run(void) {
 // The thread that presents is the main thread the fixes need to know.
 static BYTE __attribute__((thiscall)) present_hook(BYTE *engine_object) {
     if (!main_thread_id) main_thread_id = GetCurrentThreadId();
-    return original_present(engine_object);
+    report_before_present();
+    BYTE result = original_present(engine_object);
+    report_after_present();
+    return result;
 }
 
 static void install_present_hook(void) {
@@ -951,9 +1000,12 @@ static DWORD WINAPI controller(LPVOID unused) {
     for (;;) {
         Sleep(50);
         check_renderer();
-        if (hotkey_pressed(VK_F10)) toggle_apply_fixes();
-        if (hotkey_pressed(VK_F9)) capture(CAPTURE_SECONDS, &switches[0]);
-        if (hotkey_pressed(VK_F8)) capture(CAPTURE_SECONDS, NULL);
+        // While the report runs it owns the switches and the capture, so the other hotkeys wait.
+        BOOL busy = report_running();
+        if (hotkey_pressed(VK_F10) && !busy) toggle_apply_fixes();
+        if (hotkey_pressed(VK_F9) && !busy) capture(CAPTURE_SECONDS, &switches[0]);
+        if (hotkey_pressed(VK_F8) && !busy) capture(CAPTURE_SECONDS, NULL);
+        if (hotkey_pressed(VK_F6)) start_report();
     }
     return 0;
 }
