@@ -10,8 +10,8 @@ This is an unofficial project, not affiliated with or endorsed by SEGA or Creati
 
 | Game | Package | Unzip next to |
 |---|---|---|
-| Shogun 2 — Complete Edition (64-bit) | `s2fix_shogun2ce_<version>.zip` | `shogun2_complete_edition.exe` |
-| Shogun 2, the original game (32-bit) | `s2fix_shogun2og_<version>.zip` | `Shogun2.exe` |
+| Shogun 2 — Complete Edition (64-bit) | `s2fix_shogun2_complete-edition_<version>.zip` | `shogun2_complete_edition.exe` |
+| Shogun 2, the original game (32-bit) | `s2fix_shogun2_original_<version>.zip` | `Shogun2.exe` |
 
 ## Install
 
@@ -178,7 +178,8 @@ To build yourself, put both MinGW-w64 compilers on the path (`x86_64-w64-mingw32
 
 ```
 ./build.sh       builds both games: shogun2ce/ and shogun2og/
-./package.sh     builds, then writes dist/s2fix_shogun2ce_<version>.zip and dist/s2fix_shogun2og_<version>.zip
+./package.sh     builds, then writes dist/s2fix_shogun2_complete-edition_<version>.zip and
+                 dist/s2fix_shogun2_original_<version>.zip
                  (VERSION=v0.2.0 names them; a local build gets a timestamp)
 ```
 

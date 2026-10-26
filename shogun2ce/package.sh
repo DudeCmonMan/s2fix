@@ -8,7 +8,7 @@ PYTHON=python3
 # The root package.sh passes DIST and VERSION (the release workflow passes the tag); a build here alone gets a timestamp.
 DIST=${DIST:-../dist}
 mkdir -p "$DIST"
-ZIP="$DIST/s2fix_shogun2ce_${VERSION:-$(date +%s)}.zip"
+ZIP="$DIST/s2fix_shogun2_complete-edition_${VERSION:-$(date +%s)}.zip"
 # Unzipped into the game folder: the proxy, host and settings beside the exe, the fixes in fixes\.
 "$PYTHON" -I -c 'import os, sys, zipfile
 with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as archive:

@@ -76,4 +76,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/*.zip --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "s2fix $GITHUB_REF_NAME" \
-            --notes "Built from $GITHUB_REF_NAME ($GITHUB_SHA) with WinLibs GCC 16.2.0. s2fix_shogun2ce is for Shogun 2 - Complete Edition (unzip next to shogun2_complete_edition.exe), s2fix_shogun2og for the original Shogun 2 (unzip next to Shogun2.exe); see the README."
+            --notes "Built from $GITHUB_REF_NAME ($GITHUB_SHA) with WinLibs GCC 16.2.0. s2fix_shogun2_complete-edition is for Shogun 2 - Complete Edition (unzip next to shogun2_complete_edition.exe), s2fix_shogun2_original for the original Shogun 2 (unzip next to Shogun2.exe); see the README."
