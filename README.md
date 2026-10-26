@@ -159,6 +159,7 @@ Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 | `keysplit` | computes the unit render lists' keys on helper threads while the main thread fills the instance textures |
 | `batchsplit` | splits the soldier render batch into ordered chunks on helper threads |
 | `walksplit` | runs the draw-time batching walk's filtering and LOD picks on helper threads |
+| `contention` | stops idle helper threads from crowding out the overhaul's workers when the game's threads share one CCD: the workers run above normal priority, and the helpers spin only briefly before sleeping (fewer stutters in heavy scenes such as sieges) |
 | `itemsort` | replaces the three render-item sorts with stable sorts that leave an already sorted list alone |
 | `itemcopy` | copies 312-byte render items whole |
 | `listkeep` | keeps the render lists' per-thread buffers between frames instead of regrowing them every frame |

@@ -1,6 +1,7 @@
 #define _WIN32_WINNT 0x0A00
 #define COBJMACROS
 #include "../s2module.h"
+#include "../spinwait.h"
 #include <d3d11.h>
 #include <intrin.h>
 #include <malloc.h>
@@ -394,6 +395,7 @@ struct Worker {
     __attribute__((aligned(16))) BYTE group_mesh[GROUP_MESH_VIEW_SIZE];
     // The mesh group_mesh is a view of for the current job, or NULL.
     BYTE *group_mesh_of;
+    BOOL boosted;
 };
 
 typedef struct {
@@ -467,6 +469,11 @@ typedef struct {
 // passes straight to the engine and only counts.
 __declspec(dllexport) volatile LONG overhaul_enabled = 1;
 __declspec(dllexport) volatile LONG overhaul_workers = 3;
+// Set by the contention fix: main waits on the workers, so they run above normal priority and wake straight onto a CPU
+// instead of queueing behind spinning pool threads. Boosted, they spin only briefly before sleeping, so their idle spin
+// doesn't push other threads off.
+__declspec(dllexport) volatile LONG overhaul_worker_priority;
+__declspec(dllexport) volatile LONG overhaul_spin_us = 50;
 // View types split (bit = type, from view vtbl+0x30): 1 the shadow map, 24 the G-buffer view (vtable 0x1175ffec; split
 // in game 2026-10-25, -0.34 to -0.57 ms in a CPU-bound battle, no visible difference). Others are too small to pay.
 __declspec(dllexport) volatile uint64_t overhaul_views = 1ull << 1 | 1ull << 24;
@@ -2192,7 +2199,17 @@ static DWORD WINAPI worker_main(LPVOID parameter) {
     // Main may kick this worker's first range before the thread runs, so it starts from the generation main saw.
     LONG seen = worker->started_at_generation;
     for (;;) {
-        for (int spin = 0; generation == seen && spin < WORKER_SPIN_ROUNDS; spin++) _mm_pause();
+        BOOL boosted = overhaul_worker_priority && overhaul_on();
+        if (boosted != worker->boosted) {
+            SetThreadPriority(GetCurrentThread(), boosted ? THREAD_PRIORITY_ABOVE_NORMAL : THREAD_PRIORITY_NORMAL);
+            worker->boosted = boosted;
+        }
+        if (boosted) {
+            LONGLONG deadline = spin_deadline(overhaul_spin_us);
+            for (int spin = 0; generation == seen && !spin_expired(spin, deadline); spin++) _mm_pause();
+        } else {
+            for (int spin = 0; generation == seen && spin < WORKER_SPIN_ROUNDS; spin++) _mm_pause();
+        }
         while (generation == seen) WaitOnAddress(&generation, &seen, sizeof seen, INFINITE);
         seen = generation;
         TaskFn task = worker->task;

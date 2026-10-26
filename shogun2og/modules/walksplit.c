@@ -1,5 +1,6 @@
 #define _WIN32_WINNT 0x0A00
 #include "../s2module.h"
+#include "../spinwait.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,10 @@
 #define CHUNKS_PER_WORKER 12
 #define MAX_CHUNKS ((HELPERS + 1) * CHUNKS_PER_WORKER)
 #define HELPER_SPIN_ROUNDS 20000
+// Set by the contention fix: a short spin covers the gaps between one frame's jobs, then the helpers sleep instead
+// of spinning into the draw phase. The budget can be patched live.
+__declspec(dllexport) volatile LONG short_spin_enabled;
+__declspec(dllexport) volatile LONG short_spin_us = 50;
 
 typedef void(__attribute__((thiscall)) *WalkFn)(BYTE *queue, DWORD pass_bit, float scale, DWORD alternate_list);
 typedef BYTE *(__attribute__((thiscall)) *LodLookupFn)(BYTE *table, uint64_t mesh, float distance, DWORD alternate_list);
@@ -140,7 +145,12 @@ static DWORD WINAPI helper(LPVOID unused) {
     LONG64 seen = 0;
     for (;;) {
         LONG64 claim = claim_word;
-        for (int round = 0; round < HELPER_SPIN_ROUNDS && claim >> 32 == seen; round++, claim = claim_word) _mm_pause();
+        if (short_spin_enabled && *api->fix_enabled) {
+            LONGLONG deadline = spin_deadline(short_spin_us);
+            for (int round = 0; claim >> 32 == seen && !spin_expired(round, deadline); round++, claim = claim_word) _mm_pause();
+        } else {
+            for (int round = 0; round < HELPER_SPIN_ROUNDS && claim >> 32 == seen; round++, claim = claim_word) _mm_pause();
+        }
         if (claim >> 32 == seen) {
             WaitOnAddress(&claim_word, &claim, sizeof claim, INFINITE);
             continue;
