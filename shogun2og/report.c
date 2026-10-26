@@ -283,6 +283,13 @@ static IDXGISwapChain *swap_chain(void) {
     return device ? *(IDXGISwapChain **)(device + SWAP_CHAIN_OFFSET) : NULL;
 }
 
+// The back buffer formats the screenshots and the banner read and write.
+static BOOL readable_format(DXGI_FORMAT format) {
+    return format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+           format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8X8_UNORM || format == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB ||
+           format == DXGI_FORMAT_R10G10B10A2_UNORM;
+}
+
 static void make_gpu_sets(ID3D11DeviceContext *context) {
     ID3D11DeviceContext_GetDevice(context, &d3d_device);
     D3D11_QUERY_DESC disjoint = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0}, stamp_desc = {D3D11_QUERY_TIMESTAMP, 0};
@@ -355,11 +362,7 @@ static void copy_back_buffer(Shot *shot, ID3D11DeviceContext *context) {
     }
     D3D11_TEXTURE2D_DESC desc;
     ID3D11Texture2D_GetDesc(back, &desc);
-    BOOL supported = desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
-                     desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM || desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
-                     desc.Format == DXGI_FORMAT_B8G8R8X8_UNORM || desc.Format == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB ||
-                     desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM;
-    if (!supported) {
+    if (!readable_format(desc.Format)) {
         snprintf(shot->why, sizeof shot->why, "back buffer format %d is not one this report reads", (int)desc.Format);
         shot->state = SHOT_FAILED;
         ID3D11Texture2D_Release(back);
@@ -431,6 +434,100 @@ static void map_copies(ID3D11DeviceContext *context) {
     }
 }
 
+// ---- the banner on screen ----
+
+// "Snapshot Running: <stage>, <percent>" in the middle of the screen while the report runs: GDI renders it on main when
+// its text changes (at stage boundaries, outside the measured blocks), and every frame it is copied onto the back buffer
+// before Present, after the GPU's end timestamp and the screenshot copy, so neither includes it. A copy changes no
+// pipeline state the engine caches.
+static SRWLOCK overlay_lock = SRWLOCK_INIT;
+static char overlay_text[160];
+static volatile LONG overlay_version;
+static LONG overlay_drawn_version;
+static ID3D11Texture2D *overlay_texture;
+static UINT overlay_width, overlay_height;
+static DXGI_FORMAT overlay_format;
+
+static void set_overlay(const char *stage, int percent) {
+    AcquireSRWLockExclusive(&overlay_lock);
+    snprintf(overlay_text, sizeof overlay_text, "Snapshot Running: %s, %d%%", stage, percent);
+    ReleaseSRWLockExclusive(&overlay_lock);
+    InterlockedIncrement(&overlay_version);
+}
+
+static void render_overlay(ID3D11DeviceContext *context, const D3D11_TEXTURE2D_DESC *target) {
+    UINT font_height = target->Height / 20 < 24 ? 24 : target->Height / 20, width = target->Width * 7 / 10, height = font_height * 2;
+    if (width < 64 || height > target->Height) return;
+    if (!overlay_texture || overlay_width != width || overlay_height != height || overlay_format != target->Format) {
+        if (overlay_texture) ID3D11Texture2D_Release(overlay_texture);
+        overlay_texture = NULL;
+        D3D11_TEXTURE2D_DESC desc = {width, height, 1, 1, target->Format, {1, 0}, D3D11_USAGE_DEFAULT, 0, 0, 0};
+        if (FAILED(ID3D11Device_CreateTexture2D(d3d_device, &desc, NULL, &overlay_texture))) return;
+        overlay_width = width, overlay_height = height, overlay_format = target->Format;
+    }
+    wchar_t text[160];
+    AcquireSRWLockShared(&overlay_lock);
+    MultiByteToWideChar(CP_UTF8, 0, overlay_text, -1, text, 160);
+    ReleaseSRWLockShared(&overlay_lock);
+    BITMAPINFO info = {{sizeof(BITMAPINFOHEADER), (LONG)width, -(LONG)height, 1, 32, BI_RGB, 0, 0, 0, 0, 0}, {{0, 0, 0, 0}}};
+    void *bits = NULL;
+    HDC dc = CreateCompatibleDC(NULL);
+    HBITMAP bitmap = dc ? CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+    uint32_t *converted = malloc((size_t)width * height * 4);
+    if (bitmap && bits && converted) {
+        HGDIOBJ previous_bitmap = SelectObject(dc, bitmap);
+        int border = height / 16 < 3 ? 3 : (int)height / 16;
+        RECT whole = {0, 0, (LONG)width, (LONG)height}, inner = {border, border, (LONG)width - border, (LONG)height - border};
+        HBRUSH frame = CreateSolidBrush(RGB(255, 170, 0)), panel = CreateSolidBrush(RGB(16, 16, 16));
+        FillRect(dc, &whole, frame);
+        FillRect(dc, &inner, panel);
+        HFONT font = CreateFontW(-(int)font_height, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        HGDIOBJ previous_font = SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        DrawTextW(dc, text, -1, &inner, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        GdiFlush();
+        const uint32_t *in = bits;
+        BOOL bgra = target->Format == DXGI_FORMAT_B8G8R8A8_UNORM || target->Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+                    target->Format == DXGI_FORMAT_B8G8R8X8_UNORM || target->Format == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
+        for (size_t i = 0; i < (size_t)width * height; i++) {
+            uint32_t b = in[i] & 0xff, g = in[i] >> 8 & 0xff, r = in[i] >> 16 & 0xff;
+            converted[i] = target->Format == DXGI_FORMAT_R10G10B10A2_UNORM ? 0xc0000000u | (b * 1023 / 255) << 20 | (g * 1023 / 255) << 10 | r * 1023 / 255
+                           : bgra                                             ? 0xff000000u | r << 16 | g << 8 | b
+                                                                              : 0xff000000u | b << 16 | g << 8 | r;
+        }
+        ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)overlay_texture, 0, NULL, converted, width * 4, 0);
+        SelectObject(dc, previous_font);
+        SelectObject(dc, previous_bitmap);
+        DeleteObject(font);
+        DeleteObject(frame);
+        DeleteObject(panel);
+    }
+    free(converted);
+    if (bitmap) DeleteObject(bitmap);
+    if (dc) DeleteDC(dc);
+}
+
+static void draw_overlay(ID3D11DeviceContext *context) {
+    IDXGISwapChain *chain = swap_chain();
+    ID3D11Texture2D *back = NULL;
+    if (!overlay_version || !d3d_device || !chain || FAILED(IDXGISwapChain_GetBuffer(chain, 0, &texture2d_iid, (void **)&back))) return;
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Texture2D_GetDesc(back, &desc);
+    if (desc.SampleDesc.Count == 1 && readable_format(desc.Format)) {
+        LONG version = overlay_version;
+        if (version != overlay_drawn_version || !overlay_texture || overlay_format != desc.Format || overlay_width != desc.Width * 7 / 10) {
+            render_overlay(context, &desc);
+            overlay_drawn_version = version;
+        }
+        if (overlay_texture && overlay_width <= desc.Width && overlay_height <= desc.Height)
+            ID3D11DeviceContext_CopySubresourceRegion(context, (ID3D11Resource *)back, 0, (desc.Width - overlay_width) / 2, (desc.Height - overlay_height) / 2, 0,
+                                                      (ID3D11Resource *)overlay_texture, 0, NULL);
+    }
+    ID3D11Texture2D_Release(back);
+}
+
 void report_before_present(void) {
     if (!running) return;
     ID3D11DeviceContext *context = immediate_context();
@@ -457,6 +554,7 @@ void report_before_present(void) {
                 copy_back_buffer(&shots[i], context);
                 break;
             }
+    if (!gpu_stop && d3d_device) draw_overlay(context);
 }
 
 void report_after_present(void) {
@@ -1248,10 +1346,22 @@ static void print_ab(Text *t, const Stats *off, const Stats *on) {
                     on->p95 - off->p95, on->p99 - off->p99, on->gpu_mean - off->gpu_mean);
 }
 
+// Progress is the time spent against the time the sequence is planned to take.
+static LONGLONG progress_started, progress_planned;
+
+static void progress(const char *stage) {
+    LONGLONG spent = now() - progress_started;
+    int percent = progress_planned ? (int)(100 * spent / progress_planned) : 0;
+    set_overlay(stage, percent > 99 ? 99 : percent);
+}
+
 static DWORD WINAPI report_thread(LPVOID unused) {
     (void)unused;
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
     LONGLONG started = now();
+    progress_started = started;
+    progress_planned = 0;
+    progress("system snapshot");
     MessageBeep(MB_OK);
     host.log_line("debug report: started; keep the camera still until the second beep (about 2 to 3 minutes)");
     Text report = {0}, shot_list = {0};
@@ -1281,6 +1391,14 @@ static DWORD WINAPI report_thread(LPVOID unused) {
     section_folder(&report);
     free(log.data);
     host.log_line("debug report: system snapshot done");
+    int live_fixes = 0;
+    for (int f = 0; f < fix_count; f++)
+        for (int i = 0; i < host.switch_count(); i++)
+            if (!strcmp(host.switch_at(i).name, fixes[f].name) && *host.switch_at(i).flag) live_fixes++;
+    LONGLONG planned_ms = (now() - started) * 1000 / frequency.QuadPart + 3 * SETTLE_MS + 2 * 600 + BASELINE_MS + ALL_AB_SECONDS * 1000 + 300 +
+                          (LONGLONG)live_fixes * (SETTLE_MS + 400 + FIX_BLOCKS * FIX_BLOCK_MS + 250) + 4000;
+    progress_planned = planned_ms * frequency.QuadPart / 1000;
+    progress("screenshots, all fixes on");
 
     ReportSwitch all = host.switch_at(0);
     LONG all_before = *all.flag;
@@ -1288,6 +1406,7 @@ static DWORD WINAPI report_thread(LPVOID unused) {
     wait_ms(SETTLE_MS);
     take_burst(&shot_list, "all_fixes_on", BURST, TRUE);
     LONG first;
+    progress("baseline, all fixes on");
     start_recording(NULL, &first);
     wait_ms(BASELINE_MS);
     LONG last = stop_recording();
@@ -1297,10 +1416,12 @@ static DWORD WINAPI report_thread(LPVOID unused) {
     print_stats(&report, "all", &baseline);
     host.log_line("debug report: baseline done");
 
+    progress("screenshots, all fixes off");
     set_flag(all.flag, 0);
     wait_ms(SETTLE_MS);
     take_burst(&shot_list, "all_fixes_off", BURST, TRUE);
     set_flag(all.flag, 1);
+    progress("all fixes on/off");
     wait_ms(SETTLE_MS);
 
     start_recording(all.flag, &first);
@@ -1328,6 +1449,7 @@ static DWORD WINAPI report_thread(LPVOID unused) {
             snprintf(r->note, sizeof r->note, "off at the start, left off");
             continue;
         }
+        progress(r->name);
         if (s.report) s.report(TRUE);
         set_flag(s.flag, 0);
         wait_ms(SETTLE_MS);
@@ -1369,6 +1491,7 @@ static DWORD WINAPI report_thread(LPVOID unused) {
                          "  and the screenshots. User and computer names are replaced.\n");
     text_printf(&report, "\nReport took %.0f s.\n", ms(now() - started) / 1000.0);
 
+    progress("packing the report");
     redact(&report);
     wchar_t path[MAX_PATH];
     temp_path(path, "report.txt");
@@ -1434,6 +1557,7 @@ void report_start(void) {
         return;
     }
     frame_count = 0;
+    overlay_version = 0;
     gpu_stop = gpu_stopped = 0;
     current_gpu_set = -1;
     SYSTEMTIME local;

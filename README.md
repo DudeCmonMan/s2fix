@@ -54,7 +54,9 @@ capture results and, if the game crashes, where. Captures also write thread and 
 ### Reporting a problem (the original game)
 
 1. In a battle, put the camera somewhere busy and keep it still.
-2. Press Ctrl+Shift+F6. You hear a beep. Don't touch the camera until the second beep, about 3 minutes later.
+2. Press Ctrl+Shift+F6. You hear a beep, and a banner in the middle of the screen shows "Snapshot Running", what it is
+   testing and how far along it is. Don't touch the camera until the banner goes away and you hear the second beep,
+   about 3 minutes later.
 3. Attach `perf-logs\report_<date-time>.zip` from the game folder to your issue.
 
 The report records your system (CPU, memory, GPUs and drivers, displays), the game's settings, the fixes and how they
