@@ -3,6 +3,7 @@
 #include "../s2module.h"
 #include <d3d11.h>
 #include <dxgi.h>
+#include <dxgi1_3.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <wchar.h>
@@ -20,6 +21,11 @@
 //   sync interval of 0 it needs DXGI_PRESENT_ALLOW_TEARING. Flip-model Present also unbinds the swap chain's buffers
 //   from the pipeline, so the targets bound before it are bound again after it, as the engine's state cache has them.
 // - ResizeBuffers keeps the flip chain's buffer count and flags.
+// - Frame latency: the engine never sets one, so DXGI queues up to 3 frames and Present blocks once the queue is full.
+//   With [flipmodel] latency=N the chain is made waitable; after each Present main waits until the queue has room for
+//   the next frame, at most N frames queued. A GPU spike then shows as that wait instead of a stall inside Present, and
+//   input latency drops. The latency switch (and Apply Fixes) A/Bs it against DXGI's 3 without the wait; the exported
+//   frame_latency can be patched live.
 #define CREATE_CALL_RVA 0x147c123
 #define PRESENT_RVA 0x1487180
 #define HRESULT_CHECK_RVA 0x13e0ef0
@@ -32,6 +38,12 @@
 #define FLAG_ALLOW_TEARING 2048
 #define PRESENT_ALLOW_TEARING 0x200
 #define FEATURE_PRESENT_ALLOW_TEARING 0
+#define DXGI_DEFAULT_LATENCY 3
+#define MAX_LATENCY 16
+// Long enough for the slowest frames seen (~100 ms while the camera moves), short enough that a missed signal can't hang.
+#define LATENCY_WAIT_MS 250
+#define LONG_WAIT_MS 5.0
+#define LATENCY_REPORT_MS 10000
 
 typedef BYTE(__attribute__((thiscall)) *PresentFn)(BYTE *device, void *a, void *b);
 typedef BYTE (*HresultCheckFn)(HRESULT result);
@@ -40,15 +52,27 @@ typedef HRESULT(STDMETHODCALLTYPE *ResizeBuffersFn)(IDXGISwapChain *swap_chain, 
 // IDXGIFactory5::CheckFeatureSupport is slot 28 (after IDXGIFactory4's 27 slots); mingw's dxgi.h lacks the interface.
 typedef HRESULT(STDMETHODCALLTYPE *CheckFeatureSupportFn)(void *factory, UINT feature, void *data, UINT size);
 static const GUID factory5_iid = {0x7632e1f5, 0xee65, 0x4dca, {0x87, 0xfd, 0x84, 0xcd, 0x75, 0xf8, 0x83, 0x8d}};
+static const GUID swap_chain2_iid = {0xa8be2ac4, 0x199f, 0x4946, {0xb3, 0x31, 0x79, 0x59, 0x9f, 0xb9, 0x8d, 0xe7}};
 
 static const BYTE create_call_expected[] = {0x8b, 0x02, 0x8b, 0x48, 0x28};
 static const BYTE present_prologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x96, 0xbc, 0x00, 0x00, 0x00};
 static const S2Api *api;
 static PresentFn original_present;
 static ResizeBuffersFn original_resize_buffers;
-static int buffer_count = 3, tearing_wanted = 1;
+static int buffer_count = 3, tearing_wanted = 1, latency_wanted = 2;
 static BOOL flip_active, tearing_active;
 static UINT flip_flags;
+
+__declspec(dllexport) volatile LONG latency_enabled = 1;
+__declspec(dllexport) volatile LONG frame_latency = 2;
+
+static IDXGISwapChain2 *latency_chain;
+static HANDLE latency_event;
+static UINT applied_latency;
+static struct {
+    LONGLONG since, waited, longest;
+    uint32_t frames, long_waits;
+} waits;
 
 HRESULT STDMETHODCALLTYPE create_swap_chain(IDXGIFactory *factory, IUnknown *device, DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **swap_chain);
 
@@ -97,6 +121,63 @@ static void hook_resize_buffers(IDXGISwapChain *swap_chain) {
     VirtualProtect(slot, sizeof *slot, protection, &protection);
 }
 
+static void setup_latency(IDXGISwapChain *swap_chain) {
+    if (latency_chain) IDXGISwapChain2_Release(latency_chain);
+    if (latency_event) CloseHandle(latency_event);
+    latency_chain = NULL;
+    latency_event = NULL;
+    applied_latency = 0;
+    if (!(flip_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)) return;
+    if (FAILED(IDXGISwapChain_QueryInterface(swap_chain, &swap_chain2_iid, (void **)&latency_chain))) {
+        latency_chain = NULL;
+        api->log_line("flipmodel: the swap chain has no IDXGISwapChain2; no frame latency wait");
+        return;
+    }
+    latency_event = IDXGISwapChain2_GetFrameLatencyWaitableObject(latency_chain);
+    if (!latency_event) {
+        IDXGISwapChain2_Release(latency_chain);
+        latency_chain = NULL;
+        api->log_line("flipmodel: no frame latency waitable object; no frame latency wait");
+        return;
+    }
+    api->log_line("flipmodel: frame latency %ld with a wait after each Present (the latency switch compares DXGI's %d without it)", (long)frame_latency,
+                  DXGI_DEFAULT_LATENCY);
+}
+
+static LONGLONG now_ticks(void) {
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return counter.QuadPart;
+}
+
+static double ticks_ms(LONGLONG ticks) {
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    return 1000.0 * (double)ticks / (double)frequency.QuadPart;
+}
+
+// On main after each Present, so the next frame starts once the queue has room for it.
+static void wait_for_frame_room(void) {
+    BOOL waiting = *api->fix_enabled && latency_enabled;
+    LONG latency = frame_latency < 1 ? 1 : frame_latency > MAX_LATENCY ? MAX_LATENCY : frame_latency;
+    UINT wanted = waiting ? (UINT)latency : DXGI_DEFAULT_LATENCY;
+    if (wanted != applied_latency && SUCCEEDED(IDXGISwapChain2_SetMaximumFrameLatency(latency_chain, wanted))) applied_latency = wanted;
+    if (!waiting) return;
+    LONGLONG before = now_ticks();
+    WaitForSingleObject(latency_event, LATENCY_WAIT_MS);
+    LONGLONG after = now_ticks(), waited = after - before;
+    if (!waits.since) waits.since = after;
+    waits.frames++;
+    waits.waited += waited;
+    if (waited > waits.longest) waits.longest = waited;
+    if (ticks_ms(waited) > LONG_WAIT_MS) waits.long_waits++;
+    if (ticks_ms(after - waits.since) >= LATENCY_REPORT_MS) {
+        api->log_line("flipmodel: latency %u: waited %.3f ms a frame over %u frames; %u waits over %.0f ms, the longest %.1f ms", applied_latency,
+                      ticks_ms(waits.waited) / waits.frames, waits.frames, waits.long_waits, LONG_WAIT_MS, ticks_ms(waits.longest));
+        memset(&waits, 0, sizeof waits);
+    }
+}
+
 HRESULT STDMETHODCALLTYPE create_swap_chain(IDXGIFactory *factory, IUnknown *device, DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **swap_chain) {
     CreateSwapChainFn create = (CreateSwapChainFn)(*(void ***)factory)[10];
     if (!desc->Windowed || desc->SampleDesc.Count != 1 || !flip_format(desc->BufferDesc.Format)) {
@@ -105,11 +186,17 @@ HRESULT STDMETHODCALLTYPE create_swap_chain(IDXGIFactory *factory, IUnknown *dev
     }
     DXGI_SWAP_CHAIN_DESC flip = *desc;
     tearing_active = tearing_wanted && tearing_supported(factory);
-    flip_flags = tearing_active ? FLAG_ALLOW_TEARING : 0;
+    flip_flags = (tearing_active ? FLAG_ALLOW_TEARING : 0) | (latency_wanted ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0);
     flip.SwapEffect = (DXGI_SWAP_EFFECT)FLIP_DISCARD;
     flip.BufferCount = (UINT)buffer_count;
-    flip.Flags |= flip_flags;
+    flip.Flags = desc->Flags | flip_flags;
     HRESULT result = create(factory, device, &flip, swap_chain);
+    if (FAILED(result) && latency_wanted) {
+        api->log_line("flipmodel: a waitable flip-model swap chain failed (0x%08lx); trying without the frame latency wait", (unsigned long)result);
+        flip_flags &= ~(UINT)DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        flip.Flags = desc->Flags | flip_flags;
+        result = create(factory, device, &flip, swap_chain);
+    }
     if (FAILED(result)) {
         api->log_line("flipmodel: CreateSwapChain with the flip model failed (0x%08lx); the blt model is kept", (unsigned long)result);
         tearing_active = FALSE;
@@ -118,6 +205,7 @@ HRESULT STDMETHODCALLTYPE create_swap_chain(IDXGIFactory *factory, IUnknown *dev
     }
     flip_active = TRUE;
     hook_resize_buffers(*swap_chain);
+    setup_latency(*swap_chain);
     api->log_line("flipmodel: %ux%u flip-model swap chain, %d buffers, tearing %s", flip.BufferDesc.Width, flip.BufferDesc.Height, buffer_count,
                   tearing_active ? "allowed" : tearing_wanted ? "not supported" : "off");
     return result;
@@ -143,6 +231,7 @@ static BYTE __attribute__((thiscall)) present_hook(BYTE *device, void *a, void *
             if (targets[i]) ID3D11RenderTargetView_Release(targets[i]);
         if (depth) ID3D11DepthStencilView_Release(depth);
     }
+    if (latency_chain && result != DXGI_STATUS_OCCLUDED) wait_for_frame_room();
     return ((HresultCheckFn)(api->engine + HRESULT_CHECK_RVA))(result);
 }
 
@@ -160,6 +249,10 @@ static void read_settings(void) {
     if (!GetPrivateProfileIntW(L"flipmodel", L"enabled", 1, path)) buffer_count = 0;
     else buffer_count = GetPrivateProfileIntW(L"flipmodel", L"buffers", 3, path);
     tearing_wanted = GetPrivateProfileIntW(L"flipmodel", L"tearing", 1, path) != 0;
+    latency_wanted = GetPrivateProfileIntW(L"flipmodel", L"latency", 2, path);
+    if (latency_wanted < 0) latency_wanted = 0;
+    if (latency_wanted > MAX_LATENCY) latency_wanted = MAX_LATENCY;
+    if (latency_wanted) frame_latency = latency_wanted;
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
@@ -175,5 +268,6 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     memcpy(call + 1, &offset, 4);
     const char *error = api->patch(api->engine + CREATE_CALL_RVA, create_call_expected, call, sizeof call);
     if (!error) error = api->hook(api->engine + PRESENT_RVA, present_prologue, sizeof present_prologue, (const void *)present_hook, (void **)&original_present);
+    if (!error && latency_wanted) api->register_switch("latency", &latency_enabled, NULL);
     return error;
 }

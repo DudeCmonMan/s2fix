@@ -134,6 +134,7 @@ before the device is made.
 | `[flipmodel] enabled` | 1 | at start: creates the swap chain with the flip model instead of the 2011 blt model; 0 keeps the game's |
 | `[flipmodel] buffers` | 3 | at start: flip-model back buffers, 2 to 4 |
 | `[flipmodel] tearing` | 1 | at start: allows tearing (an uncapped frame rate, variable refresh in a window) when Windows supports it |
+| `[flipmodel] latency` | 2 | at start: at most this many frames queued, waiting for room after each Present instead of blocking inside it; 0 keeps Windows' 3 |
 | `[window] borderless` | 0 | at start: 1 runs the game's windowed mode in a borderless window that covers its monitor, at the monitor's native resolution; set the game to windowed, not fullscreen |
 | `[window] clip_cursor` | 1 | with borderless: keeps the cursor on the game's monitor while the game has focus, so edge scrolling works with several monitors |
 | `[s2prof] console` | 0 | 1 opens a window that shows the log live |
@@ -154,7 +155,7 @@ before the device is made.
 | `extrasrecord` | records per-object extras in bulk instead of one call per index |
 | `imposterreuse` | reuses imposter uploads already in the geometry buffer this frame |
 | `portraitprep` | for the general's portrait, prepares only the portrait's own items and texture rows, not the whole battle again |
-| `buildingblock` | skips a loop in the building draw whose results are never used |
+| `buildingblock` | skips a loop in the building draw whose results are never used, and the damage ratio that decided it |
 | `entrysort` | replaces a per-entry sort whose comparator recomputed distances on every comparison |
 | `texturecache` | caches the HUD's per-quad texture-name lookups |
 | `uiprefetch` | prefetches the UI tree's next nodes during its update |
@@ -166,6 +167,7 @@ before the device is made.
 | `borderless` | with `[window] borderless=1`: borderless windowed mode at the monitor's native resolution (the game itself has only a framed window or exclusive fullscreen) |
 | `cpuplace` | keeps the game's threads on the CCD `[cpu] ccd` names |
 | `maincore` | keeps the game's other threads off the main thread's CPU core, so the main thread has the whole core |
+| `timerperiod` | holds Windows' 1 ms timer period, which the game otherwise switches on and off around every timestamp |
 
 ## Privacy and safety
 
