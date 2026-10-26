@@ -911,6 +911,13 @@ static DWORD open_console(void) {
     return ERROR_SUCCESS;
 }
 
+// Set once the fixes are installed, for an offline check that drives engine functions only after that.
+static HANDLE ready_event;
+
+__declspec(dllexport) BOOL s2prof_wait_ready(DWORD milliseconds) {
+    return ready_event && WaitForSingleObject(ready_event, milliseconds) == WAIT_OBJECT_0;
+}
+
 static DWORD WINAPI controller(LPVOID unused) {
     (void)unused;
     DWORD console_error = open_console();
@@ -923,6 +930,7 @@ static DWORD WINAPI controller(LPVOID unused) {
     load_modules(fixes_dir);
     set_apply_fixes(TRUE);
     log_help();
+    SetEvent(ready_event);
     for (;;) {
         Sleep(50);
         if (hotkey_pressed(VK_F10)) toggle_apply_fixes();
@@ -938,6 +946,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_DETACH && reserved) log_line("process exiting through ExitProcess");
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(instance);
+    ready_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     GetModuleFileNameW(instance, output_dir, MAX_PATH);
     wcscpy(fixes_dir, output_dir);
     wcscpy(wcsrchr(fixes_dir, L'\\'), L"\\fixes");

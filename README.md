@@ -85,6 +85,7 @@ fixes\           one DLL per fix
 | `overhaul` | spreads the draw submission of the heavy views over worker threads (D3D11 deferred contexts, replayed in order) |
 | `batchsplit` | splits large render-item batches into ordered chunks on helper threads |
 | `walksplit` | runs the draw-time batching walk's filtering and LOD picks on helper threads |
+| `contention` | stops idle helper threads from crowding out the overhaul's workers when the game's threads share one CCD: the workers run above normal priority, and the helpers spin only briefly before sleeping |
 | `entrysort` | replaces a per-entry sort whose comparator recomputed distances on every comparison |
 | `tiegroup` | sorts tied render items so instanced draws group properly |
 | `extrasrecord` | records per-object extras in bulk instead of one call per index |

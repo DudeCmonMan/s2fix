@@ -1,6 +1,7 @@
 #define _WIN32_WINNT 0x0A00
 #define COBJMACROS
 #include "../s2module.h"
+#include "../spinwait.h"
 #include <initguid.h>
 #include <d3d11_4.h>
 #include <intrin.h>
@@ -486,6 +487,7 @@ struct Worker {
     __attribute__((aligned(16))) BYTE group_mesh[GROUP_MESH_VIEW_SIZE];
     // The mesh group_mesh is a view of for the current job, or NULL.
     BYTE *group_mesh_of;
+    BOOL boosted;
 };
 
 typedef struct {
@@ -584,6 +586,11 @@ __declspec(dllexport) volatile LONG overhaul_enabled = 1;
 // on main), the view types to split (bit per VIEW_TYPE), and the fewest groups worth splitting. By default the shadow
 // cascades, both GBUFFER views, decals and both effects views split, on 3 workers.
 __declspec(dllexport) volatile LONG overhaul_workers = 3;
+// Set by the contention fix: main waits on the workers, so they run above normal priority and wake straight onto a CPU
+// instead of queueing behind spinning pool threads. Boosted, they spin only briefly before sleeping, so their idle spin
+// doesn't push other threads off.
+__declspec(dllexport) volatile LONG overhaul_worker_priority;
+__declspec(dllexport) volatile LONG overhaul_spin_us = 50;
 __declspec(dllexport) volatile uint64_t overhaul_views = 1ull << 0x1 | 1ull << 0xe | 1ull << 0xf | 1ull << 0x16 | 1ull << 0x17 | 1ull << 0x19;
 __declspec(dllexport) volatile LONG overhaul_min_jobs = 32;
 // Bit per shadow cascade index that may split; percent of a worker's share of the groups that main takes (main also
@@ -3013,7 +3020,17 @@ static DWORD WINAPI worker_main(LPVOID parameter) {
     // Main may kick this worker's first range before the thread runs, so it starts from the generation main saw.
     LONG seen = worker->started_at_generation;
     for (;;) {
-        for (int spin = 0; generation == seen && spin < WORKER_SPIN_ROUNDS; spin++) _mm_pause();
+        BOOL boosted = overhaul_worker_priority && overhaul_enabled;
+        if (boosted != worker->boosted) {
+            SetThreadPriority(GetCurrentThread(), boosted ? THREAD_PRIORITY_ABOVE_NORMAL : THREAD_PRIORITY_NORMAL);
+            worker->boosted = boosted;
+        }
+        if (boosted) {
+            LONGLONG deadline = spin_deadline(overhaul_spin_us);
+            for (int spin = 0; generation == seen && !spin_expired(spin, deadline); spin++) _mm_pause();
+        } else {
+            for (int spin = 0; generation == seen && spin < WORKER_SPIN_ROUNDS; spin++) _mm_pause();
+        }
         while (generation == seen) WaitOnAddress(&generation, &seen, sizeof seen, INFINITE);
         seen = generation;
         if (worker->task) {
