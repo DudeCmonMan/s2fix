@@ -125,6 +125,18 @@ fixes\           one DLL per fix
 The game loads `d3d11.dll` only in DirectX 11 mode, as it creates its device. The proxy waits until the fixes are installed
 before the device is made.
 
+### Borderless windowed
+
+The game itself only has a framed window or exclusive fullscreen. s2fix can run it borderless instead, covering the
+whole monitor at its native resolution:
+
+1. In the game's options, choose windowed mode.
+2. In `s2prof.ini`, set `borderless=1` under `[window]`.
+3. Restart the game.
+
+The cursor stays on the game's monitor while the game has focus, so edge scrolling works with several monitors.
+Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
+
 ### Settings (`s2prof.ini`)
 
 | Key | Default | Meaning |
@@ -155,7 +167,7 @@ before the device is made.
 | `extrasrecord` | records per-object extras in bulk instead of one call per index |
 | `imposterreuse` | reuses imposter uploads already in the geometry buffer this frame |
 | `portraitprep` | for the general's portrait, prepares only the portrait's own items and texture rows, not the whole battle again |
-| `buildingblock` | skips a loop in the building draw whose results are never used, and the damage ratio that decided it |
+| `buildingblock` | skips work the building draw throws away every frame: a loop over each building piece's neighbours, and the value that decided it (most noticeable in sieges and towns) |
 | `entrysort` | replaces a per-entry sort whose comparator recomputed distances on every comparison |
 | `texturecache` | caches the HUD's per-quad texture-name lookups |
 | `uiprefetch` | prefetches the UI tree's next nodes during its update |
@@ -163,7 +175,7 @@ before the device is made.
 | `luagc` | steps the shared Lua heap's collector once per frame instead of once per Lua state |
 | `focuscache` | asks Windows for the foreground window once per frame instead of on every key query |
 | `scenelock` | spins longer on the unit emission lock instead of sleeping in the kernel |
-| `flipmodel` | creates the swap chain with the flip model, which avoids the 2011 blt model's Present stalls |
+| `flipmodel` | replaces the game's 2011 swap chain, which copies every frame through the desktop compositor and stalls now and then, with a flip-model one: no stalls, tearing allowed (an uncapped frame rate, variable refresh in a window), and at most two frames queued for lower input lag |
 | `borderless` | with `[window] borderless=1`: borderless windowed mode at the monitor's native resolution (the game itself has only a framed window or exclusive fullscreen) |
 | `cpuplace` | keeps the game's threads on the CCD `[cpu] ccd` names |
 | `maincore` | keeps the game's other threads off the main thread's CPU core, so the main thread has the whole core |
@@ -186,7 +198,7 @@ To build yourself, put both MinGW-w64 compilers on the path (`x86_64-w64-mingw32
 ./build.sh       builds both games: shogun2ce/ and shogun2og/
 ./package.sh     builds, then writes dist/s2fix_shogun2_complete-edition_<version>.zip and
                  dist/s2fix_shogun2_original_<version>.zip
-                 (VERSION=v0.2.0 names them; a local build gets a timestamp)
+                 (VERSION=v0.2.1 names them; a local build gets a timestamp)
 ```
 
 Each game's folder also has its own `build.sh` and `package.sh`. The sort tests are in `shogun2ce/tests/` and
