@@ -54,10 +54,10 @@ static AllocatorFn original_allocator;
 static Upload uploads[1 << SLOT_BITS];
 static Holder holders[MAX_HOLDERS];
 static int holder_count;
-// The tables belong to the thread that runs the geometry path, main (execute). An allocation on any other thread
-// counts as foreign and retires every recorded upload, since its holder's epoch could not be tracked safely.
-static volatile DWORD main_thread;
-static volatile LONG foreign_allocations;
+// The tables belong to the main thread (the one that presents). The overhaul's workers run the geometry path too, into
+// ring clones that every command list discards and refills, so an upload is never reused off main. An allocation on any
+// other thread counts as foreign and retires every recorded upload, since its holder's epoch could not be tracked.
+static volatile LONG foreign_allocations, first_caller_logged;
 
 static void *method(void *object, int offset) {
     return (*(void ***)object)[offset / 4];
@@ -75,6 +75,7 @@ static Holder *holder_of(BYTE *holder) {
 
 static void *__attribute__((thiscall)) allocator_hook(BYTE *holder, void *result, void *renderer, uint32_t bytes, uint32_t size, uint32_t *start,
                                                       uint32_t stride, uint32_t map) {
+    DWORD main_thread = *api->main_thread;
     if (GetCurrentThreadId() != main_thread) {
         if (main_thread) InterlockedIncrement(&foreign_allocations);
         return original_allocator(holder, result, renderer, bytes, size, start, stride, map);
@@ -137,8 +138,10 @@ static BYTE reuse_or_upload(void *self, void *renderer, BYTE *generator, BYTE *s
 }
 
 static BYTE __attribute__((thiscall)) geometry_hook(void *self, void *renderer, BYTE *generator, BYTE *streams, uint32_t fill) {
-    if (!main_thread) main_thread = GetCurrentThreadId();
-    if (GetCurrentThreadId() != main_thread || !*api->fix_enabled || !reuse_enabled) return original_geometry(self, renderer, generator, streams, fill);
+    DWORD self_thread = GetCurrentThreadId(), main_thread = *api->main_thread;
+    if (main_thread && !InterlockedExchange(&first_caller_logged, 1))
+        api->log_line("imposterreuse: the first imposter draw ran on %s", self_thread == main_thread ? "the main thread" : "another thread (an overhaul worker?)");
+    if (self_thread != main_thread || !*api->fix_enabled || !reuse_enabled) return original_geometry(self, renderer, generator, streams, fill);
     return reuse_or_upload(self, renderer, generator, streams, fill);
 }
 
@@ -155,6 +158,7 @@ static void report(BOOL start) {
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     api = host;
+    if (!api->main_thread) return "the host is older than this module (no main_thread)";
     if (!s2_prologue_ready(api->engine + GEOMETRY_RVA, geometry_prologue, sizeof geometry_prologue) ||
         !s2_prologue_ready(api->engine + ALLOCATOR_RVA, allocator_prologue, sizeof allocator_prologue))
         return "the geometry path or the ring allocator differs from the analysed build";
