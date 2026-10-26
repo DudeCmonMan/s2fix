@@ -455,8 +455,16 @@ static void set_overlay(const char *stage, int percent) {
     InterlockedIncrement(&overlay_version);
 }
 
+// The banner follows the back buffer, the resolution the game renders at: text 1/20 of its height, 70% of its width.
+static void overlay_size(const D3D11_TEXTURE2D_DESC *target, UINT *font_height, UINT *width, UINT *height) {
+    *font_height = target->Height / 20 < 24 ? 24 : target->Height / 20;
+    *width = target->Width * 7 / 10;
+    *height = *font_height * 2;
+}
+
 static void render_overlay(ID3D11DeviceContext *context, const D3D11_TEXTURE2D_DESC *target) {
-    UINT font_height = target->Height / 20 < 24 ? 24 : target->Height / 20, width = target->Width * 7 / 10, height = font_height * 2;
+    UINT font_height, width, height;
+    overlay_size(target, &font_height, &width, &height);
     if (width < 64 || height > target->Height) return;
     if (!overlay_texture || overlay_width != width || overlay_height != height || overlay_format != target->Format) {
         if (overlay_texture) ID3D11Texture2D_Release(overlay_texture);
@@ -517,7 +525,9 @@ static void draw_overlay(ID3D11DeviceContext *context) {
     ID3D11Texture2D_GetDesc(back, &desc);
     if (desc.SampleDesc.Count == 1 && readable_format(desc.Format)) {
         LONG version = overlay_version;
-        if (version != overlay_drawn_version || !overlay_texture || overlay_format != desc.Format || overlay_width != desc.Width * 7 / 10) {
+        UINT font_height, width, height;
+        overlay_size(&desc, &font_height, &width, &height);
+        if (version != overlay_drawn_version || !overlay_texture || overlay_format != desc.Format || overlay_width != width || overlay_height != height) {
             render_overlay(context, &desc);
             overlay_drawn_version = version;
         }
