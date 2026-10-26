@@ -1,4 +1,5 @@
 # Built by build.sh and package.sh.
 *.dll
 /dist/
-proxy/d3d11.def
+shogun2ce/proxy/d3d11.def
+shogun2og/proxy/dinput8.def

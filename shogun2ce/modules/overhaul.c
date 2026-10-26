@@ -577,7 +577,7 @@ typedef struct {
     LONGLONG ticks;
 } ViewStats;
 
-// On from the start; Ctrl+Shift+F7 toggles it.
+// On from the start; the host keeps it equal to Apply Fixes (Ctrl+Shift+F10).
 __declspec(dllexport) volatile LONG overhaul_enabled = 1;
 // Settings read live, so they can be changed while the game runs: workers beside main (0 runs the range path serially
 // on main), the view types to split (bit per VIEW_TYPE), and the fewest groups worth splitting. By default the shadow

@@ -1,7 +1,7 @@
 name: build
 
-# Every push and pull request builds the fixes and runs the sort test. A version tag (v0.1.0) also creates a draft
-# release with the zip, to be tested in game before it is published.
+# Every push and pull request builds the fixes for both games and runs the sort tests. A version tag (v0.2.0) also creates
+# a draft release with both zips, to be tested in game before it is published.
 on:
   push:
     branches: [main]
@@ -18,23 +18,34 @@ jobs:
       run:
         shell: bash
     env:
-      # The compiler the releases are built and tested with: WinLibs GCC 16.2.0, POSIX threads, MSVCRT, r2.
+      # The compilers the releases are built and tested with: WinLibs GCC 16.2.0, POSIX threads, MSVCRT, r2; x86_64 for the
+      # Complete Edition, i686 for the original 32-bit game.
       WINLIBS_URL: https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-msvcrt-r2/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64msvcrt-14.0.0-r2.zip
       WINLIBS_SHA256: 1b90ec73c96e6905a913746b56fb6b20122422787029810d3afc6a3b440f2322
+      WINLIBS_I686_URL: https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-msvcrt-r2/winlibs-i686-posix-dwarf-gcc-16.2.0-mingw-w64msvcrt-14.0.0-r2.zip
+      WINLIBS_I686_SHA256: f1fab67fbe6ed1b0a390d06db6af8b4f0ca25fceab4f51bac2a88af8b81a93ec
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install the compiler
+      - name: Install the compilers
         run: |
           curl -sSfL -o "$RUNNER_TEMP/winlibs.zip" "$WINLIBS_URL"
           echo "$WINLIBS_SHA256  $RUNNER_TEMP/winlibs.zip" | sha256sum -c -
           7z x -y -bd -o"$RUNNER_TEMP/winlibs" "$RUNNER_TEMP/winlibs.zip" > /dev/null
           cygpath -w "$RUNNER_TEMP/winlibs/mingw64/bin" >> "$GITHUB_PATH"
+          curl -sSfL -o "$RUNNER_TEMP/winlibs-i686.zip" "$WINLIBS_I686_URL"
+          echo "$WINLIBS_I686_SHA256  $RUNNER_TEMP/winlibs-i686.zip" | sha256sum -c -
+          7z x -y -bd -o"$RUNNER_TEMP/winlibs-i686" "$RUNNER_TEMP/winlibs-i686.zip" > /dev/null
+          cygpath -w "$RUNNER_TEMP/winlibs-i686/mingw32/bin" >> "$GITHUB_PATH"
 
-      - name: Sort test
+      - name: Sort tests
         run: |
-          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -I. -o "$RUNNER_TEMP/test_itemsort.exe" tests/test_itemsort.c
-          "$RUNNER_TEMP/test_itemsort.exe"
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Ishogun2ce -o "$RUNNER_TEMP/test_itemsort_ce.exe" shogun2ce/tests/test_itemsort.c
+          "$RUNNER_TEMP/test_itemsort_ce.exe"
+          i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -msse2 -mfpmath=sse -Ishogun2og -o "$RUNNER_TEMP/test_itemsort_og.exe" shogun2og/tests/test_itemsort.c
+          "$RUNNER_TEMP/test_itemsort_og.exe"
+          i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -msse2 -mfpmath=sse -Ishogun2og -o "$RUNNER_TEMP/test_entrysort_og.exe" shogun2og/tests/test_entrysort.c
+          "$RUNNER_TEMP/test_entrysort_og.exe"
 
       - name: Build and package
         run: |
@@ -65,4 +76,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/*.zip --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "s2fix $GITHUB_REF_NAME" \
-            --notes "Built from $GITHUB_REF_NAME ($GITHUB_SHA) with WinLibs GCC 16.2.0. Unzip into the game folder, next to shogun2_complete_edition.exe; see the README."
+            --notes "Built from $GITHUB_REF_NAME ($GITHUB_SHA) with WinLibs GCC 16.2.0. s2fix_shogun2ce is for Shogun 2 - Complete Edition (unzip next to shogun2_complete_edition.exe), s2fix_shogun2og for the original Shogun 2 (unzip next to Shogun2.exe); see the README."

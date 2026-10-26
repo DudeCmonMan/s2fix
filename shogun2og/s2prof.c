@@ -12,10 +12,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #include <wchar.h>
 #include "s2module.h"
-#include "sortfix.h"
+#include "hook.h"
 
 #define CAPTURE_SECONDS 20
 #define PROGRESS_SECONDS 5
@@ -25,6 +24,10 @@
 #define MAX_THREADS 512
 #define MAX_MODULES 1024
 #define MAX_DEPTH 64
+// Without unwind data the profiler scans the stack for return addresses; deeper scans find more frames and cost more.
+#define FULL_RATE_SCAN_BYTES (32 * 1024)
+#define OTHER_SCAN_BYTES (8 * 1024)
+#define MAX_EXEC_RANGES 4
 #define INDEX_SIZE (1u << 20)
 #define TOP_OTHER_THREADS 6
 #define TOP_MODULES 5
@@ -33,16 +36,31 @@
 #define THREAD_WIN32_START_ADDRESS_CLASS 9
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
 #define MAX_SWITCHES 64
-#define HOTKEY_SWITCH "overhaul"
 #define MAX_CRASH_REPORTS 8
 #define CPP_EXCEPTION_CODE 0xe06d7363u
-#define ENGINE_MODULE L"empire.retail.x64.dll"
-// The frame tick stores each frame's timestamp at this global; counting its changes counts frames without hooking.
-#define FRAME_STAMP_STORE_RVA 0x161fd1
-#define FRAME_STAMP_RVA 0x2ead830
-static const BYTE frame_stamp_store[] = {0x48, 0x89, 0x05, 0x58, 0xb8, 0xd4, 0x02};
+#define ENGINE_MODULE L"empire.retail.dll"
+// The analysed build: the May 2023 Steam update.
+#define ENGINE_TIMESTAMP 0x645e92bbu
+#define ENGINE_IMAGE_SIZE 0x1d88000u
+// Frame::present (g_engine vtbl+0x28c, thiscall) presents once a frame, for DX9 and DX11 alike.
+#define PRESENT_RVA 0x1401ce0
+static const BYTE present_prologue[] = {0xff, 0x81, 0xcc, 0x9c, 0x06, 0x00};
+// The main tick stores each tick's timestamp at this u64 (low dword first); counting its changes counts frames.
+#define FRAME_STAMP_STORE_RVA 0xb68d0
+#define FRAME_STAMP_RVA 0x17cc340
+static const BYTE frame_stamp_store[] = {0xa3, 0x40, 0xc3, 0x7c, 0x11};
+// g_device holds the D3D11 or the D3D9 render device; their vtables tell the two apart.
+#define DEVICE_GLOBAL_RVA 0x1c9a93c
+#define D3D11_DEVICE_VTABLE_RVA 0x17666f8
+#define D3D9_DEVICE_VTABLE_RVA 0x1766c68
+#define DX9_MESSAGE L"This fix does not support DirectX 9 mode. Please run Shogun 2 in DirectX 11."
+// The main D3D11CreateDevice call pushes Flags = D3D11_CREATE_DEVICE_SINGLETHREADED, which forbids deferred contexts.
+#define DEVICE_FLAGS_PUSH_RVA 0x145fe67
+static const BYTE single_threaded_flags_push[] = {0x6a, 0x01};
+static const BYTE no_flags_push[] = {0x6a, 0x00};
 static const char *const mode_names[2] = {"off", "on"};
 
+// The 32-bit layouts WOW64 returns.
 typedef struct {
     LARGE_INTEGER kernel_time, user_time, create_time;
     ULONG wait_time;
@@ -54,15 +72,15 @@ typedef struct {
 
 typedef struct {
     ULONG next_entry_offset, thread_count;
-    BYTE skipped_before_pid[0x48];
+    BYTE skipped_before_pid[0x3c];
     HANDLE process_id;
-    BYTE skipped_before_threads[0xa8];
+    BYTE skipped_before_threads[0x70];
     SystemThread threads[];
 } SystemProcess;
 
-_Static_assert(sizeof(SystemThread) == 0x50, "SYSTEM_THREAD_INFORMATION layout");
-_Static_assert(offsetof(SystemProcess, process_id) == 0x50, "SYSTEM_PROCESS_INFORMATION layout");
-_Static_assert(offsetof(SystemProcess, threads) == 0x100, "SYSTEM_PROCESS_INFORMATION layout");
+_Static_assert(sizeof(SystemThread) == 0x40, "SYSTEM_THREAD_INFORMATION layout");
+_Static_assert(offsetof(SystemProcess, process_id) == 0x44, "SYSTEM_PROCESS_INFORMATION layout");
+_Static_assert(offsetof(SystemProcess, threads) == 0xb8, "SYSTEM_PROCESS_INFORMATION layout");
 
 typedef struct {
     LONG exit_status;
@@ -73,6 +91,7 @@ typedef struct {
 } ThreadBasicInfo;
 
 typedef HRESULT(WINAPI *GetThreadDescriptionFn)(HANDLE, PWSTR *);
+typedef BYTE(__attribute__((thiscall)) *PresentFn)(BYTE *engine);
 
 typedef struct {
     const char *name;
@@ -93,6 +112,8 @@ typedef struct {
 
 typedef struct {
     uintptr_t base, end;
+    uintptr_t exec_begin[MAX_EXEC_RANGES], exec_end[MAX_EXEC_RANGES];
+    int exec_count;
     char name[64];
 } Module;
 
@@ -108,13 +129,15 @@ typedef struct {
     double seconds[2], tsc_hz;
 } CaptureStats;
 
+volatile LONG fixes_enabled;
 static wchar_t output_dir[MAX_PATH], fixes_dir[MAX_PATH], config_path[MAX_PATH];
 static HANDLE console_output;
 static volatile LONG crash_reports;
 static char run_id[32];
 static int capture_number = 1;
-static volatile ULONG64 *frame_stamp;
-static const char *sortfix_error = "not installed yet";
+static BYTE *engine;
+static BOOL engine_is_analysed_build;
+static volatile uint32_t *frame_stamp;
 static BOOL hotkey_was_down[256];
 static Thread threads[MAX_THREADS];
 static int thread_count;
@@ -126,8 +149,13 @@ static size_t entry_count, entry_capacity;
 static uintptr_t *frame_pool;
 static size_t frame_pool_count, frame_pool_capacity;
 static uint32_t *stack_index;
+static BYTE *stack_copy;
 static Switch switches[MAX_SWITCHES] = {{"fixes", &fixes_enabled, NULL}};
 static int switch_count = 1;
+static PresentFn original_present;
+static const char *present_error = "not installed yet";
+static volatile DWORD main_thread_id;
+static const char *renderer_name = "no render device yet";
 
 static void output_path(wchar_t *path, const char *name) {
     char file[MAX_PATH];
@@ -170,17 +198,28 @@ static void log_line(const char *format, ...) {
 
 static void find_frame_stamp(void) {
     if (frame_stamp) return;
-    BYTE *engine = (BYTE *)GetModuleHandleW(ENGINE_MODULE);
-    if (engine && !memcmp(engine + FRAME_STAMP_STORE_RVA, frame_stamp_store, sizeof frame_stamp_store)) {
-        frame_stamp = (volatile ULONG64 *)(engine + FRAME_STAMP_RVA);
+    if (engine && code_matches(engine + FRAME_STAMP_STORE_RVA, frame_stamp_store, sizeof frame_stamp_store)) {
+        frame_stamp = (volatile uint32_t *)(engine + FRAME_STAMP_RVA);
         return;
     }
-    log_line("FPS counter disabled: %s", engine ? "engine code differs from the analysed build" : "empire.retail.x64.dll not loaded");
+    log_line("FPS counter disabled: %s", engine ? "engine code differs from the analysed build" : "empire.retail.dll not loaded");
 }
 
 static int compare_modules(const void *a, const void *b) {
     uintptr_t x = ((const Module *)a)->base, y = ((const Module *)b)->base;
     return x < y ? -1 : x > y;
+}
+
+static void read_exec_ranges(Module *module) {
+    const BYTE *base = (const BYTE *)module->base;
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + ((const IMAGE_DOS_HEADER *)base)->e_lfanew);
+    const IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    module->exec_count = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections && module->exec_count < MAX_EXEC_RANGES; i++, section++)
+        if (section->Characteristics & IMAGE_SCN_MEM_EXECUTE) {
+            module->exec_begin[module->exec_count] = module->base + section->VirtualAddress;
+            module->exec_end[module->exec_count++] = module->base + section->VirtualAddress + section->Misc.VirtualSize;
+        }
 }
 
 static BOOL collect_modules(void) {
@@ -201,6 +240,7 @@ static BOOL collect_modules(void) {
         modules[i].base = (uintptr_t)info.lpBaseOfDll;
         modules[i].end = modules[i].base + info.SizeOfImage;
         GetModuleBaseNameA(GetCurrentProcess(), handles[i], modules[i].name, sizeof modules[i].name);
+        read_exec_ranges(&modules[i]);
     }
     qsort(modules, module_count, sizeof *modules, compare_modules);
     return TRUE;
@@ -219,8 +259,8 @@ static const Module *module_of(uintptr_t address) {
 
 static void format_address(char *out, size_t size, uintptr_t address) {
     const Module *module = module_of(address);
-    if (module) snprintf(out, size, "%s+0x%llx", module->name, (unsigned long long)(address - module->base));
-    else snprintf(out, size, "0x%llx", (unsigned long long)address);
+    if (module) snprintf(out, size, "%s+0x%lx", module->name, (unsigned long)(address - module->base));
+    else snprintf(out, size, "0x%lx", (unsigned long)address);
 }
 
 static uintptr_t main_entry_point(void) {
@@ -271,7 +311,7 @@ static BOOL collect_threads(void) {
         NtQueryInformationThread(handle, (THREADINFOCLASS)THREAD_WIN32_START_ADDRESS_CLASS, &thread->start_address, sizeof thread->start_address, NULL);
         thread->is_main = thread->start_address == entry_point;
         read_thread_name(thread);
-        // Overhaul workers do main-thread work, so they are sampled at main's rate.
+        // Workers of a future parallel renderer do main-thread work, so they would be sampled at main's rate.
         thread->full_rate = thread->is_main || !strncmp(thread->name, "overhaul", 8);
         thread_count++;
     }
@@ -333,22 +373,38 @@ static BOOL accumulate_counters(int mode) {
     return TRUE;
 }
 
-// Bounded by the thread's own stack: a bad unwind on a foreign stack must not read past it.
-static int unwind_frames(CONTEXT context, uintptr_t stack_base, uintptr_t *frames) {
+static BOOL in_exec_range(const Module *module, uintptr_t address) {
+    for (int i = 0; i < module->exec_count; i++)
+        if (address >= module->exec_begin[i] + 8 && address < module->exec_end[i]) return TRUE;
+    return FALSE;
+}
+
+// A return address follows a call: rel32, through a register, or through memory (absolute, [reg], [reg+disp], SIB forms).
+static BOOL follows_call(const BYTE *code) {
+    if (code[-5] == 0xe8) return TRUE;
+    if (code[-2] == 0xff && (code[-1] & 0xf8) == 0xd0) return TRUE;
+    if (code[-6] == 0xff && (code[-5] == 0x15 || (code[-5] & 0xf8) == 0x90)) return TRUE;
+    if (code[-3] == 0xff && (code[-2] & 0xf8) == 0x50) return TRUE;
+    if (code[-2] == 0xff && (code[-1] & 0xf8) == 0x10 && (code[-1] & 7) != 4 && (code[-1] & 7) != 5) return TRUE;
+    if (code[-3] == 0xff && code[-2] == 0x14) return TRUE;
+    if (code[-4] == 0xff && code[-3] == 0x54) return TRUE;
+    if (code[-7] == 0xff && code[-6] == 0x94) return TRUE;
+    return FALSE;
+}
+
+// There is no unwind data and the engine omits frame pointers, so the frames are the stack slots that hold a return address.
+static int scan_frames(uintptr_t eip, uintptr_t esp, uintptr_t stack_base, size_t scan_bytes, uintptr_t *frames) {
     int depth = 0;
-    while (depth < MAX_DEPTH && context.Rip && context.Rsp < stack_base - 8) {
-        frames[depth++] = context.Rip;
-        if (!module_of(context.Rip)) break;
-        DWORD64 image_base;
-        PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &image_base, NULL);
-        if (!function) {
-            context.Rip = *(DWORD64 *)context.Rsp;
-            context.Rsp += 8;
-            continue;
-        }
-        PVOID handler_data;
-        DWORD64 establisher_frame;
-        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, function, &context, &handler_data, &establisher_frame, NULL);
+    frames[depth++] = eip;
+    if (esp & 3 || esp >= stack_base) return depth;
+    size_t bytes = stack_base - esp;
+    if (bytes > scan_bytes) bytes = scan_bytes;
+    SIZE_T copied = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), (void *)esp, stack_copy, bytes, &copied)) return depth;
+    const uintptr_t *slots = (const uintptr_t *)stack_copy;
+    for (size_t i = 0; i < copied / sizeof *slots && depth < MAX_DEPTH; i++) {
+        const Module *module = module_of(slots[i]);
+        if (module && in_exec_range(module, slots[i]) && follows_call((const BYTE *)slots[i])) frames[depth++] = slots[i];
     }
     return depth;
 }
@@ -356,7 +412,7 @@ static int unwind_frames(CONTEXT context, uintptr_t stack_base, uintptr_t *frame
 static int walk_stack(const Thread *thread, uintptr_t *frames) {
     CONTEXT context = {.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER};
     if (!GetThreadContext(thread->handle, &context)) return 0;
-    return unwind_frames(context, thread->stack_base, frames);
+    return scan_frames(context.Eip, context.Esp, thread->stack_base, thread->full_rate ? FULL_RATE_SCAN_BYTES : OTHER_SCAN_BYTES, frames);
 }
 
 // Error-severity NTSTATUS codes and MSVC C++ exceptions; informational ones (thread naming, debug prints) are skipped.
@@ -367,14 +423,14 @@ static BOOL is_reported(DWORD code) {
 #define DUMPED_BYTES 64
 
 // The bytes a register points at, when that is committed readable memory: the objects the faulting code was using.
-static void log_memory(const char *name, DWORD64 address) {
+static void log_memory(const char *name, DWORD address) {
     MEMORY_BASIC_INFORMATION region;
-    if (!VirtualQuery((void *)address, &region, sizeof region) || region.State != MEM_COMMIT || (region.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
+    if (!VirtualQuery((void *)(uintptr_t)address, &region, sizeof region) || region.State != MEM_COMMIT || (region.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
         !(region.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) ||
-        address + DUMPED_BYTES > (DWORD64)region.BaseAddress + region.RegionSize)
+        address + DUMPED_BYTES > (uintptr_t)region.BaseAddress + region.RegionSize)
         return;
     char text[DUMPED_BYTES * 3 + 1];
-    for (int i = 0; i < DUMPED_BYTES; i++) snprintf(text + 3 * i, 4, "%02x ", ((const BYTE *)address)[i]);
+    for (int i = 0; i < DUMPED_BYTES; i++) snprintf(text + 3 * i, 4, "%02x ", ((const BYTE *)(uintptr_t)address)[i]);
     log_line("  [%s] %s", name, text);
 }
 
@@ -391,19 +447,18 @@ static LONG CALLBACK report_crash(EXCEPTION_POINTERS *pointers) {
     snprintf(name, sizeof name, "%s", self.name);
     log_line("CRASH: exception 0x%08lx at %s on thread %lu \"%s\"", record->ExceptionCode, where, GetCurrentThreadId(), name);
     if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2)
-        log_line("  %s address 0x%llx", record->ExceptionInformation[0] == 0 ? "reading" : record->ExceptionInformation[0] == 1 ? "writing" : "executing",
-                 (unsigned long long)record->ExceptionInformation[1]);
+        log_line("  %s address 0x%lx", record->ExceptionInformation[0] == 0 ? "reading" : record->ExceptionInformation[0] == 1 ? "writing" : "executing",
+                 (unsigned long)record->ExceptionInformation[1]);
     const CONTEXT *c = pointers->ContextRecord;
-    log_line("  rax %llx rbx %llx rcx %llx rdx %llx rsi %llx rdi %llx rbp %llx", c->Rax, c->Rbx, c->Rcx, c->Rdx, c->Rsi, c->Rdi, c->Rbp);
-    log_line("  r8 %llx r9 %llx r10 %llx r11 %llx r12 %llx r13 %llx r14 %llx r15 %llx rsp %llx", c->R8, c->R9, c->R10, c->R11, c->R12, c->R13, c->R14,
-             c->R15, c->Rsp);
-    const char *names[] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "r8", "r9", "r12", "r13", "r14", "r15"};
-    const DWORD64 values[] = {c->Rax, c->Rbx, c->Rcx, c->Rdx, c->Rsi, c->Rdi, c->Rbp, c->R8, c->R9, c->R12, c->R13, c->R14, c->R15};
+    log_line("  eax %lx ebx %lx ecx %lx edx %lx esi %lx edi %lx ebp %lx esp %lx eip %lx", c->Eax, c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi, c->Ebp, c->Esp,
+             c->Eip);
+    const char *names[] = {"eax", "ebx", "ecx", "edx", "esi", "edi", "ebp"};
+    const DWORD values[] = {c->Eax, c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi, c->Ebp};
     for (size_t i = 0; i < sizeof values / sizeof *values; i++) log_memory(names[i], values[i]);
     ULONG_PTR stack_low, stack_high;
     GetCurrentThreadStackLimits(&stack_low, &stack_high);
     uintptr_t frames[MAX_DEPTH];
-    int depth = unwind_frames(*c, stack_high, frames);
+    int depth = stack_copy ? scan_frames(c->Eip, c->Esp, stack_high, FULL_RATE_SCAN_BYTES, frames) : 0;
     for (int i = 0; i < depth; i++) {
         char frame[128];
         format_address(frame, sizeof frame, frames[i]);
@@ -437,7 +492,7 @@ static BOOL append_stack(uint32_t key, const uintptr_t *frames, int depth) {
     return TRUE;
 }
 
-// Stacks are keyed by thread index and sort-fix mode, so one capture holds separate profiles for each mode.
+// Stacks are keyed by thread index and mode, so one capture holds separate profiles for each mode.
 static BOOL record_stack(uint32_t key, const uintptr_t *frames, int depth) {
     if (entry_count * 2 >= INDEX_SIZE) {
         log_line("stack table full at %zu unique stacks", entry_count);
@@ -467,12 +522,6 @@ static double frames_or_one(const CaptureStats *stats, int mode) {
     return stats->frames[mode] ? stats->frames[mode] : 1;
 }
 
-static double sort_ms(const SortStats *stats) {
-    LARGE_INTEGER frequency;
-    QueryPerformanceFrequency(&frequency);
-    return 1000.0 * stats->ticks / frequency.QuadPart;
-}
-
 static void thread_label(char *out, size_t size, const Thread *thread) {
     if (thread->name[0]) snprintf(out, size, "%s", thread->name);
     else format_address(out, size, thread->start_address);
@@ -490,16 +539,8 @@ static BOOL write_threads_file(int number, const CaptureStats *stats) {
     }
     fprintf(file, "# ticks=%u tsc_mhz=%.1f alternating=%d main_hz=1000 other_hz=%d\n", stats->ticks, stats->tsc_hz / 1e6, stats->alternating,
             1000 / OTHER_THREAD_TICK_INTERVAL);
-    for (int mode = 0; mode < 2; mode++) {
-        fprintf(file, "# mode_%s switch=%s seconds=%.3f frames=%u", mode_names[mode], stats->mode_switch->name, stats->seconds[mode], stats->frames[mode]);
-        for (int caller = 0; caller < SORT_CALLERS; caller++) {
-            const SortStats *sort = &sort_stats[mode][caller];
-            fprintf(file, " sort%d_calls=%lld sort%d_items=%lld sort%d_max_items=%lld sort%d_ms=%.3f sort%d_presorted=%lld sort%d_descents=%lld sort%d_moved=%lld",
-                    caller, sort->calls, caller, sort->items, caller, sort->max_items, caller, sort_ms(sort), caller, sort->presorted, caller,
-                    sort->descents, caller, sort->moved);
-        }
-        fprintf(file, "\n");
-    }
+    for (int mode = 0; mode < 2; mode++)
+        fprintf(file, "# mode_%s switch=%s seconds=%.3f frames=%u\n", mode_names[mode], stats->mode_switch->name, stats->seconds[mode], stats->frames[mode]);
     fprintf(file, "tid\trole\tname\tstart\tcpu_pct_off\tcpu_pct_on\tcycles_off\tcycles_on\tswitches_off\tswitches_on\tsamples_off\tsamples_on\n");
     for (int i = 0; i < thread_count; i++) {
         const Thread *thread = &threads[i];
@@ -547,35 +588,6 @@ static void log_row(const char *label, const CaptureStats *stats, const double v
         length += snprintf(line + length, sizeof line - length, "%12s", cell);
     }
     log_line("%s", line);
-}
-
-static void log_sort_rows(const CaptureStats *stats) {
-    for (int caller = 0; caller < SORT_CALLERS; caller++) {
-        const SortStats *off = &sort_stats[0][caller], *on = &sort_stats[1][caller];
-        if (!off->calls && !on->calls) continue;
-        char label[64];
-        double ms[2] = {sort_ms(off) / frames_or_one(stats, 0), sort_ms(on) / frames_or_one(stats, 1)};
-        double calls[2] = {off->calls / frames_or_one(stats, 0), on->calls / frames_or_one(stats, 1)};
-        double items[2] = {off->calls ? (double)off->items / off->calls : 0, on->calls ? (double)on->items / on->calls : 0};
-        double max_items[2] = {(double)off->max_items, (double)on->max_items};
-        double presorted[2] = {off->calls ? 100.0 * off->presorted / off->calls : 0, on->calls ? 100.0 * on->presorted / on->calls : 0};
-        double descents[2] = {off->calls ? (double)off->descents / off->calls : 0, on->calls ? (double)on->descents / on->calls : 0};
-        double moved[2] = {off->calls ? (double)off->moved / off->calls : 0, on->calls ? (double)on->moved / on->calls : 0};
-        snprintf(label, sizeof label, "%s sort ms/frame", sort_caller_names[caller]);
-        log_row(label, stats, ms, "%.3f");
-        snprintf(label, sizeof label, "%s sorts/frame", sort_caller_names[caller]);
-        log_row(label, stats, calls, "%.2f");
-        snprintf(label, sizeof label, "%s items/sort", sort_caller_names[caller]);
-        log_row(label, stats, items, "%.0f");
-        snprintf(label, sizeof label, "%s max items", sort_caller_names[caller]);
-        log_row(label, stats, max_items, "%.0f");
-        snprintf(label, sizeof label, "%s already sorted", sort_caller_names[caller]);
-        log_row(label, stats, presorted, "%.0f%%");
-        snprintf(label, sizeof label, "%s out-of-order keys", sort_caller_names[caller]);
-        log_row(label, stats, descents, "%.0f");
-        snprintf(label, sizeof label, "%s items moved (fix)", sort_caller_names[caller]);
-        log_row(label, stats, moved, "%.0f");
-    }
 }
 
 static void log_main_thread_modules(const Switch *mode_switch, int mode) {
@@ -630,8 +642,6 @@ static void log_summary(const CaptureStats *stats) {
     }
     double page_faults[2] = {stats->page_faults[0] / frames_or_one(stats, 0), stats->page_faults[1] / frames_or_one(stats, 1)};
     log_row("page faults/frame", stats, page_faults, "%.0f");
-    if (stats->mode_switch == &switches[0]) log_sort_rows(stats);
-    if (sortfix_allocation_failures) log_line("  sort fix fell back to the original %ld times (allocation failed)", sortfix_allocation_failures);
     int order[MAX_THREADS], others = 0;
     for (int i = 0; i < thread_count; i++)
         if (!threads[i].is_main) order[others++] = i;
@@ -671,31 +681,12 @@ static BOOL hotkey_pressed(int key) {
 }
 
 static void set_apply_fixes(BOOL enabled) {
-    if (sortfix_error) {
-        log_line("Apply Fixes unavailable: the sort fix did not install: %s", sortfix_error);
-        return;
-    }
     fixes_enabled = enabled;
     log_line("Apply Fixes %s", fixes_enabled ? "ON" : "OFF");
 }
 
 static void toggle_apply_fixes(void) {
     set_apply_fixes(!fixes_enabled);
-}
-
-static void set_switch(Switch *target, BOOL enabled) {
-    if (target == &switches[0]) {
-        set_apply_fixes(enabled);
-        return;
-    }
-    *target->flag = enabled;
-    log_line("%s %s", target->name, enabled ? "ON" : "OFF");
-}
-
-static Switch *find_switch(const char *name) {
-    for (int i = 0; i < switch_count; i++)
-        if (!strcmp(switches[i].name, name)) return &switches[i];
-    return NULL;
 }
 
 // A module loaded again registers its switches again: the new flag replaces the old one.
@@ -712,11 +703,6 @@ static void register_switch(const char *name, volatile LONG *flag, void (*report
     switches[switch_count++] = (Switch){name, flag, report};
 }
 
-// A/B runs flip the switch directly; only the fix switch can be unavailable.
-static const char *switch_unavailable(const Switch *target) {
-    return target == &switches[0] ? sortfix_error : NULL;
-}
-
 static DWORD process_page_faults(void) {
     PROCESS_MEMORY_COUNTERS counters = {.cb = sizeof counters};
     GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof counters);
@@ -730,7 +716,7 @@ static BOOL sample(HANDLE timer, CaptureStats *stats, int seconds) {
     QueryPerformanceCounter(&started);
     segment_started = started;
     unsigned long long tsc_started = __rdtsc();
-    ULONG64 last_stamp = frame_stamp ? *frame_stamp : 0;
+    uint32_t last_stamp = frame_stamp ? *frame_stamp : 0;
     LONGLONG elapsed = 0, next_progress = PROGRESS_SECONDS * frequency.QuadPart, next_flip = AB_SEGMENT_SECONDS * frequency.QuadPart;
     uint32_t frames_at_progress = 0;
     DWORD page_faults_mark = process_page_faults();
@@ -795,17 +781,12 @@ static void capture(int seconds, Switch *ab) {
     int number = capture_number++;
     BOOL alternating = ab != NULL;
     Switch *mode_switch = ab ? ab : &switches[0];
-    if (alternating && switch_unavailable(ab)) {
-        log_line("A/B capture of %s unavailable: %s", ab->name, switch_unavailable(ab));
-        return;
-    }
     MessageBeep(MB_OK);
     LONG enabled_before = *mode_switch->flag;
     log_line("capture %d: sampling for %d s%s%s...", number, seconds, alternating ? ", switching every 2 s: " : "; Ctrl+Shift+F10 still toggles Apply Fixes",
              alternating ? ab->name : "");
     if (alternating && ab->report) ab->report(TRUE);
     find_frame_stamp();
-    sortfix_reset_stats();
     stack_index = calloc(INDEX_SIZE, sizeof *stack_index);
     // A high-resolution timer rather than timeBeginPeriod, which would change the game's own timer behaviour.
     HANDLE timer = CreateWaitableTimerExW(NULL, NULL, TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
@@ -836,7 +817,6 @@ static void capture(int seconds, Switch *ab) {
 static void log_help(void) {
     log_line("Hotkeys (in game): Ctrl+Shift+F9 A/B capture %d s (Apply Fixes alternates every %d s) | Ctrl+Shift+F10 toggle Apply Fixes | Ctrl+Shift+F8 plain capture",
              CAPTURE_SECONDS, AB_SEGMENT_SECONDS);
-    if (find_switch(HOTKEY_SWITCH)) log_line("Ctrl+Shift+F7 toggles %s", HOTKEY_SWITCH);
 }
 
 static void start_run(void) {
@@ -850,10 +830,54 @@ static void start_run(void) {
     log_line("run %s: logs go to %s", run_id, folder);
 }
 
+// The thread that presents is the main thread the fixes need to know.
+static BYTE __attribute__((thiscall)) present_hook(BYTE *engine_object) {
+    if (!main_thread_id) main_thread_id = GetCurrentThreadId();
+    return original_present(engine_object);
+}
+
+static void install_present_hook(void) {
+    if (!engine) present_error = "empire.retail.dll not loaded";
+    else present_error = hook_function(engine + PRESENT_RVA, present_prologue, sizeof present_prologue, (const void *)present_hook, (void **)&original_present);
+    if (present_error) log_line("present hook: %s; the fixes that need the main thread stay off", present_error);
+}
+
+// The fixes are built and tested for DX11 only; in DX9 mode the game is stopped with an explanation instead of running
+// with fixes that were never checked against that renderer.
+static void check_renderer(void) {
+    if (!engine_is_analysed_build) return;
+    BYTE *device = *(BYTE *volatile *)(engine + DEVICE_GLOBAL_RVA);
+    if (!device) return;
+    BYTE *vtable = *(BYTE **)device;
+    if (vtable == engine + D3D9_DEVICE_VTABLE_RVA) {
+        log_line("the game runs in DirectX 9 mode, which these fixes do not support; stopping the game");
+        MessageBoxW(NULL, DX9_MESSAGE, L"Shogun 2 fixes", MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
+        TerminateProcess(GetCurrentProcess(), 1);
+    }
+    const char *name = vtable == engine + D3D11_DEVICE_VTABLE_RVA ? "DirectX 11" : "unknown render device";
+    if (name != renderer_name) {
+        renderer_name = name;
+        log_line("renderer: %s", name);
+    }
+}
+
+// The host starts while the engine loads, long before the device is created, so the device is created with the flag.
+static void allow_multithreaded_device(void) {
+    if (!GetPrivateProfileIntW(L"device", L"multithreaded_device", 0, config_path)) return;
+    BYTE *push = engine + DEVICE_FLAGS_PUSH_RVA;
+    const char *error = code_matches(push, single_threaded_flags_push, sizeof single_threaded_flags_push)
+                            ? patch_code(push, no_flags_push, sizeof no_flags_push)
+                            : "engine code differs from the analysed build";
+    log_line("multithreaded_device: %s", error ? error : "the D3D11 device will be created without D3D11_CREATE_DEVICE_SINGLETHREADED");
+}
+
 static S2Api module_api = {.fix_enabled = &fixes_enabled,
                            .log_line = log_line,
                            .hook = hook_function,
-                           .register_switch = register_switch};
+                           .register_switch = register_switch,
+                           .patch = patch_checked,
+                           .set_hook_owner = set_hook_owner,
+                           .main_thread = &main_thread_id};
 
 static void load_module(const char *utf8_path) {
     wchar_t path[MAX_PATH];
@@ -869,7 +893,8 @@ static void load_module(const char *utf8_path) {
         log_line("module %s: no s2_module_main export", name);
         return;
     }
-    module_api.engine = (BYTE *)GetModuleHandleW(ENGINE_MODULE);
+    module_api.engine = engine;
+    set_hook_owner(name);
     const char *error = module_main(&module_api);
     log_line("module %s: %s", name, error ? error : "installed");
 }
@@ -894,7 +919,7 @@ static void load_modules(const wchar_t *dir) {
 }
 
 // Shows the log live. Closing a console ends its process, the game, so the window has no close
-// button and ignores Ctrl+C. It opens while the proxy loads, before the game has a window to take focus from.
+// button and ignores Ctrl+C. It opens while the game starts, before it has a window to take focus from.
 static DWORD open_console(void) {
     if (!GetPrivateProfileIntW(L"s2prof", L"console", 0, config_path)) return ERROR_SUCCESS;
     // ACCESS_DENIED means the process already has a console, such as when started from one; that one is used.
@@ -914,19 +939,26 @@ static DWORD WINAPI controller(LPVOID unused) {
     (void)unused;
     DWORD console_error = open_console();
     start_run();
+    stack_copy = malloc(FULL_RATE_SCAN_BYTES);
     AddVectoredExceptionHandler(1, report_crash);
     if (console_error) log_line("console unavailable: error %lu", console_error);
-    sortfix_error = sortfix_install();
-    log_line("s2prof running inside the game.");
-    if (sortfix_error) log_line("sort fix unavailable: %s; Apply Fixes cannot be turned on", sortfix_error);
-    load_modules(fixes_dir);
+    engine = (BYTE *)GetModuleHandleW(ENGINE_MODULE);
+    if (engine) {
+        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(engine + ((const IMAGE_DOS_HEADER *)engine)->e_lfanew);
+        engine_is_analysed_build = nt->FileHeader.TimeDateStamp == ENGINE_TIMESTAMP && nt->OptionalHeader.SizeOfImage == ENGINE_IMAGE_SIZE;
+    }
+    log_line("s2prof running inside the game (engine at 0x%lx, %s).", (unsigned long)(uintptr_t)engine,
+             !engine ? "not loaded" : engine_is_analysed_build ? "the analysed build" : "an unknown build: fixes will refuse to install");
+    if (engine_is_analysed_build) allow_multithreaded_device();
+    install_present_hook();
+    if (engine_is_analysed_build) load_modules(fixes_dir);
+    else log_line("fixes not loaded: the engine is not the build they were made for");
     set_apply_fixes(TRUE);
     log_help();
-    Switch *hotkey_switch = find_switch(HOTKEY_SWITCH);
     for (;;) {
         Sleep(50);
+        check_renderer();
         if (hotkey_pressed(VK_F10)) toggle_apply_fixes();
-        if (hotkey_pressed(VK_F7) && hotkey_switch) set_switch(hotkey_switch, !*hotkey_switch->flag);
         if (hotkey_pressed(VK_F9)) capture(CAPTURE_SECONDS, &switches[0]);
         if (hotkey_pressed(VK_F8)) capture(CAPTURE_SECONDS, NULL);
     }
@@ -934,7 +966,6 @@ static DWORD WINAPI controller(LPVOID unused) {
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
-    (void)reserved;
     // Present only when the process ends through ExitProcess; a fail-fast or TerminateProcess skips it.
     if (reason == DLL_PROCESS_DETACH && reserved) log_line("process exiting through ExitProcess");
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
