@@ -12,7 +12,7 @@ ZIP="$DIST/s2fix_shogun2_original_${VERSION:-$(date +%s)}.zip"
 # Unzipped into the game folder: the proxy, host and settings beside Shogun2.exe, the fixes in fixes\.
 "$PYTHON" -I -c 'import os, sys, zipfile
 with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as archive:
-    archive.write("proxy/dinput8.dll", "dinput8.dll")
+    archive.write("proxy/d3d11.dll", "d3d11.dll")
     archive.write("s2prof.dll", "s2prof.dll")
     archive.write("s2prof.ini", "s2prof.ini")
     archive.write("../README.md", "s2fix-README.md")

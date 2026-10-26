@@ -109,20 +109,20 @@ fixes\           one DLL per fix
 - The Steam version with the May 2023 update: `empire.retail.dll` with PE timestamp `0x645e92bb` (SHA-256 starting
   `022fae2e2da92b59`). Each fix checks the engine code it changes first. On any other build the fixes stay off and the
   log says why.
-- DirectX 11 mode. The fixes support only DirectX 11: in DirectX 9 mode they stop the game with a message.
+- DirectX 11 mode. The fixes are for DirectX 11 only: in DirectX 9 mode they don't load, and the game runs unchanged.
 - Tested with an NVIDIA driver.
 
 ### Files
 
 ```
-dinput8.dll      loads s2prof.dll and passes everything else to Windows' own dinput8.dll
+d3d11.dll        loads s2prof.dll and passes everything else to Windows' own d3d11.dll
 s2prof.dll       loads the fixes and provides the hotkeys and the log
 s2prof.ini       settings
 fixes\           one DLL per fix
 ```
 
-The game loads `dinput8.dll` in both DirectX modes, before it creates its device. That is how the fixes can refuse
-DirectX 9 mode.
+The game loads `d3d11.dll` only in DirectX 11 mode, as it creates its device. The proxy waits until the fixes are installed
+before the device is made.
 
 ### Settings (`s2prof.ini`)
 

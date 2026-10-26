@@ -54,10 +54,6 @@ static const BYTE frame_stamp_store[] = {0xa3, 0x40, 0xc3, 0x7c, 0x11};
 #define D3D11_DEVICE_VTABLE_RVA 0x17666f8
 #define D3D9_DEVICE_VTABLE_RVA 0x1766c68
 #define DX9_MESSAGE L"This fix does not support DirectX 9 mode. Please run Shogun 2 in DirectX 11."
-// The main D3D11CreateDevice call pushes Flags = D3D11_CREATE_DEVICE_SINGLETHREADED, which forbids deferred contexts.
-#define DEVICE_FLAGS_PUSH_RVA 0x145fe67
-static const BYTE single_threaded_flags_push[] = {0x6a, 0x01};
-static const BYTE no_flags_push[] = {0x6a, 0x00};
 static const char *const mode_names[2] = {"off", "on"};
 
 // The 32-bit layouts WOW64 returns.
@@ -861,14 +857,11 @@ static void check_renderer(void) {
     }
 }
 
-// The host starts while the engine loads, long before the device is created, so the device is created with the flag.
-static void allow_multithreaded_device(void) {
-    if (!GetPrivateProfileIntW(L"device", L"multithreaded_device", 0, config_path)) return;
-    BYTE *push = engine + DEVICE_FLAGS_PUSH_RVA;
-    const char *error = code_matches(push, single_threaded_flags_push, sizeof single_threaded_flags_push)
-                            ? patch_code(push, no_flags_push, sizeof no_flags_push)
-                            : "engine code differs from the analysed build";
-    log_line("multithreaded_device: %s", error ? error : "the D3D11 device will be created without D3D11_CREATE_DEVICE_SINGLETHREADED");
+// Set once the fixes are installed; the d3d11 proxy waits for it before the engine's device exists.
+static HANDLE ready_event;
+
+__declspec(dllexport) BOOL s2prof_wait_ready(DWORD milliseconds) {
+    return ready_event && WaitForSingleObject(ready_event, milliseconds) == WAIT_OBJECT_0;
 }
 
 static S2Api module_api = {.fix_enabled = &fixes_enabled,
@@ -949,12 +942,12 @@ static DWORD WINAPI controller(LPVOID unused) {
     }
     log_line("s2prof running inside the game (engine at 0x%lx, %s).", (unsigned long)(uintptr_t)engine,
              !engine ? "not loaded" : engine_is_analysed_build ? "the analysed build" : "an unknown build: fixes will refuse to install");
-    if (engine_is_analysed_build) allow_multithreaded_device();
     install_present_hook();
     if (engine_is_analysed_build) load_modules(fixes_dir);
     else log_line("fixes not loaded: the engine is not the build they were made for");
     set_apply_fixes(TRUE);
     log_help();
+    SetEvent(ready_event);
     for (;;) {
         Sleep(50);
         check_renderer();
@@ -970,6 +963,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_DETACH && reserved) log_line("process exiting through ExitProcess");
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(instance);
+    ready_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     GetModuleFileNameW(instance, output_dir, MAX_PATH);
     wcscpy(fixes_dir, output_dir);
     wcscpy(wcsrchr(fixes_dir, L'\\'), L"\\fixes");
