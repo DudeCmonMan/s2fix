@@ -274,6 +274,7 @@ typedef struct {
 typedef struct {
     BYTE *original, *copy;
     uint32_t capacity[PROGRAM_OUTPUTS];
+    uint32_t range;
 } ProgramClone;
 
 // A worker's own copy of a texture slot it set in its current range (texturecopies); generation 0 is free.
@@ -452,7 +453,7 @@ struct Worker {
     __attribute__((aligned(16))) BYTE renderer[RENDERER_SIZE];
     void *vtable[RENDERER_VTABLE_SLOTS];
     ProgramClone *programs;
-    uint32_t program_capacity, program_count;
+    uint32_t program_capacity, program_count, program_range, program_epoch;
     UploadTracker uploads;
     __attribute__((aligned(16))) BYTE item[DRAW_ITEM_SIZE];
     __attribute__((aligned(16))) BYTE chunker[DERIVED_CHUNKER_SIZE];
@@ -2524,14 +2525,20 @@ static ProgramClone *insert_program(Worker *worker, ProgramClone clone) {
         }
 }
 
+// A battle load frees programs and their binding lists and builds new ones, often at the same addresses, so a copy filled
+// in an earlier range can hold freed samplers and SRVs: each range refills a copy from the live program at its first bind.
 static BYTE *program_clone(Worker *worker, BYTE *program) {
     uint32_t mask = worker->program_capacity - 1;
     for (uint32_t slot = (uint32_t)((uintptr_t)program >> 4) * 0x9e3779b9u & mask;; slot = (slot + 1) & mask) {
-        if (worker->programs[slot].original == program) {
-            if (overhaul_program_refresh) fill_program_clone(&worker->programs[slot]);
-            return worker->programs[slot].copy;
+        ProgramClone *clone = &worker->programs[slot];
+        if (clone->original == program) {
+            if (overhaul_program_refresh || clone->range != worker->program_range) {
+                fill_program_clone(clone);
+                clone->range = worker->program_range;
+            }
+            return clone->copy;
         }
-        if (!worker->programs[slot].original) break;
+        if (!clone->original) break;
     }
     if (2 * (worker->program_count + 1) > worker->program_capacity) {
         ProgramClone *old = worker->programs;
@@ -2547,7 +2554,7 @@ static BYTE *program_clone(Worker *worker, BYTE *program) {
             if (old[i].original) insert_program(worker, old[i]);
         free(old);
     }
-    ProgramClone clone = {program, malloc(PROGRAM_SIZE), {0}};
+    ProgramClone clone = {program, malloc(PROGRAM_SIZE), {0}, worker->program_range};
     if (!clone.copy) {
         api->log_line("overhaul: out of memory for a program copy");
         __builtin_trap();
@@ -2908,7 +2915,25 @@ static void bind_targets(ID3D11DeviceContext *context, const TargetState *state)
     ID3D11DeviceContext_RSSetScissorRects(context, state->scissor_count, state->scissors);
 }
 
+// Between ranges nothing points at a copy: each range's renderer starts from main's template.
+static void forget_programs(Worker *worker) {
+    for (uint32_t i = 0; i < worker->program_capacity; i++) {
+        ProgramClone *clone = &worker->programs[i];
+        if (!clone->original) continue;
+        for (int o = 0; o < PROGRAM_OUTPUTS; o++) free(*(void **)(clone->copy + program_outputs[o].output + 8));
+        free(clone->copy);
+    }
+    memset(worker->programs, 0, worker->program_capacity * sizeof *worker->programs);
+    worker->program_count = 0;
+}
+
 static void begin_command_list(Worker *worker, ViewSlot *slot) {
+    // A rebuilt shader library marks a battle load, after which the old programs' copies would only pile up.
+    if (worker->program_epoch != contexts.epoch) {
+        forget_programs(worker);
+        worker->program_epoch = contexts.epoch;
+    }
+    worker->program_range++;
     if (values_active) begin_values(&worker->values);
     if (overhaul_texture_copies) {
         worker->texture_generation = ++worker->texture_generations ? worker->texture_generations : ++worker->texture_generations;
