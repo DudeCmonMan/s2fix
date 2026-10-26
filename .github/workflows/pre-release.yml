@@ -1,0 +1,33 @@
+name: pre-release
+
+# A tag with "pre-release" in its name (v0.3.0-pre-release.1) builds both games and creates a draft pre-release with both
+# zips. It is published as a pre-release for testing, never as the latest release.
+on:
+  push:
+    tags: ['*pre-release*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  prerelease:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: s2fix
+          path: dist
+
+      - name: Draft pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.zip --repo "$GITHUB_REPOSITORY" --draft --prerelease --latest=false --verify-tag \
+            --title "s2fix $GITHUB_REF_NAME" \
+            --notes "Pre-release for testing, built from $GITHUB_REF_NAME ($GITHUB_SHA) with WinLibs GCC 16.2.0. s2fix_shogun2_complete-edition is for Shogun 2 - Complete Edition (unzip next to shogun2_complete_edition.exe), s2fix_shogun2_original for the original Shogun 2 (unzip next to Shogun2.exe); see the README."
