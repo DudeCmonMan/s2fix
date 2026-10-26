@@ -42,7 +42,7 @@ jobs:
         run: |
           x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Ishogun2ce -o "$RUNNER_TEMP/test_itemsort_ce.exe" shogun2ce/tests/test_itemsort.c
           "$RUNNER_TEMP/test_itemsort_ce.exe"
-          i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -msse2 -mfpmath=sse -Ishogun2og -o "$RUNNER_TEMP/test_itemsort_og.exe" shogun2og/tests/test_itemsort.c
+          i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -msse2 -mfpmath=sse -mmemcpy-strategy=vector_loop:512:noalign,libcall:-1:noalign -Ishogun2og -o "$RUNNER_TEMP/test_itemsort_og.exe" shogun2og/tests/test_itemsort.c
           "$RUNNER_TEMP/test_itemsort_og.exe"
           i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -msse2 -mfpmath=sse -Ishogun2og -o "$RUNNER_TEMP/test_entrysort_og.exe" shogun2og/tests/test_entrysort.c
           "$RUNNER_TEMP/test_entrysort_og.exe"

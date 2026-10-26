@@ -115,5 +115,6 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     api->register_switch("tiegroup", &tie_grouping, report);
     api->register_switch("tailmerge", &tail_merge, report);
     api->register_switch("fewkeys", &few_keys, report);
+    api->register_switch("inlinecopy", &item_copy_inline, NULL);
     return NULL;
 }

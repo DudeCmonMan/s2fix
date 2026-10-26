@@ -66,6 +66,16 @@ static int words_less(const uint64_t *a, const uint64_t *b, int count) {
     return 0;
 }
 
+// 1 moves items with the build's inline vector copy, 0 with msvcrt's memcpy, whose path for most of these alignments is
+// rep movsd (itemsort's inlinecopy switch). The call goes through a pointer so the compiler can't inline it.
+static volatile long item_copy_inline = 1;
+static void *(*volatile item_copy_call)(void *, const void *, size_t) = memcpy;
+
+static inline void copy_item(uint8_t *destination, const uint8_t *source) {
+    if (item_copy_inline) memcpy(destination, source, RENDER_ITEM_SIZE);
+    else item_copy_call(destination, source, RENDER_ITEM_SIZE);
+}
+
 static void prefetch_item(const uint8_t *item) {
     for (size_t line = 0; line < RENDER_ITEM_SIZE; line += CACHE_LINE) __builtin_prefetch(item + line);
     __builtin_prefetch(item + RENDER_ITEM_SIZE - 1);
@@ -78,17 +88,17 @@ static size_t permute_items(uint8_t *first, KeyedIndex *order, size_t count) {
     size_t moved = 0;
     for (size_t start = 0; start < count; start++) {
         if (order[start].index == start) continue;
-        memcpy(held, first + start * RENDER_ITEM_SIZE, RENDER_ITEM_SIZE);
+        copy_item(held, first + start * RENDER_ITEM_SIZE);
         size_t hole = start, ahead = start;
         for (int step = 0; step < PREFETCH_DISTANCE && (ahead = order[ahead].index) != start; step++) prefetch_item(first + ahead * RENDER_ITEM_SIZE);
         for (size_t source = order[hole].index; source != start; source = order[hole].index) {
             if (ahead != start && (ahead = order[ahead].index) != start) prefetch_item(first + ahead * RENDER_ITEM_SIZE);
-            memcpy(first + hole * RENDER_ITEM_SIZE, first + source * RENDER_ITEM_SIZE, RENDER_ITEM_SIZE);
+            copy_item(first + hole * RENDER_ITEM_SIZE, first + source * RENDER_ITEM_SIZE);
             order[hole].index = hole;
             hole = source;
             moved++;
         }
-        memcpy(first + hole * RENDER_ITEM_SIZE, held, RENDER_ITEM_SIZE);
+        copy_item(first + hole * RENDER_ITEM_SIZE, held);
         order[hole].index = hole;
         moved++;
     }
@@ -109,10 +119,10 @@ static long long merge_tail(ListKind list, int tie_grouping, uint8_t *first, siz
         size_t j = t;
         for (; j > 0 && words_less(key, keys[j - 1], words); j--) {
             memcpy(keys[j], keys[j - 1], sizeof keys[j]);
-            memcpy(held[j], held[j - 1], RENDER_ITEM_SIZE);
+            copy_item(held[j], held[j - 1]);
         }
         memcpy(keys[j], key, sizeof key);
-        memcpy(held[j], item, RENDER_ITEM_SIZE);
+        copy_item(held[j], item);
     }
     size_t end = count, unplaced = prefix;
     for (size_t t = tail; t-- > 0;) {
@@ -127,7 +137,7 @@ static long long merge_tail(ListKind list, int tie_grouping, uint8_t *first, siz
         if (block) memmove(first + (end - block) * RENDER_ITEM_SIZE, first + low * RENDER_ITEM_SIZE, block * RENDER_ITEM_SIZE);
         end -= block + 1;
         unplaced = low;
-        memcpy(first + end * RENDER_ITEM_SIZE, held[t], RENDER_ITEM_SIZE);
+        copy_item(first + end * RENDER_ITEM_SIZE, held[t]);
     }
     return (long long)(count - end);
 }
