@@ -195,7 +195,7 @@ Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 | `focuscache` | asks Windows for the foreground window once per frame instead of on every key query |
 | `scenelock` | spins longer on the unit emission lock instead of sleeping in the kernel |
 | `flipmodel` | replaces the game's 2011 swap chain, which copies every frame through the desktop compositor and stalls now and then, with a flip-model one: no stalls, tearing allowed (an uncapped frame rate, variable refresh in a window), and at most two frames queued for lower input lag |
-| `vram` | Windows tells a 32-bit game at most 3 GB of video memory, and the game budgets its textures from 95% of that (2.9 GB). This gives it the card's real budget, up to the 4095 MB the game can count, so it lowers texture detail later |
+| `vram` | By default, Windows tells Shogun 2 to use a maximum of 3GB (which Shogun 2 uses 95% of), this patch pushes it to as much as your GPU can give (up to 4GB, engine limitation). |
 | `borderless` | with `[window] borderless=1`: borderless windowed mode at the monitor's native resolution (the game itself has only a framed window or exclusive fullscreen) |
 | `cpuplace` | keeps the game's threads on the CCD `[cpu] ccd` names |
 | `maincore` | keeps the game's other threads off the main thread's CPU core, so the main thread has the whole core |
