@@ -1,6 +1,7 @@
 #include "../s2module.h"
 #pragma GCC diagnostic ignored "-Wunused-function"
 #include "../renderitem.h"
+#include "../checks/itemsort.h"
 
 // The Variant node's three std::sort instantiations over its 312-byte render items (MSVC introsort, cdecl): list A in the
 // prepare (0x114aba00), and lists B (0x114ab800, while variant_rigid_sort is on) and C (0x114abc00) in every record pass,
@@ -101,6 +102,8 @@ static void report(BOOL start) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, itemsort_checks);
+    if (mismatch) return mismatch;
     api = host;
     const DWORD rvas[LISTS] = {SORT_A_RVA, SORT_B_RVA, SORT_C_RVA};
     const void *hooks[LISTS] = {(const void *)sort_a_hook, (const void *)sort_b_hook, (const void *)sort_c_hook};

@@ -1,6 +1,7 @@
 #include "../s2module.h"
 #pragma GCC diagnostic ignored "-Wunused-function"
 #include "../entrysort.h"
+#include "../checks/entrysort.h"
 
 // The engine's per-entry std::sort (MSVC _Sort_unchecked, cdecl) over object pointers, called twice per entity display
 // update. Its comparator chases pointers and recomputes both squared camera distances on every comparison; entrysort.h
@@ -50,6 +51,8 @@ static void report(BOOL start) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, entrysort_checks);
+    if (mismatch) return mismatch;
     api = host;
     const char *error = api->hook(api->engine + ENTRY_SORT_RVA, entry_sort_prologue, sizeof entry_sort_prologue, (const void *)entry_sort_hook,
                                   (void **)&original_entry_sort);

@@ -269,7 +269,7 @@ static BOOL copy_text_file(const wchar_t *source, const char *name) {
 // ---- the main thread: frames, GPU times, screenshots ----
 
 static BYTE *render_device(void) {
-    BYTE *device = host.engine ? *(BYTE *volatile *)(host.engine + DEVICE_GLOBAL_RVA) : NULL;
+    BYTE *device = host.engine && host.device_readable ? *(BYTE *volatile *)(host.engine + DEVICE_GLOBAL_RVA) : NULL;
     return device && *(BYTE **)device == host.engine + D3D11_DEVICE_VTABLE_RVA ? device : NULL;
 }
 
@@ -950,8 +950,7 @@ static const char *swap_effect_name(DXGI_SWAP_EFFECT effect) {
 
 static void section_game(Text *t) {
     heading(t, "Game");
-    text_printf(t, "Engine: empire.retail.dll at %p, %s\n", (void *)host.engine,
-                !host.engine ? "not loaded" : host.engine_is_analysed_build ? "the build the fixes were made for" : "AN UNKNOWN BUILD (fixes refuse to install)");
+    text_printf(t, "Engine: empire.retail.dll at %p, %s\n", (void *)host.engine, host.engine_build);
     BYTE *device = render_device();
     text_printf(t, "Render device: %s\n", device ? "DirectX 11" : "not DirectX 11, or not created yet");
     ID3D11DeviceContext *context = immediate_context();

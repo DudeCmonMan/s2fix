@@ -3,6 +3,7 @@
 #include "hook.h"
 #include <winternl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define JUMP_SIZE 5
@@ -19,20 +20,32 @@ NTSTATUS NTAPI NtGetNextThread(HANDLE process, HANDLE thread, ACCESS_MASK access
 
 #define MAX_LAYERS 4
 #define MAX_OWNER 32
+#define MAX_PATCH_RECORDS 256
 
 // One module's hook on a target; each layer calls the one below it, the lowest calls the trampoline.
 typedef struct {
     char owner[MAX_OWNER];
     const void *replacement;
     void **original;
+    int group;
 } HookLayer;
 
 typedef struct {
     BYTE *target;
+    // The trampoline starts with the size bytes the jump replaced, as they were in memory.
     void *trampoline;
+    size_t size;
     HookLayer layers[MAX_LAYERS];
     int layer_count;
 } InstalledHook;
+
+// A patch s2prof holds: an undo restores replaced, and the engine checks read through it.
+typedef struct {
+    BYTE *target;
+    size_t size;
+    BYTE replaced[MAX_HOOK_PATCH];
+    int group;
+} PatchRecord;
 
 typedef struct {
     HMODULE module;
@@ -40,6 +53,11 @@ typedef struct {
 } RelocatedModule;
 
 static InstalledHook installed_hooks[MAX_HOOKS];
+static PatchRecord patch_records[MAX_PATCH_RECORDS];
+static int patch_record_count;
+// Only the installing thread's writes join its group: patch-set threads flip their patches on their own.
+static int write_group;
+static DWORD write_group_thread;
 static BYTE *trampoline_block;
 static size_t trampoline_block_used;
 
@@ -78,9 +96,9 @@ static ULONG_PTR preferred_base(HMODULE module) {
     return base;
 }
 
-// Applies the module's HIGHLOW relocations that fall inside [rva, rva + size) to a copy of the file bytes. A relocated
-// dword that crosses the window's edge means the window does not end on an instruction boundary.
-static BOOL relocate_expected(const BYTE *base, DWORD rva, BYTE *bytes, size_t size, ULONG_PTR delta) {
+// Adds delta to every HIGHLOW-relocated dword inside [rva, rva + size) of bytes. Strict: a relocated dword crossing the
+// window's edge means the window does not end on an instruction boundary; otherwise such a dword is left alone.
+static BOOL relocate(const BYTE *base, DWORD rva, BYTE *bytes, size_t size, ULONG_PTR delta, BOOL strict) {
     const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + ((const IMAGE_DOS_HEADER *)base)->e_lfanew);
     const IMAGE_DATA_DIRECTORY *directory = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
     if (!directory->VirtualAddress || !directory->Size) return delta == 0;
@@ -96,7 +114,10 @@ static BOOL relocate_expected(const BYTE *base, DWORD rva, BYTE *bytes, size_t s
                 if (entries[i] >> 12 != IMAGE_REL_BASED_HIGHLOW) continue;
                 DWORD at_rva = block->VirtualAddress + (entries[i] & 0xfff);
                 if (at_rva + 4 <= rva || at_rva >= rva + size) continue;
-                if (at_rva < rva || at_rva + 4 > rva + size) return FALSE;
+                if (at_rva < rva || at_rva + 4 > rva + size) {
+                    if (strict) return FALSE;
+                    continue;
+                }
                 DWORD value;
                 memcpy(&value, bytes + (at_rva - rva), 4);
                 value += (DWORD)delta;
@@ -118,7 +139,7 @@ BOOL code_matches(const BYTE *target, const BYTE *expected, size_t size) {
         !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)(target + size - 1), &module))
         return FALSE;
     ULONG_PTR base = preferred_base(module);
-    if (!base || !relocate_expected((const BYTE *)module, (DWORD)(target - (const BYTE *)module), adjusted, size, (ULONG_PTR)module - base)) return FALSE;
+    if (!base || !relocate((const BYTE *)module, (DWORD)(target - (const BYTE *)module), adjusted, size, (ULONG_PTR)module - base, TRUE)) return FALSE;
     return !memcmp(target, adjusted, size);
 }
 
@@ -180,9 +201,35 @@ const char *patch_code(BYTE *target, const BYTE *patch, size_t size) {
     return result;
 }
 
+static int current_group(void) {
+    return write_group && GetCurrentThreadId() == write_group_thread ? write_group : 0;
+}
+
+// A write that puts back the bytes s2prof found there ends the record; any other write keeps the first bytes found.
+static const char *record_patch_locked(BYTE *target, const BYTE *replacement, size_t size) {
+    int found = -1;
+    for (int i = 0; i < patch_record_count && found < 0; i++)
+        if (patch_records[i].target == target && patch_records[i].size == size) found = i;
+    if (found < 0 && patch_record_count == MAX_PATCH_RECORDS) return "all patch records are used";
+    BYTE before[MAX_HOOK_PATCH];
+    memcpy(before, target, size);
+    const char *error = patch_code_locked(target, replacement, size);
+    if (error) return error;
+    if (found < 0) {
+        PatchRecord *record = &patch_records[patch_record_count++];
+        *record = (PatchRecord){.target = target, .size = size, .group = current_group()};
+        memcpy(record->replaced, before, size);
+    } else if (!memcmp(target, patch_records[found].replaced, size)) {
+        patch_records[found] = patch_records[--patch_record_count];
+    }
+    return NULL;
+}
+
 const char *patch_checked(BYTE *target, const BYTE *expected, const BYTE *replacement, size_t size) {
-    if (!code_matches(target, expected, size)) return "engine code differs from the analysed build";
-    return patch_code(target, replacement, size);
+    AcquireSRWLockExclusive(&patch_lock);
+    const char *result = code_matches(target, expected, size) ? record_patch_locked(target, replacement, size) : "engine code differs from the analysed build";
+    ReleaseSRWLockExclusive(&patch_lock);
+    return result;
 }
 
 // A copy named <module>_<digits>.dll counts as the same owner as <module>.dll.
@@ -219,6 +266,7 @@ static const char *add_layer(InstalledHook *hook, const void *replacement, void 
         snprintf(layer->owner, sizeof layer->owner, "%s", hook_owner);
         layer->replacement = replacement;
         layer->original = original;
+        layer->group = current_group();
     }
     return error;
 }
@@ -242,10 +290,11 @@ static const char *hook_function_locked(BYTE *target, const BYTE *prologue, size
     const char *error = patch_code_locked(target, patch, size);
     if (!error) {
         InstalledHook *hook = &installed_hooks[installed_hook_count++];
-        *hook = (InstalledHook){.target = target, .trampoline = trampoline, .layer_count = 1};
+        *hook = (InstalledHook){.target = target, .trampoline = trampoline, .size = size, .layer_count = 1};
         snprintf(hook->layers[0].owner, sizeof hook->layers[0].owner, "%s", hook_owner);
         hook->layers[0].replacement = replacement;
         hook->layers[0].original = original;
+        hook->layers[0].group = current_group();
     }
     return error;
 }
@@ -255,4 +304,103 @@ const char *hook_function(BYTE *target, const BYTE *prologue, size_t size, const
     const char *result = hook_function_locked(target, prologue, size, replacement, original);
     ReleaseSRWLockExclusive(&patch_lock);
     return result;
+}
+
+void begin_write_group(int group) {
+    AcquireSRWLockExclusive(&patch_lock);
+    write_group = group;
+    write_group_thread = GetCurrentThreadId();
+    ReleaseSRWLockExclusive(&patch_lock);
+}
+
+void end_write_group(void) {
+    AcquireSRWLockExclusive(&patch_lock);
+    write_group = 0;
+    ReleaseSRWLockExclusive(&patch_lock);
+}
+
+static const char *remove_layer_locked(InstalledHook *hook, int index) {
+    if (index + 1 < hook->layer_count) {
+        *hook->layers[index + 1].original = index ? (void *)hook->layers[index - 1].replacement : hook->trampoline;
+    } else if (index) {
+        BYTE patch[JUMP_SIZE];
+        write_jump(patch, hook->target, hook->layers[index - 1].replacement);
+        const char *error = patch_code_locked(hook->target, patch, JUMP_SIZE);
+        if (error) return error;
+    } else {
+        const char *error = patch_code_locked(hook->target, hook->trampoline, hook->size);
+        if (error) return error;
+    }
+    memmove(&hook->layers[index], &hook->layers[index + 1], (hook->layer_count - index - 1) * sizeof *hook->layers);
+    hook->layer_count--;
+    return NULL;
+}
+
+const char *undo_write_group(int group, int *hooks_undone, int *patches_undone) {
+    *hooks_undone = *patches_undone = 0;
+    const char *error = NULL;
+    AcquireSRWLockExclusive(&patch_lock);
+    for (int i = patch_record_count - 1; i >= 0 && !error; i--) {
+        if (patch_records[i].group != group) continue;
+        error = patch_code_locked(patch_records[i].target, patch_records[i].replaced, patch_records[i].size);
+        if (error) break;
+        memmove(&patch_records[i], &patch_records[i + 1], (patch_record_count - i - 1) * sizeof *patch_records);
+        patch_record_count--;
+        ++*patches_undone;
+    }
+    for (int i = installed_hook_count - 1; i >= 0 && !error; i--) {
+        InstalledHook *hook = &installed_hooks[i];
+        for (int layer = hook->layer_count - 1; layer >= 0 && !error; layer--) {
+            if (hook->layers[layer].group != group) continue;
+            error = remove_layer_locked(hook, layer);
+            if (!error) ++*hooks_undone;
+        }
+        if (!error && !hook->layer_count) {
+            memmove(hook, hook + 1, (installed_hook_count - i - 1) * sizeof *hook);
+            installed_hook_count--;
+        }
+    }
+    ReleaseSRWLockExclusive(&patch_lock);
+    return error;
+}
+
+int list_live_writes(LiveWrite *out, int capacity) {
+    int count = 0;
+    AcquireSRWLockExclusive(&patch_lock);
+    for (int i = 0; i < patch_record_count && count < capacity; i++)
+        out[count++] = (LiveWrite){patch_records[i].target, patch_records[i].size, patch_records[i].group};
+    for (int i = 0; i < installed_hook_count; i++)
+        for (int layer = 0; layer < installed_hooks[i].layer_count && count < capacity; layer++)
+            out[count++] = (LiveWrite){installed_hooks[i].target, installed_hooks[i].size, installed_hooks[i].layers[layer].group};
+    ReleaseSRWLockExclusive(&patch_lock);
+    return count;
+}
+
+static void overlay(BYTE *out, const BYTE *at, size_t size, const BYTE *written_at, const BYTE *replaced, size_t written_size) {
+    const BYTE *from = written_at > at ? written_at : at, *to = written_at + written_size < at + size ? written_at + written_size : at + size;
+    if (from < to) memcpy(out + (from - at), replaced + (from - written_at), to - from);
+}
+
+BOOL engine_hash_matches(const BYTE *engine, DWORD rva, DWORD size, uint64_t hash, BOOL jump_allowed) {
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(engine + ((const IMAGE_DOS_HEADER *)engine)->e_lfanew);
+    ULONG_PTR base = preferred_base((HMODULE)engine);
+    // Three bytes each side hold every relocated dword that reaches into the range.
+    DWORD start = rva >= 3 ? rva - 3 : 0, end = rva + size + 3;
+    if (!base || rva + size > nt->OptionalHeader.SizeOfImage) return FALSE;
+    if (end > nt->OptionalHeader.SizeOfImage) end = nt->OptionalHeader.SizeOfImage;
+    BYTE *bytes = malloc(end - start);
+    if (!bytes) return FALSE;
+    const BYTE *at = engine + start;
+    AcquireSRWLockExclusive(&patch_lock);
+    memcpy(bytes, at, end - start);
+    for (int i = 0; i < patch_record_count; i++)
+        overlay(bytes, at, end - start, patch_records[i].target, patch_records[i].replaced, patch_records[i].size);
+    for (int i = 0; i < installed_hook_count; i++)
+        overlay(bytes, at, end - start, installed_hooks[i].target, installed_hooks[i].trampoline, installed_hooks[i].size);
+    ReleaseSRWLockExclusive(&patch_lock);
+    relocate(engine, start, bytes, end - start, base - (ULONG_PTR)engine, FALSE);
+    uint64_t value = 0xcbf29ce484222325ull;
+    for (DWORD i = rva - start; i < rva - start + size; i++) value = (value ^ bytes[i]) * 0x100000001b3ull;
+    free(bytes);
+    return value == hash || (jump_allowed && engine[rva] == 0xe9);
 }

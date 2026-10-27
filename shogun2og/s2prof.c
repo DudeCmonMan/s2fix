@@ -4,6 +4,7 @@
 #include <winternl.h>
 #include <tlhelp32.h>
 #include <psapi.h>
+#include <imm.h>
 #include <errno.h>
 #include <intrin.h>
 #include <stdarg.h>
@@ -16,6 +17,7 @@
 #include "s2module.h"
 #include "hook.h"
 #include "report.h"
+#include "checks/s2prof.h"
 
 #ifndef S2FIX_VERSION
 #define S2FIX_VERSION "local build"
@@ -41,12 +43,17 @@
 #define THREAD_WIN32_START_ADDRESS_CLASS 9
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
 #define MAX_SWITCHES 64
+#define MAX_FIXES 128
+#define MAX_FIX_NAME 32
+#define ENGINE_PREFERRED_BASE 0x10000000u
 #define MAX_CRASH_REPORTS 8
 #define CPP_EXCEPTION_CODE 0xe06d7363u
 #define ENGINE_MODULE L"empire.retail.dll"
-// The analysed build: the May 2023 Steam update.
+// The targeted build: the May 2023 Steam update.
 #define ENGINE_TIMESTAMP 0x645e92bbu
 #define ENGINE_IMAGE_SIZE 0x1d88000u
+#define BUILD_WARNING L"s2fix is not running with the targeted Shogun 2 build, not all fixes may work!"
+#define WAIT_STEP_MS 100
 // Frame::present (g_engine vtbl+0x28c, thiscall) presents once a frame, for DX9 and DX11 alike.
 #define PRESENT_RVA 0x1401ce0
 static const BYTE present_prologue[] = {0xff, 0x81, 0xcc, 0x9c, 0x06, 0x00};
@@ -60,6 +67,16 @@ static const BYTE frame_stamp_store[] = {0xa3, 0x40, 0xc3, 0x7c, 0x11};
 #define D3D9_DEVICE_VTABLE_RVA 0x1766c68
 #define DX9_MESSAGE L"This fix does not support DirectX 9 mode. Please run Shogun 2 in DirectX 11."
 static const char *const mode_names[2] = {"off", "on"};
+
+typedef enum { ENGINE_NOT_LOADED, ENGINE_TARGETED, ENGINE_MODIFIED, ENGINE_OTHER } EngineBuild;
+static const char *const engine_build_names[] = {"not loaded", "the targeted build", "the targeted build, modified by another mod",
+                                                 "a different build"};
+
+// The targeted build's code and data sections; a mod's copy of the engine that keeps them may add sections after them.
+static const struct {
+    char name[IMAGE_SIZEOF_SHORT_NAME];
+    DWORD address, size;
+} targeted_sections[] = {{".text", 0x1000, 0x159fc3e}, {".rdata", 0x15a1000, 0x1f2ae8}, {".data", 0x1794000, 0x51d52c}, {"_RDATA", 0x1cb2000, 0x2608}};
 
 // The 32-bit layouts WOW64 returns.
 typedef struct {
@@ -100,6 +117,16 @@ typedef struct {
     void (*report)(BOOL start);
 } Switch;
 
+typedef enum { FIX_INSTALLED, FIX_OFF, FIX_REFUSED } FixState;
+
+typedef struct {
+    char name[MAX_FIX_NAME], module[MAX_PATH];
+    FixState state;
+    // From the fixes folder, so in the closing line.
+    BOOL counted;
+    int first_switch;
+} FixRecord;
+
 typedef struct {
     DWORD id;
     HANDLE handle;
@@ -137,7 +164,10 @@ static volatile LONG crash_reports;
 static char run_id[32];
 static int capture_number = 1;
 static BYTE *engine;
-static BOOL engine_is_analysed_build;
+static EngineBuild engine_build;
+static BOOL device_readable;
+static volatile LONG build_warning_open;
+static HHOOK button_hook;
 static volatile uint32_t *frame_stamp;
 static BOOL hotkey_was_down[256];
 static Thread threads[MAX_THREADS];
@@ -153,6 +183,12 @@ static uint32_t *stack_index;
 static BYTE *stack_copy;
 static Switch switches[MAX_SWITCHES] = {{"fixes", &fixes_enabled, NULL}};
 static int switch_count = 1;
+static FixRecord fix_records[MAX_FIXES];
+static int fix_count;
+// The fix being installed (its index + 1, which is also its write group); 0 when none.
+static int open_fix;
+static char loading_module[MAX_PATH];
+static BOOL loading_fixes;
 static PresentFn original_present;
 static const char *present_error = "not installed yet";
 static volatile DWORD main_thread_id;
@@ -840,7 +876,8 @@ static void start_report(void) {
     static BOOL initialised;
     if (!initialised) {
         report_init(&(ReportHost){.engine = engine,
-                                  .engine_is_analysed_build = engine_is_analysed_build,
+                                  .engine_build = engine_build_names[engine_build],
+                                  .device_readable = device_readable,
                                   .output_dir = output_dir,
                                   .config_path = config_path,
                                   .run_id = run_id,
@@ -890,7 +927,7 @@ static void install_present_hook(void) {
 // The fixes are built and tested for DX11 only; in DX9 mode the game is stopped with an explanation instead of running
 // with fixes that were never checked against that renderer.
 static void check_renderer(void) {
-    if (!engine_is_analysed_build) return;
+    if (!device_readable) return;
     BYTE *device = *(BYTE *volatile *)(engine + DEVICE_GLOBAL_RVA);
     if (!device) return;
     BYTE *vtable = *(BYTE **)device;
@@ -910,7 +947,130 @@ static void check_renderer(void) {
 static HANDLE ready_event;
 
 __declspec(dllexport) BOOL s2prof_wait_ready(DWORD milliseconds) {
-    return ready_event && WaitForSingleObject(ready_event, milliseconds) == WAIT_OBJECT_0;
+    if (!ready_event) return FALSE;
+    // The player may take longer over the build warning; the device must still wait for the fixes Launch Game installs.
+    for (DWORD waited = 0; WaitForSingleObject(ready_event, WAIT_STEP_MS) != WAIT_OBJECT_0;)
+        if (!build_warning_open && (waited += WAIT_STEP_MS) >= milliseconds) return FALSE;
+    return TRUE;
+}
+
+static EngineBuild classify_engine(const BYTE *image) {
+    if (!image) return ENGINE_NOT_LOADED;
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(image + ((const IMAGE_DOS_HEADER *)image)->e_lfanew);
+    if (nt->FileHeader.TimeDateStamp != ENGINE_TIMESTAMP) return ENGINE_OTHER;
+    if (nt->OptionalHeader.SizeOfImage == ENGINE_IMAGE_SIZE) return ENGINE_TARGETED;
+    const int count = sizeof targeted_sections / sizeof *targeted_sections;
+    if (nt->FileHeader.NumberOfSections < count) return ENGINE_OTHER;
+    const IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < count; i++, section++)
+        if (strncmp((const char *)section->Name, targeted_sections[i].name, IMAGE_SIZEOF_SHORT_NAME) || section->VirtualAddress != targeted_sections[i].address ||
+            section->Misc.VirtualSize != targeted_sections[i].size)
+            return ENGINE_OTHER;
+    return ENGINE_MODIFIED;
+}
+
+// MessageBox has no button texts of its own; these are set as the box opens.
+static LRESULT CALLBACK name_buttons(int code, WPARAM wparam, LPARAM lparam) {
+    if (code != HCBT_ACTIVATE) return CallNextHookEx(button_hook, code, wparam, lparam);
+    SetDlgItemTextW((HWND)wparam, IDOK, L"Launch Game");
+    SetDlgItemTextW((HWND)wparam, IDCANCEL, L"Exit Game");
+    UnhookWindowsHookEx(button_hook);
+    return 0;
+}
+
+// No owner window: the game's main thread waits inside device creation until the fixes are installed.
+static BOOL launch_on_other_build(void) {
+    wchar_t text[768];
+    swprintf(text, sizeof text / sizeof *text,
+             L"%ls\n\nempire.retail.dll was modified or updated and does not match the expected build.\n\nFixes whose engine code still matches are "
+             L"applied; the log in perf-logs lists the others. To launch without this message, set ignore_build_check=1 in s2prof.ini.",
+             BUILD_WARNING);
+    // The box takes no text, and Text Services on this thread could wait on the game's thread, blocked until we finish.
+    ImmDisableIME(0);
+    button_hook = SetWindowsHookExW(WH_CBT, name_buttons, NULL, GetCurrentThreadId());
+    build_warning_open = TRUE;
+    int answer = MessageBoxW(NULL, text, L"Shogun 2 fixes", MB_OKCANCEL | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
+    build_warning_open = FALSE;
+    return answer != IDCANCEL;
+}
+
+// "off (...)": the player switched the fix off in s2prof.ini.
+static BOOL switched_off(const char *error) {
+    return !strncmp(error, "off (", 5);
+}
+
+static const char *end_fix(const char *error) {
+    if (!open_fix) return error;
+    FixRecord *fix = &fix_records[open_fix - 1];
+    end_write_group();
+    char undone[128] = "";
+    if (error) {
+        int hooks, patches;
+        const char *undo_error = undo_write_group(open_fix, &hooks, &patches);
+        if (switch_count > fix->first_switch) switch_count = fix->first_switch;
+        if (undo_error) snprintf(undone, sizeof undone, "; undoing its writes failed: %s", undo_error);
+        else if (hooks || patches) snprintf(undone, sizeof undone, " (undone: %d hooks, %d patches)", hooks, patches);
+    }
+    fix->state = !error ? FIX_INSTALLED : switched_off(error) ? FIX_OFF : FIX_REFUSED;
+    size_t module_length = strcspn(fix->module, ".");
+    if (strlen(fix->name) == module_length && !strncmp(fix->name, fix->module, module_length))
+        log_line("module %s: %s%s", fix->module, error ? error : "installed", undone);
+    else
+        log_line("module %s: %s: %s%s", fix->module, fix->name, error ? error : "installed", undone);
+    open_fix = 0;
+    return error;
+}
+
+static void begin_fix(const char *name) {
+    if (open_fix) end_fix(NULL);
+    if (fix_count == MAX_FIXES) {
+        log_line("fix %s: not tracked, all %d fix slots are used; it cannot be undone", name, MAX_FIXES);
+        return;
+    }
+    FixRecord *fix = &fix_records[fix_count++];
+    *fix = (FixRecord){.counted = loading_fixes, .first_switch = switch_count};
+    snprintf(fix->name, sizeof fix->name, "%s", name);
+    snprintf(fix->module, sizeof fix->module, "%s", loading_module[0] ? loading_module : name);
+    open_fix = fix_count;
+    begin_write_group(open_fix);
+}
+
+static const char *check_engine(const S2Check *checks, int count) {
+    static char message[192];
+    for (int i = 0; i < count; i++)
+        if (!engine_hash_matches(engine, checks[i].rva, checks[i].size, checks[i].hash, checks[i].flags & S2_CHECK_ENTRY)) {
+            snprintf(message, sizeof message, "the engine's %s (0x%lx) differs from the targeted build", checks[i].what,
+                     (unsigned long)(ENGINE_PREFERRED_BASE + checks[i].rva));
+            return message;
+        }
+    return NULL;
+}
+
+static void log_fix_summary(ULONGLONG milliseconds) {
+    int counts[3] = {0};
+    char refused[512] = "";
+    for (int i = 0; i < fix_count; i++) {
+        if (!fix_records[i].counted) continue;
+        counts[fix_records[i].state]++;
+        if (fix_records[i].state == FIX_REFUSED && strlen(refused) + strlen(fix_records[i].name) + 3 < sizeof refused) {
+            strcat(refused, counts[FIX_REFUSED] > 1 ? ", " : ": ");
+            strcat(refused, fix_records[i].name);
+        }
+    }
+    log_line("fixes: %d installed, %d off in s2prof.ini, %d refused%s (%llu ms)", counts[FIX_INSTALLED], counts[FIX_OFF], counts[FIX_REFUSED], refused,
+             milliseconds);
+}
+
+// For the offline install check: the engine writes s2prof holds, and the fix (write group) each belongs to.
+__declspec(dllexport) int s2prof_live_writes(LiveWrite *out, int capacity) {
+    return list_live_writes(out, capacity);
+}
+
+__declspec(dllexport) const char *s2prof_fix(int group, int *state, BOOL *counted) {
+    if (group < 1 || group > fix_count) return NULL;
+    *state = fix_records[group - 1].state;
+    *counted = fix_records[group - 1].counted;
+    return fix_records[group - 1].name;
 }
 
 static S2Api module_api = {.fix_enabled = &fixes_enabled,
@@ -919,26 +1079,33 @@ static S2Api module_api = {.fix_enabled = &fixes_enabled,
                            .register_switch = register_switch,
                            .patch = patch_checked,
                            .set_hook_owner = set_hook_owner,
-                           .main_thread = &main_thread_id};
+                           .main_thread = &main_thread_id,
+                           .end_fix = end_fix,
+                           .begin_fix = begin_fix,
+                           .check_engine = check_engine};
 
 static void load_module(const char *utf8_path) {
     wchar_t path[MAX_PATH];
     MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, path, MAX_PATH);
     const char *name = strrchr(utf8_path, '\\') ? strrchr(utf8_path, '\\') + 1 : utf8_path;
+    char fix_name[MAX_FIX_NAME];
+    snprintf(fix_name, sizeof fix_name, "%.*s", (int)strcspn(name, "."), name);
+    snprintf(loading_module, sizeof loading_module, "%.*s", (int)sizeof loading_module - 1, name);
+    begin_fix(fix_name);
+    static char error[96];
     HMODULE module = LoadLibraryW(path);
+    S2ModuleMain module_main = module ? (S2ModuleMain)(void *)GetProcAddress(module, "s2_module_main") : NULL;
     if (!module) {
-        log_line("module %s: LoadLibrary failed: %lu", name, GetLastError());
-        return;
+        snprintf(error, sizeof error, "LoadLibrary failed: %lu", GetLastError());
+        end_fix(error);
+    } else if (!module_main) {
+        end_fix("no s2_module_main export");
+    } else {
+        module_api.engine = engine;
+        set_hook_owner(name);
+        end_fix(module_main(&module_api));
     }
-    S2ModuleMain module_main = (S2ModuleMain)(void *)GetProcAddress(module, "s2_module_main");
-    if (!module_main) {
-        log_line("module %s: no s2_module_main export", name);
-        return;
-    }
-    module_api.engine = engine;
-    set_hook_owner(name);
-    const char *error = module_main(&module_api);
-    log_line("module %s: %s", name, error ? error : "installed");
+    loading_module[0] = 0;
 }
 
 static void load_modules(const wchar_t *dir) {
@@ -985,15 +1152,29 @@ static DWORD WINAPI controller(LPVOID unused) {
     AddVectoredExceptionHandler(1, report_crash);
     if (console_error) log_line("console unavailable: error %lu", console_error);
     engine = (BYTE *)GetModuleHandleW(ENGINE_MODULE);
-    if (engine) {
-        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(engine + ((const IMAGE_DOS_HEADER *)engine)->e_lfanew);
-        engine_is_analysed_build = nt->FileHeader.TimeDateStamp == ENGINE_TIMESTAMP && nt->OptionalHeader.SizeOfImage == ENGINE_IMAGE_SIZE;
-    }
-    log_line("s2prof running inside the game (engine at 0x%lx, %s).", (unsigned long)(uintptr_t)engine,
-             !engine ? "not loaded" : engine_is_analysed_build ? "the analysed build" : "an unknown build: fixes will refuse to install");
+    engine_build = classify_engine(engine);
+    const char *device_mismatch = engine ? S2_CHECK_ENGINE(&module_api, s2prof_checks) : "empire.retail.dll not loaded";
+    device_readable = !device_mismatch;
+    log_line("s2prof running inside the game (engine at 0x%lx, %s).", (unsigned long)(uintptr_t)engine, engine_build_names[engine_build]);
+    if (device_mismatch) log_line("the DirectX 9 check and the report's device readout are off: %s", device_mismatch);
     install_present_hook();
-    if (engine_is_analysed_build) load_modules(fixes_dir);
-    else log_line("fixes not loaded: the engine is not the build they were made for");
+    if (engine_build == ENGINE_MODIFIED || engine_build == ENGINE_OTHER) {
+        if (GetPrivateProfileIntW(L"s2prof", L"ignore_build_check", 0, config_path)) {
+            log_line("build check off (ignore_build_check=1): installing every fix whose engine code still matches");
+        } else if (launch_on_other_build()) {
+            log_line("build warning: Launch Game; installing every fix whose engine code still matches");
+        } else {
+            log_line("build warning: Exit Game; ending the game");
+            TerminateProcess(GetCurrentProcess(), 0);
+        }
+    }
+    if (engine) {
+        ULONGLONG started = GetTickCount64();
+        loading_fixes = TRUE;
+        load_modules(fixes_dir);
+        loading_fixes = FALSE;
+        log_fix_summary(GetTickCount64() - started);
+    }
     set_apply_fixes(TRUE);
     log_help();
     SetEvent(ready_event);

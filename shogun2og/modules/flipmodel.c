@@ -1,6 +1,7 @@
 #define _WIN32_WINNT 0x0A00
 #define COBJMACROS
 #include "../s2module.h"
+#include "../checks/flipmodel.h"
 #include <d3d11.h>
 #include <dxgi.h>
 #include <dxgi1_3.h>
@@ -259,6 +260,8 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     api = host;
     read_settings();
     if (!buffer_count) return "off ([flipmodel] enabled=0 in s2prof.ini)";
+    const char *mismatch = S2_CHECK_ENGINE(host, flipmodel_checks);
+    if (mismatch) return mismatch;
     if (buffer_count < 2) buffer_count = 2;
     if (buffer_count > 4) buffer_count = 4;
     BYTE *device = *(BYTE **)(api->engine + RENDER_DEVICE_RVA);

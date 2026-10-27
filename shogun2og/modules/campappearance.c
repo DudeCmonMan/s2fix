@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/campappearance.h"
 #include <intrin.h>
 #include <stdint.h>
 #include <string.h>
@@ -79,6 +80,8 @@ static DWORD WINAPI report_loop(LPVOID unused) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, campappearance_checks);
+    if (mismatch) return mismatch;
     api = host;
     if (!api->main_thread) return "the host is older than this module (no main_thread)";
     const char *error = api->hook(api->engine + WALK_RVA, walk_prologue, sizeof walk_prologue, (const void *)walk_hook, (void **)&original_walk);

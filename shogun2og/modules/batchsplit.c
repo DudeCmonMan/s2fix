@@ -1,6 +1,7 @@
 #define _WIN32_WINNT 0x0A00
 #include "../s2module.h"
 #include "../spinwait.h"
+#include "../checks/batchsplit.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -358,6 +359,8 @@ static void report(BOOL start) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, batchsplit_checks);
+    if (mismatch) return mismatch;
     api = host;
     if (!s2_prologue_ready(api->engine + BATCH_RVA, batch_prologue, 3) || !s2_prologue_ready(api->engine + APPEND_RVA, append_prologue, sizeof append_prologue))
         return "the batch or the list append differs from the analysed build";

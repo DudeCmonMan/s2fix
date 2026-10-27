@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/portraitprep.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -222,6 +223,8 @@ static void report(BOOL start) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, portraitprep_checks);
+    if (mismatch) return mismatch;
     api = host;
     if (!api->main_thread) return "the host is older than this module (no main_thread)";
     frame_stamp = (volatile uint64_t *)(api->engine + FRAME_STAMP_RVA);

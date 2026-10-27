@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/imposterreuse.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -157,6 +158,8 @@ static void report(BOOL start) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, imposterreuse_checks);
+    if (mismatch) return mismatch;
     api = host;
     if (!api->main_thread) return "the host is older than this module (no main_thread)";
     if (!s2_prologue_ready(api->engine + GEOMETRY_RVA, geometry_prologue, sizeof geometry_prologue) ||

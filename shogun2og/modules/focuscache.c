@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/focuscache.h"
 #include <stdint.h>
 
 // The engine's "is key down" query (stdcall, 0x10bd12a0, 56 call sites) calls GetForegroundWindow, a system call, on
@@ -33,6 +34,8 @@ static HWND WINAPI get_foreground_window_hook(void) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, focuscache_checks);
+    if (mismatch) return mismatch;
     fix_enabled = api->fix_enabled;
     frame_stamp = (volatile uint32_t *)(api->engine + FRAME_STAMP_RVA);
     void **slot = (void **)(api->engine + GET_FOREGROUND_WINDOW_IAT_RVA);

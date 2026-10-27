@@ -1,6 +1,7 @@
 #define _WIN32_WINNT 0x0A00
 #include "../s2module.h"
 #include "../spinwait.h"
+#include "../checks/walksplit.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -317,6 +318,8 @@ static void report(BOOL start) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, walksplit_checks);
+    if (mismatch) return mismatch;
     api = host;
     if (memcmp(api->engine + RECORD_CALL_RVA, record_call, sizeof record_call) || !s2_prologue_ready(api->engine + WALK_RVA, walk_prologue, sizeof walk_prologue))
         return "the walk differs from the analysed build";

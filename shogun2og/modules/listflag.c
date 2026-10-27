@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/listflag.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -39,6 +40,8 @@ static const BYTE store_bytes[] = {0xc6, 0x45, 0x24, 0x01, 0x8d, 0x4f, 0x01};
 #define SITES (sizeof store_rvas / sizeof *store_rvas)
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, listflag_checks);
+    if (mismatch) return mismatch;
     listflag_fix_enabled = api->fix_enabled;
     // Every site is checked before any is patched, so a mismatched build is left untouched.
     for (size_t i = 0; i < SITES; i++)

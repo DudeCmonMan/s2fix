@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/itemcopy.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -32,6 +33,8 @@ static void *__attribute__((thiscall)) assignment_hook(void *destination, const 
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, itemcopy_checks);
+    if (mismatch) return mismatch;
     fix_enabled = api->fix_enabled;
     if (!s2_prologue_ready(api->engine + COPY_CONSTRUCTOR_RVA, copy_prologue, sizeof copy_prologue) ||
         !s2_prologue_ready(api->engine + ASSIGNMENT_RVA, copy_prologue, sizeof copy_prologue))

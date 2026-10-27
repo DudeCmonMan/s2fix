@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/camprelations.h"
 #include <intrin.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -120,6 +121,8 @@ static DWORD WINAPI report_loop(LPVOID unused) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, camprelations_checks);
+    if (mismatch) return mismatch;
     api = host;
     if ((cache_slot = TlsAlloc()) == TLS_OUT_OF_INDEXES) return "no TLS slot left";
     const char *error = api->hook(api->engine + SEARCH_RVA, search_prologue, sizeof search_prologue, (const void *)search_hook, (void **)&original_search);

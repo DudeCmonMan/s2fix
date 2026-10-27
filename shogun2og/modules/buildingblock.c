@@ -1,4 +1,5 @@
 #include "../patchset.h"
+#include "../checks/buildingblock.h"
 
 // The building draw (0x102bfc50) runs, for every piece whose damage ratio x 0.7 is not exactly 1, a loop over every other
 // piece of the building: a pure distance function (0x101aaed0, float math, no stores), plus 5 and a bit-trick square
@@ -34,11 +35,13 @@ static PatchSet ratio_set = {.name = "buildingratio", .patches = ratio_patches, 
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
     set.api = ratio_set.api = api;
-    const char *error = start_patch_set(&set);
-    if (error) return error;
-    api->register_switch("buildingblock", &skip_enabled, NULL);
-    error = start_patch_set(&ratio_set);
-    if (error) return error;
-    api->register_switch("buildingratio", &ratio_skip_enabled, NULL);
-    return NULL;
+    const char *error = S2_CHECK_ENGINE(api, buildingblock_checks);
+    if (!error) error = start_patch_set(&set);
+    if (!error) api->register_switch("buildingblock", &skip_enabled, NULL);
+    api->end_fix(error);
+    api->begin_fix("buildingratio");
+    error = S2_CHECK_ENGINE(api, buildingratio_checks);
+    if (!error) error = start_patch_set(&ratio_set);
+    if (!error) api->register_switch("buildingratio", &ratio_skip_enabled, NULL);
+    return error;
 }

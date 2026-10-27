@@ -1,6 +1,19 @@
 #pragma once
 #include <windows.h>
+#include <stdint.h>
 #include <string.h>
+
+// The engine bytes at [rva, rva + size), relocations and s2prof's own writes taken out, hash (FNV-1a 64) to hash in the
+// build the fixes were made for. Generated into checks/<module>.h.
+typedef struct {
+    DWORD rva, size;
+    uint64_t hash;
+    DWORD flags;
+    const char *what;
+} S2Check;
+
+// A function the fix only calls: it must still be there, and another mod's jump at its entry still runs it.
+#define S2_CHECK_ENTRY 1
 
 // A fix module is a DLL exporting s2_module_main; it returns NULL once installed, or why it could not install.
 typedef struct {
@@ -22,12 +35,22 @@ typedef struct {
     void (*set_hook_owner)(const char *module_name);
     // The game's main thread, the one that presents frames; 0 until the first frame.
     volatile DWORD *main_thread;
+    // The host begins one fix per module and ends it with s2_module_main's result. A fix that ends with an error has its
+    // hooks, patches and switches undone. A module holding several independent fixes ends each one and begins the next
+    // by name.
+    const char *(*end_fix)(const char *error);
+    void (*begin_fix)(const char *name);
+    // NULL when every check holds, else which engine code differs; fixes call it before installing anything.
+    const char *(*check_engine)(const S2Check *checks, int count);
 } S2Api;
 
 typedef const char *(*S2ModuleMain)(const S2Api *api);
 
 // A quick check before hooking several targets, so a mismatched build is left untouched. A target s2prof already hooked
-// starts with its jump; the hook call itself checks the bytes against the file, relocations applied.
+// starts with its jump; the hook call itself checks the bytes against the file, relocations applied. Another mod's jump
+// passes too: its hook call refuses, and the host undoes the fix's earlier hooks.
 static inline BOOL s2_prologue_ready(const BYTE *target, const BYTE *prologue, size_t size) {
     return target[0] == 0xe9 || !memcmp(target, prologue, size);
 }
+
+#define S2_CHECK_ENGINE(api, checks) (api)->check_engine(checks, (int)(sizeof checks / sizeof *checks))

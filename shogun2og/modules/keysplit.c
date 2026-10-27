@@ -1,5 +1,6 @@
 #define _WIN32_WINNT 0x0A00
 #include "../s2module.h"
+#include "../checks/keysplit.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <xmmintrin.h>
@@ -180,6 +181,8 @@ static void report(BOOL start) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, keysplit_checks);
+    if (mismatch) return mismatch;
     api = host;
     if (!api->main_thread) return "the host is older than this module (no main_thread)";
     for (int k = 0; k < HELPERS; k++) {

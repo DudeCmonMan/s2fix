@@ -198,7 +198,7 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     *wcsrchr(path, L'\\') = 0;
     wcscat(path, L"\\" CONFIG_FILE);
     GetPrivateProfileStringW(L"cpu", L"ccd", L"off", ccd_setting, 16, path);
-    if (!wcscmp(ccd_setting, L"off")) return "ccd=off in s2prof.ini; placement left to the engine and Windows";
+    if (!wcscmp(ccd_setting, L"off")) return "off (ccd=off in s2prof.ini; placement left to the engine and Windows)";
     const char *error = read_cpus();
     ULONG cache;
     if (!error) error = choose_ccd(ccd_setting, &cache);

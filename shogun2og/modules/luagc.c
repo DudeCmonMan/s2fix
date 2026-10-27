@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/luagc.h"
 #include <stdint.h>
 #include <string.h>
 #include <intrin.h>
@@ -74,6 +75,8 @@ static void report(BOOL start) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, luagc_checks);
+    if (mismatch) return mismatch;
     api = host;
     engine = api->engine;
     lua_gc = (LuaGcFn)(engine + LUA_GC_RVA);

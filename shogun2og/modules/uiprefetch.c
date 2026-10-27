@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/uiprefetch.h"
 #include <stdint.h>
 #include <intrin.h>
 #include <xmmintrin.h>
@@ -68,6 +69,8 @@ static uintptr_t __attribute__((thiscall)) update_hook(BYTE *component, uint32_t
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, uiprefetch_checks);
+    if (mismatch) return mismatch;
     fix_enabled = api->fix_enabled;
     frame_stamp = (volatile uint32_t *)(api->engine + FRAME_STAMP_RVA);
     const char *error = api->hook(api->engine + UPDATE_RVA, update_prologue, sizeof update_prologue, (const void *)update_hook, (void **)&original_update);

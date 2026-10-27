@@ -13,7 +13,9 @@ typedef struct {
 
 typedef struct {
     BYTE *engine;
-    BOOL engine_is_analysed_build;
+    const char *engine_build;
+    // The device global and the device vtables are where the targeted build has them.
+    BOOL device_readable;
     const wchar_t *output_dir;
     const wchar_t *config_path;
     const char *run_id;

@@ -1,5 +1,6 @@
 #define COBJMACROS
 #include "../s2module.h"
+#include "../checks/vram.h"
 #include <dxgi.h>
 #include <stdint.h>
 #include <wchar.h>
@@ -91,6 +92,8 @@ static BOOL enabled_in_ini(void) {
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     api = host;
-    if (!enabled_in_ini()) return "[vram] enabled=0 in s2prof.ini; the game keeps its own video memory total";
+    if (!enabled_in_ini()) return "off ([vram] enabled=0 in s2prof.ini; the game keeps its own video memory total)";
+    const char *mismatch = S2_CHECK_ENGINE(host, vram_checks);
+    if (mismatch) return mismatch;
     return api->hook(api->engine + TOTAL_RVA, total_prologue, sizeof total_prologue, (const void *)total_hook, (void **)&original_total);
 }

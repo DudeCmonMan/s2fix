@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/powcache.h"
 #include <stdint.h>
 
 // The engine converts colours from gamma to linear space with powf(channel, 2.2): the gamma helpers RigidNode::add_model
@@ -68,6 +69,8 @@ __asm__(".text\n.intel_syntax noprefix\n"
         ".att_syntax\n");
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, powcache_checks);
+    if (mismatch) return mismatch;
     powcache_fix_enabled = api->fix_enabled;
     const char *error = api->hook(api->engine + POWF_RVA, powf_prologue, sizeof powf_prologue, (const void *)powf_hook, &powcache_original);
     if (!error) api->register_switch("powcache", &cache_enabled, NULL);

@@ -2,6 +2,7 @@
 #define COBJMACROS
 #include "../s2module.h"
 #include "../spinwait.h"
+#include "../checks/overhaul.h"
 #include <d3d11.h>
 #include <intrin.h>
 #include <malloc.h>
@@ -2959,6 +2960,8 @@ static const char *patch_slot(void **slot, void *replacement, void **original) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
+    const char *mismatch = S2_CHECK_ENGINE(s2, overhaul_checks);
+    if (mismatch) return mismatch;
     api = s2;
     engine = api->engine;
     if (!api->main_thread) return "the host is older than this module (no main_thread)";

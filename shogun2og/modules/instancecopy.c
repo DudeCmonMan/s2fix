@@ -1,4 +1,5 @@
 #include "../patchset.h"
+#include "../checks/instancecopy.h"
 
 // The engine's per-draw instance gathers copy each instance's record into the mapped instance buffer: the Variant
 // gatherer (0x114c5770, from item + 0x54 with instancing, + 0x04 without), its lookup-slot-0 twins (0x114c56d0,
@@ -28,6 +29,8 @@ static CodePatch patches[] = {
 static PatchSet set = {.name = "instancecopy", .patches = patches, .count = sizeof patches / sizeof *patches, .flag = &loop_copies_enabled};
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, instancecopy_checks);
+    if (mismatch) return mismatch;
     set.api = api;
     const char *error = start_patch_set(&set);
     if (!error) api->register_switch("instancecopy", &loop_copies_enabled, NULL);

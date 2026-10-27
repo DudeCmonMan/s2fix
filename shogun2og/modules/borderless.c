@@ -1,5 +1,6 @@
 #define _WIN32_WINNT 0x0A00
 #include "../s2module.h"
+#include "../checks/borderless.h"
 #include <stdio.h>
 #include <wchar.h>
 
@@ -168,6 +169,8 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     api = host;
     read_settings();
     if (!borderless_wanted) return "off ([window] borderless=0 in s2prof.ini)";
+    const char *mismatch = S2_CHECK_ENGINE(host, borderless_checks);
+    if (mismatch) return mismatch;
     if (!api->main_thread) return "the host is older than this module (no main_thread)";
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     static char error[96];

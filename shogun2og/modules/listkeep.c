@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/listkeep.h"
 #include <stdint.h>
 
 // A render list (0x114da700's `this`) is a vector of 312-byte items {capacity, count, data}, an array of per-thread
@@ -55,6 +56,8 @@ static void __attribute__((thiscall)) clear_hook(BYTE *list) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, listkeep_checks);
+    if (mismatch) return mismatch;
     api = host;
     const char *error = api->hook(api->engine + CLEAR_RVA, clear_prologue, sizeof clear_prologue, (const void *)clear_hook, (void **)&original_clear);
     if (error) return error;

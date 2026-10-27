@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/texturecache.h"
 #include <stdint.h>
 #include <string.h>
 #include <intrin.h>
@@ -75,6 +76,8 @@ static BYTE *__attribute__((thiscall)) map_find_hook(BYTE *map, const void *key)
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, texturecache_checks);
+    if (mismatch) return mismatch;
     fix_enabled = api->fix_enabled;
     string_equal = (StringEqualFn)(api->engine + STRING_EQUAL_RVA);
     if (memcmp(api->engine + STRING_EQUAL_RVA, string_equal_prologue, sizeof string_equal_prologue)) return "the key comparison differs from the analysed build";
