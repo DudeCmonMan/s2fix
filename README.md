@@ -108,6 +108,7 @@ fixes\           one DLL per fix
 | `listflag` | stops the parallel render-list append from rewriting a shared flag on every call |
 | `instancecopy` | copies per-draw instance records with 16-byte moves instead of a memcpy call each |
 | `itemcopy` | copies 176-byte render items whole |
+| `listkeep` | keeps the render lists' per-thread buffers between frames instead of regrowing them every frame |
 | `imposterreuse` | reuses imposter uploads already in the geometry buffer this frame |
 | `texturecache` | caches the HUD's per-quad texture-name lookups |
 | `uiprefetch` | prefetches the UI tree's next nodes during its update |
@@ -115,7 +116,9 @@ fixes\           one DLL per fix
 | `luagc` | steps the shared Lua heap's collector once per frame instead of once per Lua state |
 | `focuscache` | asks Windows for the foreground window once per frame instead of on every key query |
 | `scenelock` | spins longer on the unit emission lock instead of sleeping in the kernel |
+| `buildingblock` | skips work the building draw throws away every frame: a loop over each building piece's neighbours, and the value that decided it (most noticeable in sieges and towns) |
 | `cpuplace` | keeps the game's threads on the CCD `[cpu] ccd` names |
+| `maincore` | gives the main thread a CPU core of its own and keeps the game's other threads off it |
 
 On the campaign map:
 
@@ -124,7 +127,7 @@ On the campaign map:
 | `camprelations` | remembers where each faction's record is: every character on the map searched the whole faction list for it several times a frame |
 | `campappearance` | remembers which appearance entry each character's model uses instead of searching the character's appearance set again every frame |
 
-`s2prof.dll` also replaces two engine sorts (render items and effect objects) with stable radix sorts.
+`s2prof.dll` also replaces two engine sorts (render items and effect objects) with stable sorts: a counting sort when a list has few distinct keys, otherwise a radix sort.
 
 ## Shogun 2, the original game
 

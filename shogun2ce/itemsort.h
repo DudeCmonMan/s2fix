@@ -104,16 +104,86 @@ static size_t count_render_item_descents(const uint8_t *first, size_t count) {
     return descents;
 }
 
-// Items are moved whole: the game's copy only skips padding and unused bitfield bits, which nothing reads.
-// Returns the number of items moved, or -1 when the buffers cannot be allocated.
-static long long sort_render_items(uint8_t *first, uint8_t *last) {
+// List A holds ~20,000 items under few distinct keys, so a counting sort over the distinct keys finds the order in one
+// pass where the radix takes a histogram pass and a scatter per varying key byte. Same stable order as the radix.
+#define FEW_KEYS_MAX 1024
+#define FEW_KEYS_SLOTS 4096
+// After a list has more distinct keys than that, its next sorts skip the attempt.
+#define FEW_KEYS_BACKOFF 16
+#define FEW_KEYS_LISTS 4
+
+typedef struct {
+    uint64_t keys[FEW_KEYS_MAX];
+    uint32_t position[FEW_KEYS_MAX], by_rank[FEW_KEYS_MAX];
+    uint16_t slots[FEW_KEYS_SLOTS];
+    uint16_t *ids;
+    size_t id_capacity;
+    int backoff[FEW_KEYS_LISTS];
+} FewKeys;
+
+static __thread FewKeys few;
+
+static uint32_t key_slot(uint64_t key) {
+    return (uint32_t)((key ^ 0x9e3779b97f4a7c15ull) * 0xff51afd7ed558ccdull >> 40) & (FEW_KEYS_SLOTS - 1);
+}
+
+static int few_key_less(const void *a, const void *b) {
+    uint64_t x = few.keys[*(const uint32_t *)a], y = few.keys[*(const uint32_t *)b];
+    return x < y ? -1 : x > y;
+}
+
+// Fills order (index = source of each destination) and returns 1, or 0 when there are too many distinct keys or no room.
+static int few_keys_order(const uint8_t *first, size_t count, KeyedIndex *order) {
+    if (count > few.id_capacity) {
+        uint16_t *ids = realloc(few.ids, count * 2 * sizeof *ids);
+        if (!ids) return 0;
+        few.ids = ids;
+        few.id_capacity = count * 2;
+    }
+    memset(few.slots, 0, sizeof few.slots);
+    uint32_t distinct = 0;
+    for (size_t i = 0; i < count; i++) {
+        uint64_t key = render_item_key(first + i * RENDER_ITEM_SIZE);
+        for (uint32_t slot = key_slot(key);; slot = (slot + 1) & (FEW_KEYS_SLOTS - 1)) {
+            uint32_t id = few.slots[slot];
+            if (!id) {
+                if (distinct == FEW_KEYS_MAX) return 0;
+                few.keys[distinct] = key;
+                few.position[distinct] = 0;
+                few.slots[slot] = (uint16_t)++distinct;
+                id = distinct;
+            } else if (few.keys[id - 1] != key) {
+                continue;
+            }
+            few.ids[i] = (uint16_t)(id - 1);
+            few.position[id - 1]++;
+            break;
+        }
+    }
+    for (uint32_t id = 0; id < distinct; id++) few.by_rank[id] = id;
+    qsort(few.by_rank, distinct, sizeof *few.by_rank, few_key_less);
+    uint32_t offset = 0;
+    for (uint32_t rank = 0; rank < distinct; rank++) {
+        uint32_t id = few.by_rank[rank], size = few.position[id];
+        few.position[id] = offset;
+        offset += size;
+    }
+    for (size_t i = 0; i < count; i++) order[few.position[few.ids[i]]++].index = i;
+    return 1;
+}
+
+// Items are moved whole: the game's copy only skips padding and unused bitfield bits, which nothing reads. With few_keys
+// the counting sort is tried first, per list (below FEW_KEYS_LISTS). Returns the number of items moved, or -1 when the
+// buffers cannot be allocated.
+static long long sort_render_items(uint8_t *first, uint8_t *last, int few_keys, int list) {
     size_t count = (last - first) / RENDER_ITEM_SIZE;
     if (count < 2) return 0;
     if (!reserve(count)) return -1;
-    for (size_t i = 0; i < count; i++) {
-        buffers.items[i] = first + i * RENDER_ITEM_SIZE;
-        buffers.keys[i] = (KeyedIndex){render_item_key(buffers.items[i]), i};
-    }
+    for (size_t i = 0; i < count; i++) buffers.items[i] = first + i * RENDER_ITEM_SIZE;
+    if (few_keys && few.backoff[list]) few.backoff[list]--;
+    else if (few_keys && few_keys_order(first, count, buffers.keys)) return permute_items(buffers.items, buffers.keys, count, RENDER_ITEM_SIZE);
+    else if (few_keys) few.backoff[list] = FEW_KEYS_BACKOFF;
+    for (size_t i = 0; i < count; i++) buffers.keys[i] = (KeyedIndex){render_item_key(buffers.items[i]), i};
     return permute_items(buffers.items, radix_sort(buffers.keys, buffers.scratch, count), count, RENDER_ITEM_SIZE);
 }
 

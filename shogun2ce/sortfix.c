@@ -41,6 +41,8 @@ typedef struct {
 } InstalledHook;
 
 volatile LONG fixes_enabled;
+volatile LONG few_keys_enabled = 1;
+volatile LONG *volatile sort_mode_flag = &fixes_enabled;
 volatile LONG sortfix_allocation_failures;
 SortStats sort_stats[2][SORT_CALLERS];
 const char *const sort_caller_names[SORT_CALLERS] = {"render list", "other list", "object list", "unknown caller"};
@@ -92,13 +94,13 @@ static void render_sort_hook(uint8_t *first, uint8_t *last, int64_t ideal, uint6
     sort_depth = 1;
     if (!enabled) {
         original_render_sort(first, last, ideal, predicate);
-    } else if ((descents = count_render_item_descents(first, count)) && (moved = sort_render_items(first, last)) < 0) {
+    } else if ((descents = count_render_item_descents(first, count)) && (moved = sort_render_items(first, last, few_keys_enabled != 0, caller)) < 0) {
         InterlockedIncrement(&sortfix_allocation_failures);
         moved = 0;
         original_render_sort(first, last, ideal, predicate);
     }
     sort_depth = 0;
-    record(enabled, caller, count, now_ticks() - started, descents, moved);
+    record(*sort_mode_flag != 0, caller, count, now_ticks() - started, descents, moved);
 }
 
 static void object_sort_hook(VectorIterator *first, VectorIterator *last, int64_t ideal, uint64_t predicate) {
@@ -122,7 +124,7 @@ static void object_sort_hook(VectorIterator *first, VectorIterator *last, int64_
         original_object_sort(first, last, ideal, predicate);
     }
     sort_depth = 0;
-    record(enabled, caller, count, now_ticks() - started, descents, moved);
+    record(*sort_mode_flag != 0, caller, count, now_ticks() - started, descents, moved);
 }
 
 static void write_jump(BYTE *at, const void *destination) {
@@ -133,7 +135,10 @@ static void write_jump(BYTE *at, const void *destination) {
 }
 
 // Other threads are suspended so none can execute a half-written prologue.
-const char *patch_code(BYTE *target, const BYTE *patch, size_t size) {
+// One patcher at a time: two threads each suspending all others could suspend each other and stop the process.
+static SRWLOCK patch_lock = SRWLOCK_INIT;
+
+static const char *patch_code_locked(BYTE *target, const BYTE *patch, size_t size) {
     static HANDLE handles[MAX_PATCH_THREADS];
     int count = 0;
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -173,14 +178,28 @@ const char *patch_code(BYTE *target, const BYTE *patch, size_t size) {
     return result;
 }
 
+const char *patch_code(BYTE *target, const BYTE *patch, size_t size) {
+    AcquireSRWLockExclusive(&patch_lock);
+    const char *result = patch_code_locked(target, patch, size);
+    ReleaseSRWLockExclusive(&patch_lock);
+    return result;
+}
+
+const char *patch_checked(BYTE *target, const BYTE *expected, const BYTE *replacement, size_t size) {
+    AcquireSRWLockExclusive(&patch_lock);
+    const char *result = memcmp(target, expected, size) ? "engine code differs from the analysed build" : patch_code_locked(target, replacement, size);
+    ReleaseSRWLockExclusive(&patch_lock);
+    return result;
+}
+
 // A target hooked before keeps its trampoline and only has its jump redirected, so a reloaded module replaces the earlier hook.
-const char *hook_function(BYTE *target, const BYTE *prologue, size_t size, const void *replacement, void **original) {
+static const char *hook_function_locked(BYTE *target, const BYTE *prologue, size_t size, const void *replacement, void **original) {
     BYTE patch[MAX_HOOK_PATCH];
     write_jump(patch, replacement);
     for (int i = 0; i < installed_hook_count; i++)
         if (installed_hooks[i].target == target) {
             *original = installed_hooks[i].trampoline;
-            return patch_code(target, patch, JUMP_SIZE);
+            return patch_code_locked(target, patch, JUMP_SIZE);
         }
     if (installed_hook_count == MAX_HOOKS) return "all hook slots used";
     if (size < JUMP_SIZE || size > MAX_HOOK_PATCH) return "prologue size must fit the jump and the patch buffer";
@@ -192,9 +211,16 @@ const char *hook_function(BYTE *target, const BYTE *prologue, size_t size, const
     FlushInstructionCache(GetCurrentProcess(), trampoline, size + JUMP_SIZE);
     *original = trampoline;
     memset(patch + JUMP_SIZE, 0xcc, size - JUMP_SIZE);
-    const char *error = patch_code(target, patch, size);
+    const char *error = patch_code_locked(target, patch, size);
     if (!error) installed_hooks[installed_hook_count++] = (InstalledHook){target, trampoline};
     return error;
+}
+
+const char *hook_function(BYTE *target, const BYTE *prologue, size_t size, const void *replacement, void **original) {
+    AcquireSRWLockExclusive(&patch_lock);
+    const char *result = hook_function_locked(target, prologue, size, replacement, original);
+    ReleaseSRWLockExclusive(&patch_lock);
+    return result;
 }
 
 const char *sortfix_install(void) {

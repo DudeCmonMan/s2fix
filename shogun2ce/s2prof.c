@@ -42,6 +42,9 @@
 #define FRAME_STAMP_STORE_RVA 0x161fd1
 #define FRAME_STAMP_RVA 0x2ead830
 static const BYTE frame_stamp_store[] = {0x48, 0x89, 0x05, 0x58, 0xb8, 0xd4, 0x02};
+// D3D11_RENDER_DEVICE::present, which runs on the game's main thread.
+#define PRESENT_RVA 0x1ae7240
+static const BYTE present_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x6c, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x60};
 static const char *const mode_names[2] = {"off", "on"};
 
 typedef struct {
@@ -631,7 +634,7 @@ static void log_summary(const CaptureStats *stats) {
     }
     double page_faults[2] = {stats->page_faults[0] / frames_or_one(stats, 0), stats->page_faults[1] / frames_or_one(stats, 1)};
     log_row("page faults/frame", stats, page_faults, "%.0f");
-    if (stats->mode_switch == &switches[0]) log_sort_rows(stats);
+    if (stats->mode_switch == &switches[0] || stats->mode_switch->flag == &few_keys_enabled) log_sort_rows(stats);
     if (sortfix_allocation_failures) log_line("  sort fix fell back to the original %ld times (allocation failed)", sortfix_allocation_failures);
     int order[MAX_THREADS], others = 0;
     for (int i = 0; i < thread_count; i++)
@@ -806,6 +809,7 @@ static void capture(int seconds, Switch *ab) {
              alternating ? ab->name : "");
     if (alternating && ab->report) ab->report(TRUE);
     find_frame_stamp();
+    sort_mode_flag = mode_switch->flag;
     sortfix_reset_stats();
     stack_index = calloc(INDEX_SIZE, sizeof *stack_index);
     // A high-resolution timer rather than timeBeginPeriod, which would change the game's own timer behaviour.
@@ -825,6 +829,7 @@ static void capture(int seconds, Switch *ab) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
     CloseHandle(timer);
     if (alternating) *mode_switch->flag = enabled_before;
+    sort_mode_flag = &fixes_enabled;
     if (mode_switch->flag == &fixes_enabled) sync_overhaul();
     ok = ok && write_threads_file(number, &stats) && write_stacks_file(number);
     if (ok) log_summary(&stats);
@@ -851,10 +856,21 @@ static void start_run(void) {
     log_line("run %s: logs go to %s", run_id, folder);
 }
 
+typedef uint64_t (*PresentFn)(BYTE *device);
+static PresentFn original_present;
+static volatile DWORD main_thread_id;
+
+static uint64_t present_hook(BYTE *device) {
+    if (!main_thread_id) main_thread_id = GetCurrentThreadId();
+    return original_present(device);
+}
+
 static S2Api module_api = {.fix_enabled = &fixes_enabled,
                            .log_line = log_line,
                            .hook = hook_function,
-                           .register_switch = register_switch};
+                           .register_switch = register_switch,
+                           .patch = patch_checked,
+                           .main_thread = &main_thread_id};
 
 static void load_module(const char *utf8_path) {
     wchar_t path[MAX_PATH];
@@ -927,6 +943,12 @@ static DWORD WINAPI controller(LPVOID unused) {
     sortfix_error = sortfix_install();
     log_line("s2prof running inside the game.");
     if (sortfix_error) log_line("sort fix unavailable: %s; Apply Fixes cannot be turned on", sortfix_error);
+    else register_switch("fewkeys", &few_keys_enabled, NULL);
+    BYTE *engine = (BYTE *)GetModuleHandleW(ENGINE_MODULE);
+    const char *present_error = engine ? hook_function(engine + PRESENT_RVA, present_prologue, sizeof present_prologue, (const void *)present_hook,
+                                                       (void **)&original_present)
+                                       : "empire.retail.x64.dll not loaded";
+    if (present_error) log_line("main thread unknown (fixes that need it stay off): present hook: %s", present_error);
     load_modules(fixes_dir);
     set_apply_fixes(TRUE);
     log_help();

@@ -42,7 +42,7 @@ static void fill_random(uint8_t *bytes, size_t size) {
     for (size_t b = 0; b < size; b++) bytes[b] = (uint8_t)next_random();
 }
 
-static int check_render_items(size_t count, int pattern) {
+static int check_render_items(size_t count, int pattern, int few_keys) {
     uint8_t *items = malloc(count * RENDER_ITEM_SIZE + 1), *original = malloc(count * RENDER_ITEM_SIZE + 1);
     for (size_t i = 0; i < count; i++) {
         uint8_t *item = items + i * RENDER_ITEM_SIZE;
@@ -55,7 +55,9 @@ static int check_render_items(size_t count, int pattern) {
     size_t descents = 0;
     for (size_t i = 1; i < count; i++) descents += render_item_key(items + i * RENDER_ITEM_SIZE) < render_item_key(items + (i - 1) * RENDER_ITEM_SIZE);
     if (count_render_item_descents(items, count) != descents) return printf("render count=%zu pattern=%d: descents miscounted\n", count, pattern), 0;
-    long long moved = sort_render_items(items, items + count * RENDER_ITEM_SIZE);
+    // A fresh list each time, so an earlier pattern's many keys never skip this one's counting sort.
+    memset(few.backoff, 0, sizeof few.backoff);
+    long long moved = sort_render_items(items, items + count * RENDER_ITEM_SIZE, few_keys, 0);
     if (moved < 0 || (size_t)moved > count) return printf("render count=%zu pattern=%d: moved=%lld\n", count, pattern, moved), 0;
     if (!descents && moved) return printf("render count=%zu pattern=%d: sorted input moved %lld items\n", count, pattern, moved), 0;
     uint8_t *seen = calloc(count + 1, 1);
@@ -183,11 +185,12 @@ int main(void) {
     int failures = 0, runs = 0;
     for (size_t c = 0; c < sizeof counts / sizeof *counts; c++)
         for (int pattern = 0; pattern < 7; pattern++) {
-            failures += !check_render_items(counts[c], pattern);
+            failures += !check_render_items(counts[c], pattern, 0);
+            failures += !check_render_items(counts[c], pattern, 1);
             failures += !check_objects(counts[c], 0, pattern);
             failures += !check_objects(counts[c], counts[c] / 3, pattern);
             failures += !check_entries(counts[c], pattern);
-            runs += 4;
+            runs += 5;
         }
     printf("%d/%d sort checks passed\n", runs - failures, runs);
     return failures != 0;
