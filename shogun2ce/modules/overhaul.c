@@ -2,6 +2,7 @@
 #define COBJMACROS
 #include "../s2module.h"
 #include "../spinwait.h"
+#include "tebslot.h"
 #include <initguid.h>
 #include <d3d11_4.h>
 #include <intrin.h>
@@ -84,7 +85,6 @@
 // Every change flag a Variant writer acts on except 0x01 (bone palette, instancing off): a range's first group writes
 // all of its own parameters instead of relying on the previous range's groups.
 #define FORCED_FLAGS 0x1b6
-#define TLS_SLOTS_OFFSET 0x1480
 #define PREPARE_RVA 0x1b20520
 #define COMPUTE_KEYS_RVA 0x1b4e6e0
 #define LIST_C_KEYS_RETURN_RVA 0x1b206ad
@@ -957,7 +957,7 @@ static int ab_mode(void) {
 }
 
 static Worker *current_worker(void) {
-    return (Worker *)__readgsqword(TLS_SLOTS_OFFSET + 8 * tls_index);
+    return teb_slot_get(tls_index);
 }
 
 static void *method(void *object, int offset) {
@@ -4632,12 +4632,11 @@ static const char *const context_method_names[CONTEXT_METHODS] = {"QueryInterfac
 
 __asm__(".text\n.intel_syntax noprefix\n"
         "count_deferred_call:\n"
-        "  mov eax, dword ptr [rip+tls_index]\n"
-        "  cmp qword ptr gs:[rax*8+0x1480], 0\n"
+        "  call worker_slot\n"
+        "  test rax, rax\n"
         "  je 4f\n"
         "count_immediate_call:\n"
-        "  mov eax, dword ptr [rip+tls_index]\n"
-        "  mov rax, qword ptr gs:[rax*8+0x1480]\n"
+        "  call worker_slot\n"
         "  test rax, rax\n"
         "  jz 1f\n"
         "  add rax, qword ptr [rip+worker_calls_offset]\n"
@@ -4652,6 +4651,21 @@ __asm__(".text\n.intel_syntax noprefix\n"
         "3:\n"
         "  inc qword ptr [rax+r10*8]\n"
         "4:\n"
+        "  ret\n"
+        "worker_slot:\n"
+        "  mov eax, dword ptr [rip+tls_index]\n"
+        "  cmp eax, 64\n"
+        "  jae 5f\n"
+        "  mov rax, qword ptr gs:[rax*8+0x1480]\n"
+        "  ret\n"
+        "5:\n"
+        "  mov r11, qword ptr gs:[0x1780]\n"
+        "  test r11, r11\n"
+        "  jz 6f\n"
+        "  mov rax, qword ptr [r11+rax*8-0x200]\n"
+        "  ret\n"
+        "6:\n"
+        "  xor eax, eax\n"
         "  ret\n"
         ".att_syntax\n");
 
@@ -5532,7 +5546,7 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
     sort_bucket = (SortBucketFn)(engine + SORT_BUCKET_RVA);
     stream_in = (StreamInFn)(engine + STREAM_IN_RVA);
     tls_index = TlsAlloc();
-    if (tls_index >= 64) return "TlsAlloc gave no slot in the TEB's first 64";
+    if (tls_index == TLS_OUT_OF_INDEXES) return "no TLS slot left";
     void **draw_slots = (void **)(engine + RENDERER_VTABLE_RVA) + FIRST_DRAW_SLOT, **get_renderer_slot = (void **)(engine + GET_RENDERER_SLOT_RVA);
     for (int i = 0; i < DRAW_SLOTS; i++)
         if (draw_slots[i] != engine + expected_draw_rvas[i]) return "RENDERER draw slots differ from the analysed build";
