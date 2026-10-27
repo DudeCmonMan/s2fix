@@ -166,6 +166,7 @@ Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 | `[flipmodel] latency` | 2 | at start: at most this many frames queued, waiting for room after each Present instead of blocking inside it; 0 keeps Windows' 3 |
 | `[window] borderless` | 0 | at start: 1 runs the game's windowed mode in a borderless window that covers its monitor, at the monitor's native resolution; set the game to windowed, not fullscreen |
 | `[window] clip_cursor` | 1 | with borderless: keeps the cursor on the game's monitor while the game has focus, so edge scrolling works with several monitors |
+| `[vram] enabled` | 1 | at start: gives the game the graphics card's video memory, up to the 4095 MB it can count, instead of the 2.9 GB a 32-bit game is told; 0 keeps the game's figure |
 | `[s2prof] console` | 0 | 1 opens a window that shows the log live |
 
 ### The fixes
@@ -194,6 +195,7 @@ Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 | `focuscache` | asks Windows for the foreground window once per frame instead of on every key query |
 | `scenelock` | spins longer on the unit emission lock instead of sleeping in the kernel |
 | `flipmodel` | replaces the game's 2011 swap chain, which copies every frame through the desktop compositor and stalls now and then, with a flip-model one: no stalls, tearing allowed (an uncapped frame rate, variable refresh in a window), and at most two frames queued for lower input lag |
+| `vram` | Windows tells a 32-bit game at most 3 GB of video memory, and the game budgets its textures from 95% of that (2.9 GB). This gives it the card's real budget, up to the 4095 MB the game can count, so it lowers texture detail later |
 | `borderless` | with `[window] borderless=1`: borderless windowed mode at the monitor's native resolution (the game itself has only a framed window or exclusive fullscreen) |
 | `cpuplace` | keeps the game's threads on the CCD `[cpu] ccd` names |
 | `maincore` | keeps the game's other threads off the main thread's CPU core, so the main thread has the whole core |
