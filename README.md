@@ -125,9 +125,9 @@ fixes\           one DLL per fix
 
 - Windows 10 or 11, 64-bit.
 - The Steam version with the May 2023 update: `empire.retail.dll` with PE timestamp `0x645e92bb` (SHA-256 starting
-  `022fae2e2da92b59`). Each fix checks the engine code it depends on first. If `empire.retail.dll` was modified (by
-  another mod) or updated, a warning asks whether to launch; every fix whose engine code still matches installs, and
-  the log lists the ones that don't.
+  `022fae2e2da92b59`). If `empire.retail.dll` is a different build, or another mod's copy of it, a warning asks whether
+  to launch. Either way, each fix checks the engine code it depends on and stays off if it was changed; the log lists
+  which.
 - DirectX 11 mode. The fixes are for DirectX 11 only: in DirectX 9 mode they don't load, and the game runs unchanged.
 - Tested with an NVIDIA driver.
 
@@ -169,7 +169,7 @@ Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 | `[window] clip_cursor` | 1 | with borderless: keeps the cursor on the game's monitor while the game has focus, so edge scrolling works with several monitors |
 | `[vram] enabled` | 1 | at start: gives the game the graphics card's video memory, up to the 4095 MB it can count, instead of the 2.9 GB a 32-bit game is told; 0 keeps the game's figure |
 | `[s2prof] console` | 0 | 1 opens a window that shows the log live |
-| `[s2prof] ignore_build_check` | 0 | 1 skips the warning shown when `empire.retail.dll` was modified or updated and does not match the expected build; fixes whose engine code still matches install either way |
+| `[s2prof] ignore_build_check` | 0 | 1 skips the warning shown when `empire.retail.dll` is a different build or another mod's copy of it; each fix still checks the engine code it depends on |
 
 ### The fixes
 
