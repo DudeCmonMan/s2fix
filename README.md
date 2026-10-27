@@ -1,6 +1,7 @@
 # s2fix: performance fixes for Total War: Shogun 2
 
-Runtime fixes that make battles in Total War: Shogun 2 render faster. There is one package for each version of the game:
+Runtime fixes that make battles in Total War: Shogun 2 render faster, and the original game's campaign map run faster.
+There is one package for each version of the game:
 the Complete Edition and the original 2011 game. No game file is changed: a proxy DLL next to the game loads the fixes,
 and they patch the engine in memory only.
 
@@ -197,6 +198,13 @@ Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 | `cpuplace` | keeps the game's threads on the CCD `[cpu] ccd` names |
 | `maincore` | keeps the game's other threads off the main thread's CPU core, so the main thread has the whole core |
 | `timerperiod` | holds Windows' 1 ms timer period, which the game otherwise switches on and off around every timestamp |
+
+On the campaign map:
+
+| Fix | What it does |
+|---|---|
+| `camprelations` | remembers where each faction's record is: every character on the map searched the whole faction list for it several times a frame |
+| `campappearance` | remembers which appearance entry each character's model uses instead of searching the character's appearance set again every frame |
 
 ## Privacy and safety
 
