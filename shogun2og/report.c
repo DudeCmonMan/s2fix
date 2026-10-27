@@ -538,7 +538,32 @@ static void draw_overlay(ID3D11DeviceContext *context) {
     ID3D11Texture2D_Release(back);
 }
 
+// Main alone uses these, so it lets them go once the report has stopped: a display change rebuilds the game's device,
+// and anything made on the old one keeps it, and with it the window's flip-model swap chain, alive.
+static volatile LONG release_wanted;
+
+static void release_device_objects(void) {
+    for (int i = 0; i < GPU_RING; i++) {
+        if (gpu_sets[i].disjoint) ID3D11Query_Release(gpu_sets[i].disjoint);
+        if (gpu_sets[i].start) ID3D11Query_Release(gpu_sets[i].start);
+        if (gpu_sets[i].end) ID3D11Query_Release(gpu_sets[i].end);
+        gpu_sets[i] = (GpuSet){0};
+    }
+    for (int i = 0; i < BURST; i++) {
+        if (shots[i].staging) ID3D11Texture2D_Release(shots[i].staging);
+        shots[i].staging = NULL;
+    }
+    if (overlay_texture) ID3D11Texture2D_Release(overlay_texture);
+    overlay_texture = NULL;
+    if (d3d_device) ID3D11Device_Release(d3d_device);
+    d3d_device = NULL;
+    gpu_ready = gpu_broken = FALSE;
+    current_gpu_set = -1;
+    release_wanted = 0;
+}
+
 void report_before_present(void) {
+    if (release_wanted) release_device_objects();
     if (!running) return;
     ID3D11DeviceContext *context = immediate_context();
     LONG index = frame_count;
@@ -1539,6 +1564,7 @@ static DWORD WINAPI report_thread(LPVOID unused) {
     for (int waited = 0; !gpu_stopped && waited < 500; waited += 10) Sleep(10);
     MessageBeep(zipped ? MB_ICONASTERISK : MB_ICONHAND);
     running = 0;
+    release_wanted = 1;
     return 0;
 }
 

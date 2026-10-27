@@ -41,10 +41,9 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
     void **slot = (void **)(api->engine + GET_FOREGROUND_WINDOW_IAT_RVA);
     if (*slot != (void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetForegroundWindow")) return "the import slot does not hold GetForegroundWindow";
     real_get_foreground_window = (GetForegroundWindowFn)*slot;
-    DWORD protection;
-    if (!VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &protection)) return "VirtualProtect on the import slot failed";
-    InterlockedExchangePointer(slot, (void *)get_foreground_window_hook);
-    VirtualProtect(slot, sizeof *slot, protection, &protection);
+    void *hook = (void *)get_foreground_window_hook;
+    const char *patch_error = api->patch((BYTE *)slot, (const BYTE *)slot, (const BYTE *)&hook, sizeof hook);
+    if (patch_error) return patch_error;
     api->register_switch("focuscache", &cache_enabled, NULL);
     return NULL;
 }

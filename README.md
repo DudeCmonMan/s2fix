@@ -129,6 +129,7 @@ fixes\           one DLL per fix
   to launch. Either way, each fix checks the engine code it depends on and stays off if it was changed; the log lists
   which.
 - DirectX 11 mode. The fixes are for DirectX 11 only: in DirectX 9 mode they don't load, and the game runs unchanged.
+  If the game falls back to DirectX 9 on its own, a message says so and the fixes stay off.
 - Tested with an NVIDIA driver.
 
 ### Files
@@ -140,13 +141,15 @@ s2prof.ini       settings
 fixes\           one DLL per fix
 ```
 
-The game loads `d3d11.dll` only in DirectX 11 mode, as it creates its device. The proxy waits until the fixes are installed
-before the device is made.
+The game loads `d3d11.dll` only in DirectX 11 mode, as it creates its device. It loads `s2prof.dll`, which holds the
+game's device creation until the fixes are installed. If s2fix is loaded later (injected while the game runs), a
+message says that some fixes are off for that session.
 
 ### Borderless windowed
 
 The game itself only has a framed window or exclusive fullscreen. s2fix can run it borderless instead, covering the
-whole monitor at its native resolution:
+whole monitor. The game renders at the resolution set in its options and is scaled to fill the screen, and a
+resolution change applies at once. A resolution with another aspect ratio than the monitor's is stretched:
 
 1. In the game's options, choose windowed mode.
 2. In `s2prof.ini`, set `borderless=1` under `[window]`.
@@ -165,7 +168,7 @@ Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 | `[flipmodel] buffers` | 3 | at start: flip-model back buffers, 2 to 4 |
 | `[flipmodel] tearing` | 1 | at start: allows tearing (an uncapped frame rate, variable refresh in a window) when Windows supports it |
 | `[flipmodel] latency` | 2 | at start: at most this many frames queued, waiting for room after each Present instead of blocking inside it; 0 keeps Windows' 3 |
-| `[window] borderless` | 0 | at start: 1 runs the game's windowed mode in a borderless window that covers its monitor, at the monitor's native resolution; set the game to windowed, not fullscreen |
+| `[window] borderless` | 0 | at start: 1 runs the game's windowed mode in a borderless window that covers its monitor, at the resolution set in the game's options, scaled to fit; set the game to windowed, not fullscreen |
 | `[window] clip_cursor` | 1 | with borderless: keeps the cursor on the game's monitor while the game has focus, so edge scrolling works with several monitors |
 | `[vram] enabled` | 1 | at start: gives the game the graphics card's video memory, up to the 4095 MB it can count, instead of the 2.9 GB a 32-bit game is told; 0 keeps the game's figure |
 | `[s2prof] console` | 0 | 1 opens a window that shows the log live |
@@ -198,7 +201,7 @@ Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 | `scenelock` | spins longer on the unit emission lock instead of sleeping in the kernel |
 | `flipmodel` | replaces the game's 2011 swap chain, which copies every frame through the desktop compositor and stalls now and then, with a flip-model one: no stalls, tearing allowed (an uncapped frame rate, variable refresh in a window), and at most two frames queued for lower input lag |
 | `vram` | By default, Windows tells Shogun 2 to use a maximum of 3GB (which Shogun 2 uses 95% of), this patch pushes it to as much as your GPU can give (up to 4GB, engine limitation). |
-| `borderless` | with `[window] borderless=1`: borderless windowed mode at the monitor's native resolution (the game itself has only a framed window or exclusive fullscreen) |
+| `borderless` | with `[window] borderless=1`: borderless windowed mode at the resolution set in the game's options, scaled to the monitor, with the mouse scaled to match (the game itself has only a framed window or exclusive fullscreen) |
 | `cpuplace` | keeps the game's threads on the CCD `[cpu] ccd` names |
 | `maincore` | keeps the game's other threads off the main thread's CPU core, so the main thread has the whole core |
 | `timerperiod` | holds Windows' 1 ms timer period, which the game otherwise switches on and off around every timestamp |

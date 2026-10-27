@@ -65,7 +65,20 @@ static const BYTE frame_stamp_store[] = {0xa3, 0x40, 0xc3, 0x7c, 0x11};
 #define DEVICE_GLOBAL_RVA 0x1c9a93c
 #define D3D11_DEVICE_VTABLE_RVA 0x17666f8
 #define D3D9_DEVICE_VTABLE_RVA 0x1766c68
-#define DX9_MESSAGE L"This fix does not support DirectX 9 mode. Please run Shogun 2 in DirectX 11."
+// The engine stores its device object at its start; a D3D11 one is created once it holds its ID3D11Device.
+#define D3D11_DEVICE_INTERFACE 0xb8
+#define DX9_MESSAGE L"Game launched with DX9, s2fix will not load the DX11 fixes."
+#define LATE_MESSAGE                                                                                                      \
+    L"s2fix was loaded after the game set up its graphics, so some of its fixes are off this session. Keep s2fix's "  \
+    L"d3d11.dll in the game folder so it loads with the game."
+// The engine's D3D11 device creation (thiscall, ret 0x18; D3D11 device vtable slot 24): the device, then its swap chain.
+#define CREATE_DEVICE_RVA 0x145fdb0
+static const BYTE create_device_prologue[] = {0x83, 0xec, 0x0c, 0x53, 0x56};
+// Its D3D11CreateDevice Flags argument: push 1, D3D11_CREATE_DEVICE_SINGLETHREADED.
+#define DEVICE_FLAGS_RVA 0x145fe67
+static const BYTE single_threaded_flags[] = {0x6a, 0x01}, multithreaded_flags[] = {0x6a, 0x00};
+// The fixes install in well under a second; past this the device is created without them.
+#define HOLD_WAIT_MS 30000
 static const char *const mode_names[2] = {"off", "on"};
 
 typedef enum { ENGINE_NOT_LOADED, ENGINE_TARGETED, ENGINE_MODIFIED, ENGINE_OTHER } EngineBuild;
@@ -110,6 +123,16 @@ typedef struct {
 
 typedef HRESULT(WINAPI *GetThreadDescriptionFn)(HANDLE, PWSTR *);
 typedef BYTE(__attribute__((thiscall)) *PresentFn)(BYTE *engine);
+typedef BYTE(__attribute__((thiscall)) *CreateDeviceFn)(BYTE *device, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD);
+#define DLL_LOADED 1
+typedef struct {
+    ULONG flags;
+    const UNICODE_STRING *full_name, *base_name;
+    void *base;
+    ULONG size;
+} DllLoaded;
+typedef void(CALLBACK *DllNotificationFn)(ULONG reason, const DllLoaded *loaded, void *context);
+NTSTATUS NTAPI LdrRegisterDllNotification(ULONG flags, DllNotificationFn callback, void *context, void **cookie);
 
 typedef struct {
     const char *name;
@@ -167,6 +190,12 @@ static BYTE *engine;
 static EngineBuild engine_build;
 static BOOL device_readable;
 static volatile LONG build_warning_open;
+static HANDLE engine_event, renderer_event;
+static volatile LONG hold_ran;
+static BOOL renderer_dx9;
+static CreateDeviceFn original_create_device;
+static char device_hooks_error[192];
+static const char *device_flags_error;
 static HHOOK button_hook;
 static volatile uint32_t *frame_stamp;
 static BOOL hotkey_was_down[256];
@@ -717,12 +746,19 @@ static BOOL hotkey_pressed(int key) {
     return pressed;
 }
 
+// No fix is installed in DirectX 9, and nothing may switch them back on.
+static BOOL refused_in_dx9(const char *what) {
+    if (renderer_dx9) log_line("%s: off in DirectX 9", what);
+    return renderer_dx9;
+}
+
 static void set_apply_fixes(BOOL enabled) {
     fixes_enabled = enabled;
     log_line("Apply Fixes %s", fixes_enabled ? "ON" : "OFF");
 }
 
 static void toggle_apply_fixes(void) {
+    if (!fixes_enabled && refused_in_dx9("Apply Fixes")) return;
     set_apply_fixes(!fixes_enabled);
 }
 
@@ -817,6 +853,7 @@ static BOOL sample(HANDLE timer, CaptureStats *stats, int seconds) {
 static BOOL capture_quiet;
 
 static void capture(int seconds, Switch *ab) {
+    if (ab && refused_in_dx9("the A/B capture")) return;
     int number = capture_number++;
     BOOL alternating = ab != NULL;
     Switch *mode_switch = ab ? ab : &switches[0];
@@ -873,6 +910,7 @@ static int report_capture(int seconds, int switch_index) {
 }
 
 static void start_report(void) {
+    if (refused_in_dx9("the debug report")) return;
     static BOOL initialised;
     if (!initialised) {
         report_init(&(ReportHost){.engine = engine,
@@ -924,17 +962,39 @@ static void install_present_hook(void) {
     if (present_error) log_line("present hook: %s; the fixes that need the main thread stay off", present_error);
 }
 
-// The fixes are built and tested for DX11 only; in DX9 mode the game is stopped with an explanation instead of running
-// with fixes that were never checked against that renderer.
+static DWORD WINAPI notice_thread(LPVOID text) {
+    // The box takes no text, and Text Services on this thread could wait on the game's thread.
+    ImmDisableIME(0);
+    MessageBoxW(NULL, text, L"Shogun 2 fixes", MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
+    return 0;
+}
+
+// On a thread of its own, so the controller goes on (after the late notice, to install the fixes).
+static void show_notice(const wchar_t *text) {
+    HANDLE thread = CreateThread(NULL, 0, notice_thread, (LPVOID)text, 0, NULL);
+    if (thread) CloseHandle(thread);
+}
+
+// The fixes are built and tested for DX11 only. In DX9, from the start or after a DX11 start fell back, none stays
+// installed and the player is told, so they can switch to DX11 in the game's options.
+static void stop_for_dx9(void) {
+    renderer_dx9 = TRUE;
+    for (int i = 0; i < switch_count; i++) *switches[i].flag = 0;
+    int undone = 0, hooks, patches;
+    for (int i = 0; i < fix_count; i++)
+        if (fix_records[i].state == FIX_INSTALLED && !undo_write_group(i + 1, &hooks, &patches)) undone++;
+    log_line("the game runs in DirectX 9: s2fix's fixes are off (%d undone)", undone);
+    show_notice(DX9_MESSAGE);
+}
+
 static void check_renderer(void) {
-    if (!device_readable) return;
+    if (!device_readable || renderer_dx9) return;
     BYTE *device = *(BYTE *volatile *)(engine + DEVICE_GLOBAL_RVA);
     if (!device) return;
     BYTE *vtable = *(BYTE **)device;
     if (vtable == engine + D3D9_DEVICE_VTABLE_RVA) {
-        log_line("the game runs in DirectX 9 mode, which these fixes do not support; stopping the game");
-        MessageBoxW(NULL, DX9_MESSAGE, L"Shogun 2 fixes", MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
-        TerminateProcess(GetCurrentProcess(), 1);
+        stop_for_dx9();
+        return;
     }
     const char *name = vtable == engine + D3D11_DEVICE_VTABLE_RVA ? "DirectX 11" : "unknown render device";
     if (name != renderer_name) {
@@ -943,7 +1003,7 @@ static void check_renderer(void) {
     }
 }
 
-// Set once the fixes are installed; the d3d11 proxy waits for it before the engine's device exists.
+// Set once the fixes are installed; the hold waits for it before the engine's device exists.
 static HANDLE ready_event;
 
 __declspec(dllexport) BOOL s2prof_wait_ready(DWORD milliseconds) {
@@ -978,7 +1038,7 @@ static LRESULT CALLBACK name_buttons(int code, WPARAM wparam, LPARAM lparam) {
     return 0;
 }
 
-// No owner window: the game's main thread waits inside device creation until the fixes are installed.
+// No owner window: the game's main thread is held in its device creation until the box is answered.
 static BOOL launch_on_other_build(void) {
     wchar_t text[768];
     swprintf(text, sizeof text / sizeof *text,
@@ -1044,6 +1104,12 @@ static const char *check_engine(const S2Check *checks, int count) {
             return message;
         }
     return NULL;
+}
+
+// What the hold does as the engine starts its D3D11 renderer; exported for the offline checks, which have no renderer.
+__declspec(dllexport) void s2prof_renderer_starting(void) {
+    hold_ran = TRUE;
+    SetEvent(renderer_event);
 }
 
 static void log_fix_summary(ULONGLONG milliseconds) {
@@ -1144,20 +1210,48 @@ static DWORD open_console(void) {
     return ERROR_SUCCESS;
 }
 
-static DWORD WINAPI controller(LPVOID unused) {
-    (void)unused;
-    DWORD console_error = open_console();
-    start_run();
-    stack_copy = malloc(FULL_RATE_SCAN_BYTES);
-    AddVectoredExceptionHandler(1, report_crash);
-    if (console_error) log_line("console unavailable: error %lu", console_error);
-    engine = (BYTE *)GetModuleHandleW(ENGINE_MODULE);
-    engine_build = classify_engine(engine);
-    const char *device_mismatch = engine ? S2_CHECK_ENGINE(&module_api, s2prof_checks) : "empire.retail.dll not loaded";
-    device_readable = !device_mismatch;
-    log_line("s2prof running inside the game (engine at 0x%lx, %s).", (unsigned long)(uintptr_t)engine, engine_build_names[engine_build]);
-    if (device_mismatch) log_line("the DirectX 9 check and the report's device readout are off: %s", device_mismatch);
-    install_present_hook();
+static BYTE __attribute__((thiscall)) create_device_hook(BYTE *device, DWORD a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f) {
+    s2prof_renderer_starting();
+    if (!s2prof_wait_ready(HOLD_WAIT_MS)) log_line("the fixes were not installed after %d s; the device is created without them", HOLD_WAIT_MS / 1000);
+    return original_create_device(device, a, b, c, d, e, f);
+}
+
+// The device may be created soon after the engine loads, so its patches go in at once, as s2fix or the engine loads.
+static void engine_loaded(BYTE *base) {
+    engine = base;
+    const char *error = S2_CHECK_ENGINE(&module_api, device_checks);
+    if (!error)
+        error = hook_function(engine + CREATE_DEVICE_RVA, create_device_prologue, sizeof create_device_prologue, (const void *)create_device_hook,
+                              (void **)&original_create_device);
+    if (!error && GetPrivateProfileIntW(L"device", L"multithreaded_device", 0, config_path))
+        device_flags_error = patch_checked(engine + DEVICE_FLAGS_RVA, single_threaded_flags, multithreaded_flags, sizeof multithreaded_flags);
+    if (error) snprintf(device_hooks_error, sizeof device_hooks_error, "%s", error);
+    SetEvent(engine_event);
+}
+
+static void CALLBACK dll_loaded(ULONG reason, const DllLoaded *loaded, void *context) {
+    (void)context;
+    size_t length = wcslen(ENGINE_MODULE);
+    if (reason == DLL_LOADED && loaded->base_name->Length == length * sizeof(wchar_t) && !_wcsnicmp(loaded->base_name->Buffer, ENGINE_MODULE, length))
+        engine_loaded(loaded->base);
+}
+
+static BYTE *created_device(void) {
+    BYTE *device = *(BYTE *volatile *)(engine + DEVICE_GLOBAL_RVA);
+    if (device && *(BYTE **)device == engine + D3D11_DEVICE_VTABLE_RVA && !*(void *volatile *)(device + D3D11_DEVICE_INTERFACE)) return NULL;
+    return device;
+}
+
+// The fixes install as the engine starts its D3D11 renderer (the hold), or at once when its device already exists.
+static BYTE *wait_for_renderer(void) {
+    while (WaitForSingleObject(renderer_event, 50) != WAIT_OBJECT_0) {
+        BYTE *device = created_device();
+        if (device) return device;
+    }
+    return NULL;
+}
+
+static void install_fixes(void) {
     if (engine_build == ENGINE_MODIFIED || engine_build == ENGINE_OTHER) {
         if (GetPrivateProfileIntW(L"s2prof", L"ignore_build_check", 0, config_path)) {
             log_line("build check off (ignore_build_check=1): installing every fix whose engine code still matches");
@@ -1168,16 +1262,53 @@ static DWORD WINAPI controller(LPVOID unused) {
             TerminateProcess(GetCurrentProcess(), 0);
         }
     }
-    if (engine) {
-        ULONGLONG started = GetTickCount64();
-        loading_fixes = TRUE;
-        load_modules(fixes_dir);
-        loading_fixes = FALSE;
-        log_fix_summary(GetTickCount64() - started);
-    }
+    ULONGLONG started = GetTickCount64();
+    loading_fixes = TRUE;
+    load_modules(fixes_dir);
+    loading_fixes = FALSE;
+    log_fix_summary(GetTickCount64() - started);
     set_apply_fixes(TRUE);
     log_help();
     SetEvent(ready_event);
+}
+
+static DWORD WINAPI controller(LPVOID unused) {
+    (void)unused;
+    // Another loader may bring s2fix into the game's helper processes too; there the engine never loads.
+    WaitForSingleObject(engine_event, INFINITE);
+    DWORD console_error = open_console();
+    start_run();
+    stack_copy = malloc(FULL_RATE_SCAN_BYTES);
+    AddVectoredExceptionHandler(1, report_crash);
+    if (console_error) log_line("console unavailable: error %lu", console_error);
+    engine_build = classify_engine(engine);
+    const char *device_mismatch = S2_CHECK_ENGINE(&module_api, s2prof_checks);
+    device_readable = !device_mismatch;
+    log_line("s2prof running inside the game (engine at 0x%lx, %s).", (unsigned long)(uintptr_t)engine, engine_build_names[engine_build]);
+    if (device_mismatch) log_line("the DirectX 9 check and the report's device readout are off: %s", device_mismatch);
+    if (device_hooks_error[0])
+        log_line("device creation: not held for the fixes, multithreaded device off: %s", device_hooks_error);
+    else if (device_flags_error)
+        log_line("device creation: held for the fixes; multithreaded device off: %s", device_flags_error);
+    else
+        log_line("device creation: held for the fixes; multithreaded device %s", engine[DEVICE_FLAGS_RVA + 1] ? "off (multithreaded_device=0)" : "on");
+    install_present_hook();
+    BYTE *device = NULL;
+    if (device_readable)
+        device = wait_for_renderer();
+    else if (!device_hooks_error[0])
+        WaitForSingleObject(renderer_event, INFINITE);
+    check_renderer();
+    if (renderer_dx9) {
+        SetEvent(ready_event);
+    } else {
+        if (device && !device_hooks_error[0] && !hold_ran) {
+            log_line("s2fix was loaded after the game created its graphics device: the multithreaded device, the flip model and the startup "
+                     "hold are off this session");
+            show_notice(LATE_MESSAGE);
+        }
+        install_fixes();
+    }
     for (;;) {
         Sleep(50);
         check_renderer();
@@ -1195,16 +1326,32 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     // Present only when the process ends through ExitProcess; a fail-fast or TerminateProcess skips it.
     if (reason == DLL_PROCESS_DETACH && reserved) log_line("process exiting through ExitProcess");
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
+    // One s2fix per process: a second copy, from another loader or under another name, fails to load.
+    wchar_t lock_name[64];
+    swprintf(lock_name, sizeof lock_name / sizeof *lock_name, L"Local\\s2fix.%lu", GetCurrentProcessId());
+    HANDLE instance_lock = CreateMutexW(NULL, FALSE, lock_name);
+    if (!instance_lock || GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (instance_lock) CloseHandle(instance_lock);
+        return FALSE;
+    }
     DisableThreadLibraryCalls(instance);
     ready_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    engine_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    renderer_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     GetModuleFileNameW(instance, output_dir, MAX_PATH);
     wcscpy(fixes_dir, output_dir);
     wcscpy(wcsrchr(fixes_dir, L'\\'), L"\\fixes");
     wcscpy(config_path, output_dir);
     wcscpy(wcsrchr(config_path, L'\\'), L"\\s2prof.ini");
     wcscpy(wcsrchr(output_dir, L'\\'), L"\\perf-logs");
+    // The thread first: a load that fails must leave no hook behind. It waits for the engine.
     HANDLE thread = CreateThread(NULL, 0, controller, NULL, 0, NULL);
     if (!thread) return FALSE;
     CloseHandle(thread);
+    void *notification;
+    if ((engine = (BYTE *)GetModuleHandleW(ENGINE_MODULE)))
+        engine_loaded(engine);
+    else
+        LdrRegisterDllNotification(0, dll_loaded, NULL, &notification);
     return TRUE;
 }

@@ -18,6 +18,9 @@
 //
 // - Creation: 0x1147c050 fills the description at device+0xc0 and calls factory->CreateSwapChain through ecx; the two
 //   instructions loading ecx (0x1147c123) call a stub that loads the wrapper instead.
+// - A display change tears the device and its swap chain down (0x114677f0) and creates both again. A window holds one
+//   flip-model chain, so this module's own reference to the chain goes in that teardown, with the engine's. If the new
+//   chain still can't be made, the player is told to restart and the game closes: there is no fallback to the blt model.
 // - Present: the device's present (0x11487180, vtbl+0xfc) calls swap_chain->Present(sync, 0); with tearing allowed and a
 //   sync interval of 0 it needs DXGI_PRESENT_ALLOW_TEARING. Flip-model Present also unbinds the swap chain's buffers
 //   from the pipeline, so the targets bound before it are bound again after it, as the engine's state cache has them.
@@ -28,6 +31,7 @@
 //   input latency drops. The latency switch (and Apply Fixes) A/Bs it against DXGI's 3 without the wait; the exported
 //   frame_latency can be patched live.
 #define CREATE_CALL_RVA 0x147c123
+#define DEVICE_TEARDOWN_RVA 0x14677f0
 #define PRESENT_RVA 0x1487180
 #define HRESULT_CHECK_RVA 0x13e0ef0
 #define RENDER_DEVICE_RVA 0x1c9a93c
@@ -45,9 +49,13 @@
 #define LATENCY_WAIT_MS 250
 #define LONG_WAIT_MS 5.0
 #define LATENCY_REPORT_MS 10000
+#define CREATE_FAILED_MESSAGE                                                                                                 \
+    L"Failed to initialize d3d11 device after settings change, please restart the game. This can happen when changing " \
+    L"settings. Should be fine after restart."
 
 typedef BYTE(__attribute__((thiscall)) *PresentFn)(BYTE *device, void *a, void *b);
 typedef BYTE (*HresultCheckFn)(HRESULT result);
+typedef void(__attribute__((thiscall)) *DeviceTeardownFn)(BYTE *render_device);
 typedef HRESULT(STDMETHODCALLTYPE *CreateSwapChainFn)(IDXGIFactory *factory, IUnknown *device, DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **swap_chain);
 typedef HRESULT(STDMETHODCALLTYPE *ResizeBuffersFn)(IDXGISwapChain *swap_chain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags);
 // IDXGIFactory5::CheckFeatureSupport is slot 28 (after IDXGIFactory4's 27 slots); mingw's dxgi.h lacks the interface.
@@ -57,8 +65,10 @@ static const GUID swap_chain2_iid = {0xa8be2ac4, 0x199f, 0x4946, {0xb3, 0x31, 0x
 
 static const BYTE create_call_expected[] = {0x8b, 0x02, 0x8b, 0x48, 0x28};
 static const BYTE present_prologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x96, 0xbc, 0x00, 0x00, 0x00};
+static const BYTE device_teardown_prologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x8e, 0x6c, 0x19, 0x00, 0x00};
 static const S2Api *api;
 static PresentFn original_present;
+static DeviceTeardownFn original_device_teardown;
 static ResizeBuffersFn original_resize_buffers;
 static int buffer_count = 3, tearing_wanted = 1, latency_wanted = 2;
 static BOOL flip_active, tearing_active;
@@ -122,12 +132,15 @@ static void hook_resize_buffers(IDXGISwapChain *swap_chain) {
     VirtualProtect(slot, sizeof *slot, protection, &protection);
 }
 
-static void setup_latency(IDXGISwapChain *swap_chain) {
+static void release_latency(void) {
     if (latency_chain) IDXGISwapChain2_Release(latency_chain);
     if (latency_event) CloseHandle(latency_event);
     latency_chain = NULL;
     latency_event = NULL;
     applied_latency = 0;
+}
+
+static void setup_latency(IDXGISwapChain *swap_chain) {
     if (!(flip_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)) return;
     if (FAILED(IDXGISwapChain_QueryInterface(swap_chain, &swap_chain2_iid, (void **)&latency_chain))) {
         latency_chain = NULL;
@@ -179,8 +192,16 @@ static void wait_for_frame_room(void) {
     }
 }
 
+// The engine can't go on without its swap chain, and a restart makes a fresh device.
+static void close_game(HRESULT result) {
+    api->log_line("flipmodel: CreateSwapChain with the flip model failed (0x%08lx); the game is closed", (unsigned long)result);
+    MessageBoxW(NULL, CREATE_FAILED_MESSAGE, L"Shogun 2 fixes", MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
+    TerminateProcess(GetCurrentProcess(), 1);
+}
+
 HRESULT STDMETHODCALLTYPE create_swap_chain(IDXGIFactory *factory, IUnknown *device, DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **swap_chain) {
     CreateSwapChainFn create = (CreateSwapChainFn)(*(void ***)factory)[10];
+    flip_active = FALSE;
     if (!desc->Windowed || desc->SampleDesc.Count != 1 || !flip_format(desc->BufferDesc.Format)) {
         api->log_line("flipmodel: kept the blt model (windowed %d, %u samples, format %d)", desc->Windowed, desc->SampleDesc.Count, desc->BufferDesc.Format);
         return create(factory, device, desc, swap_chain);
@@ -192,24 +213,18 @@ HRESULT STDMETHODCALLTYPE create_swap_chain(IDXGIFactory *factory, IUnknown *dev
     flip.BufferCount = (UINT)buffer_count;
     flip.Flags = desc->Flags | flip_flags;
     HRESULT result = create(factory, device, &flip, swap_chain);
-    if (FAILED(result) && latency_wanted) {
-        api->log_line("flipmodel: a waitable flip-model swap chain failed (0x%08lx); trying without the frame latency wait", (unsigned long)result);
-        flip_flags &= ~(UINT)DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-        flip.Flags = desc->Flags | flip_flags;
-        result = create(factory, device, &flip, swap_chain);
-    }
-    if (FAILED(result)) {
-        api->log_line("flipmodel: CreateSwapChain with the flip model failed (0x%08lx); the blt model is kept", (unsigned long)result);
-        tearing_active = FALSE;
-        flip_flags = 0;
-        return create(factory, device, desc, swap_chain);
-    }
+    if (FAILED(result)) close_game(result);
     flip_active = TRUE;
     hook_resize_buffers(*swap_chain);
     setup_latency(*swap_chain);
     api->log_line("flipmodel: %ux%u flip-model swap chain, %d buffers, tearing %s", flip.BufferDesc.Width, flip.BufferDesc.Height, buffer_count,
                   tearing_active ? "allowed" : tearing_wanted ? "not supported" : "off");
     return result;
+}
+
+static void __attribute__((thiscall)) device_teardown_hook(BYTE *render_device) {
+    release_latency();
+    original_device_teardown(render_device);
 }
 
 static BYTE __attribute__((thiscall)) present_hook(BYTE *device, void *a, void *b) {
@@ -271,6 +286,9 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     memcpy(call + 1, &offset, 4);
     const char *error = api->patch(api->engine + CREATE_CALL_RVA, create_call_expected, call, sizeof call);
     if (!error) error = api->hook(api->engine + PRESENT_RVA, present_prologue, sizeof present_prologue, (const void *)present_hook, (void **)&original_present);
+    if (!error)
+        error = api->hook(api->engine + DEVICE_TEARDOWN_RVA, device_teardown_prologue, sizeof device_teardown_prologue, (const void *)device_teardown_hook,
+                          (void **)&original_device_teardown);
     if (!error && latency_wanted) api->register_switch("latency", &latency_enabled, NULL);
     return error;
 }

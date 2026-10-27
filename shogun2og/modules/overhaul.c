@@ -147,6 +147,7 @@
 #define RECORD_QUEUES_RVA 0x13ce0b0
 #define RESET_BUCKETS_RVA 0x13d7df0
 #define BEGIN_BUCKET_RVA 0x14e17a0
+#define CREATE_DEVICE_RVA 0x145fdb0
 #define CASCADE_LOOP_RVA 0x13e4320
 #define CAMERA_HOLDER_RVA 0x13ed710
 #define SET_CAMERA_RVA 0x1411c60
@@ -191,6 +192,7 @@ typedef void(__attribute__((thiscall)) *BattleViewUpdateFn)(BYTE *battle_view, v
 typedef void(__attribute__((thiscall)) *RecordQueuesFn)(BYTE *view);
 typedef void(__attribute__((thiscall)) *ResetBucketsFn)(BYTE *context);
 typedef void(__attribute__((thiscall)) *BeginBucketFn)(BYTE *callbacks, void *argument, BYTE *view);
+typedef BYTE(__attribute__((thiscall)) *CreateDeviceFn)(BYTE *render_device, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD);
 typedef BYTE *(__attribute__((thiscall)) *CameraHolderFn)(BYTE *owner);
 typedef void(__attribute__((thiscall)) *SetCameraFn)(BYTE *holder, BYTE *camera);
 typedef void (*TaskFn)(void *argument);
@@ -517,6 +519,7 @@ static const BYTE battle_view_update_prologue[] = {0x56, 0x57, 0x8b, 0xf9, 0x8b,
 static const BYTE record_queues_prologue[] = {0x56, 0x57, 0x8b, 0xf9, 0x8b, 0x77, 0x18};
 static const BYTE reset_buckets_prologue[] = {0x51, 0x53, 0x8b, 0xd9, 0x55};
 static const BYTE begin_bucket_prologue[] = {0x53, 0x8b, 0x5c, 0x24, 0x0c};
+static const BYTE create_device_prologue[] = {0x83, 0xec, 0x0c, 0x53, 0x56};
 static const uint32_t expected_draw_rvas[DRAW_SLOTS] = {0x144ea20, 0x144eb20, 0x144ec30, 0x144ed50};
 // The set_shader slots, VS, GS, HS, DS, PS, CS: thiscall(renderer; program).
 static const uint32_t set_shader_slots[STAGES] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
@@ -555,6 +558,7 @@ static PrepareFn original_prepare;
 static RecordQueuesFn original_record_queues;
 static ResetBucketsFn original_reset_buckets;
 static BeginBucketFn original_begin_bucket;
+static CreateDeviceFn original_create_device;
 static ListFn original_list_merge, original_node_flush;
 static BattleViewUpdateFn original_battle_view_update;
 static void *immediate_lock;
@@ -2234,15 +2238,28 @@ static DWORD WINAPI worker_main(LPVOID parameter) {
     return 0;
 }
 
+static BOOL create_context(Worker *worker) {
+    HRESULT result = ID3D11Device_CreateDeferredContext(device, 0, &worker->context);
+    if (SUCCEEDED(result)) return TRUE;
+    static char error[160];
+    snprintf(error, sizeof error, "CreateDeferredContext failed: 0x%08lx", (unsigned long)result);
+    worker_error = error;
+    api->log_line("overhaul: no more workers: %s", worker_error);
+    return FALSE;
+}
+
+// The device is taken at the first split and again after each rebuild, when the workers get contexts on the new one.
 static BOOL start_workers(int wanted, ID3D11DeviceContext *immediate) {
     if (worker_error) return FALSE;
     if (!device) {
         ID3D11DeviceContext_GetDevice(immediate, &device);
         if (ID3D11Device_GetCreationFlags(device) & D3D11_CREATE_DEVICE_SINGLETHREADED) {
-            worker_error = "the device is single-threaded; set multithreaded_device=1 in s2prof.ini";
+            worker_error = "the device is single-threaded (multithreaded_device=0, or s2fix was loaded after the game created it)";
             api->log_line("overhaul: no workers: %s", worker_error);
             return FALSE;
         }
+        for (int i = 0; i < worker_count; i++)
+            if (!create_context(workers[i])) return FALSE;
     }
     while (worker_count < wanted) {
         Worker *worker = _aligned_malloc(sizeof *worker, 64);
@@ -2258,12 +2275,13 @@ static BOOL start_workers(int wanted, ID3D11DeviceContext *immediate) {
         for (int stage = 0; stage < STAGES; stage++) worker->vtable[set_shader_slots[stage] / 4] = set_shader_wrappers[stage];
         worker->program_capacity = PROGRAM_TABLE_INITIAL;
         worker->programs = calloc(worker->program_capacity, sizeof *worker->programs);
-        HRESULT result = ID3D11Device_CreateDeferredContext(device, 0, &worker->context);
-        if (!worker->programs || FAILED(result)) {
-            static char error[160];
-            snprintf(error, sizeof error, "CreateDeferredContext failed: 0x%08lx", (unsigned long)result);
-            worker_error = worker->programs ? error : "out of memory for a worker's programs";
+        if (!worker->programs) {
+            worker_error = "out of memory for a worker's programs";
             api->log_line("overhaul: no more workers: %s", worker_error);
+            _aligned_free(worker);
+            return FALSE;
+        }
+        if (!create_context(worker)) {
             _aligned_free(worker);
             return FALSE;
         }
@@ -2280,6 +2298,37 @@ static BOOL start_workers(int wanted, ID3D11DeviceContext *immediate) {
         CloseHandle(thread);
     }
     return TRUE;
+}
+
+// A display change creates the engine's device again (0x114011e0 calls the creation 0x1145fdb0). Everything made on
+// the old one goes first: contexts of the old device can't record for the new one's resources. The next split makes them
+// again on the new one. The workers are idle: the change runs on main between frames.
+static BYTE __attribute__((thiscall)) create_device_hook(BYTE *render_device, DWORD a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f) {
+    for (int i = 0; i < worker_count; i++) {
+        Worker *worker = workers[i];
+        if (worker->context) ID3D11DeviceContext_Release(worker->context);
+        worker->context = NULL;
+        UploadTracker *uploads = &worker->uploads;
+        for (uint32_t c = 0; c < uploads->copy_capacity; c++)
+            if (uploads->copies[c].buffer) ID3D11Buffer_Release(uploads->copies[c].copy);
+        free(uploads->copies);
+        uploads->copies = NULL;
+        uploads->copy_capacity = uploads->copy_count = 0;
+        for (int c = 0; c < worker->clone_count; c++) {
+            ID3D11Buffer_Release(worker->clones[c].buffer);
+            _aligned_free(worker->clones[c].copy);
+        }
+        worker->clone_count = 0;
+    }
+    if (immediate_lock) IUnknown_Release((IUnknown *)immediate_lock);
+    immediate_lock = NULL;
+    protection_logged = FALSE;
+    if (device) {
+        ID3D11Device_Release(device);
+        api->log_line("overhaul: the game creates its device again; the workers' contexts and copies are made again on the new one");
+    }
+    device = NULL;
+    return original_create_device(render_device, a, b, c, d, e, f);
 }
 
 static void wake_workers(void) {
@@ -3026,6 +3075,9 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
     if (!error)
         error = api->hook(engine + RESET_BUCKETS_RVA, reset_buckets_prologue, sizeof reset_buckets_prologue, (const void *)reset_buckets_hook,
                           (void **)&original_reset_buckets);
+    if (!error)
+        error = api->hook(engine + CREATE_DEVICE_RVA, create_device_prologue, sizeof create_device_prologue, (const void *)create_device_hook,
+                          (void **)&original_create_device);
     if (!error)
         error = api->hook(engine + BEGIN_BUCKET_RVA, begin_bucket_prologue, sizeof begin_bucket_prologue, (const void *)begin_bucket_hook,
                           (void **)&original_begin_bucket);

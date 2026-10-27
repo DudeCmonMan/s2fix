@@ -34,6 +34,7 @@ static const S2Check overhaul_checks[] = {
     {0x13ed710, 0x10, 0xb846229908c84534ull, 1, "camera holder"},
     {0x1411c60, 0x10, 0x58f8f00f37595084ull, 1, "set camera"},
     {0x13e4320, 0x10, 0xed3b3496ffd2ddc1ull, 1, "shadow cascade loop"},
+    {0x145fdb0, 0x140, 0x7852f0f2776cb3fbull, 0, "device creation (a display change creates the device again)"},
     {0x137dbed, 0x7, 0x56213c590a130a1aull, 0, "reference to the engine global"},
     {0x13c01ff, 0x7, 0x815e84b44321046dull, 0, "reference to the draw context global"},
     {0xb6887, 0x7, 0x5b090750c20c3b1dull, 0, "reference to the frame stamp"},

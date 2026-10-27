@@ -13,6 +13,6 @@ CFLAGS="-O2 -Wall -Wextra -D__USE_MINGW_ANSI_STDIO=1 -static -s -msse2 -mfpmath=
 # The debug report names the version it came from: the release workflow passes the tag.
 $CC $CFLAGS -DS2FIX_VERSION="\"${VERSION:-local build}\"" -shared -o s2prof.dll s2prof.c hook.c report.c -lpsapi -lntdll -lversion -lole32 -lgdi32 -limm32
 # The proxy's export table comes from its export list.
-{ echo "LIBRARY d3d11"; echo "EXPORTS"; sed -nE 's/^ *(STUB|OWN)\(([A-Za-z0-9_]+), ([0-9]+)\).*/    \2=proxy_\2 @\3/p' proxy/exports.h; } > proxy/d3d11.def
+{ echo "LIBRARY d3d11"; echo "EXPORTS"; sed -nE 's/^ *STUB\(([A-Za-z0-9_]+), ([0-9]+)\).*/    \1=proxy_\1 @\2/p' proxy/exports.h; } > proxy/d3d11.def
 $CC $CFLAGS -shared -o proxy/d3d11.dll proxy/d3d11.c proxy/d3d11.def
 for module in modules/*.c; do $CC $CFLAGS -shared -o "${module%.c}.dll" "$module" -lntdll -lsynchronization; done

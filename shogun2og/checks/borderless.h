@@ -5,6 +5,7 @@
 static const S2Check borderless_checks[] = {
     {0x13e0bc0, 0x146, 0xa58d91d9d0380819ull, 0, "window creation"},
     {0x1416580, 0x4a3, 0x2c0e9ec6a36f715full, 0, "display mode change"},
-    {0x137dbf5, 0x7, 0x4cc55afa4100593full, 0, "reference to the settings global"},
-    {0x1382f30, 0x7, 0xc1d873913beb178aull, 0, "reference to the render device global"},
+    {0x9d2e0, 0x860, 0xafac83ff0b82c34cull, 0, "window procedure (mouse messages in client coordinates)"},
+    {0x1401650, 0xde, 0x575956d67af36efaull, 0, "WM_SIZE handler (client size as resolution)"},
+    {0x13fd720, 0x106, 0x57e41392c27ce065ull, 0, "settings refresh (client size as resolution)"},
 };
