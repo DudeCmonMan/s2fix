@@ -117,6 +117,13 @@ fixes\           one DLL per fix
 | `scenelock` | spins longer on the unit emission lock instead of sleeping in the kernel |
 | `cpuplace` | keeps the game's threads on the CCD `[cpu] ccd` names |
 
+On the campaign map:
+
+| Fix | What it does |
+|---|---|
+| `camprelations` | remembers where each faction's record is: every character on the map searched the whole faction list for it several times a frame |
+| `campappearance` | remembers which appearance entry each character's model uses instead of searching the character's appearance set again every frame |
+
 `s2prof.dll` also replaces two engine sorts (render items and effect objects) with stable radix sorts.
 
 ## Shogun 2, the original game
