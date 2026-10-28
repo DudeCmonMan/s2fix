@@ -106,7 +106,6 @@ typedef HRESULT(WINAPI *GetThreadDescriptionFn)(HANDLE, PWSTR *);
 typedef uint64_t (*CreateDeviceFn)(BYTE *device, uint64_t adapter);
 typedef enum { ENGINE_NOT_LOADED, ENGINE_TARGETED, ENGINE_MODIFIED, ENGINE_OTHER } EngineBuild;
 static EngineBuild engine_build;
-// The render device global and vtable are where the targeted build has them, so the debug report may read the device.
 static BOOL device_readable;
 static const char *const engine_build_names[] = {"not loaded", "the targeted build", "the targeted build, modified by another mod",
                                                  "a different build"};

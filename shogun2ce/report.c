@@ -539,8 +539,8 @@ static void draw_overlay(ID3D11DeviceContext *context) {
     ID3D11Texture2D_Release(back);
 }
 
-// Main alone uses these, so it lets them go once the report has stopped: a display change rebuilds the game's device,
-// and anything made on the old one keeps it, and with it the window's flip-model swap chain, alive.
+// Main alone uses these, so it lets them go once the report has stopped: the staging copies and the banner's texture
+// would otherwise stay in video memory for the rest of the session.
 static volatile LONG release_wanted;
 
 static void release_device_objects(void) {
@@ -942,8 +942,8 @@ static void section_gpu(Text *t) {
                             local.usage >> 20, shared.budget >> 20, shared.usage >> 20);
             ((IUnknown *)adapter3)->lpVtbl->Release((IUnknown *)adapter3);
         } else {
-            text_printf(t, "  video memory: %lu MB dedicated, %lu MB shared (32-bit sizes, may be truncated)\n", (unsigned long)(desc.DedicatedVideoMemory >> 20),
-                        (unsigned long)(desc.SharedSystemMemory >> 20));
+            text_printf(t, "  video memory: %llu MB dedicated, %llu MB shared\n", (unsigned long long)(desc.DedicatedVideoMemory >> 20),
+                        (unsigned long long)(desc.SharedSystemMemory >> 20));
         }
         IDXGIOutput *output;
         for (UINT o = 0; SUCCEEDED(IDXGIAdapter1_EnumOutputs(adapter, o, &output)); o++) {
@@ -1065,21 +1065,17 @@ static void section_process(Text *t) {
     if (GetProcessMemoryInfo(process, (PROCESS_MEMORY_COUNTERS *)&counters, sizeof counters))
         text_printf(t, "Memory: working set %.0f MB (peak %.0f), private %.0f MB, page faults %lu\n", counters.WorkingSetSize / 1048576.0,
                     counters.PeakWorkingSetSize / 1048576.0, counters.PrivateUsage / 1048576.0, counters.PageFaultCount);
-    // How much address space is committed and reserved (the original game's 4 GB limit does not apply to this one).
-    SIZE_T committed = 0, reserved = 0, free_bytes = 0, largest_free = 0, regions = 0;
+    // Free address space is no limit for a 64-bit game (the original's 4 GB is), so only what is taken.
+    SIZE_T committed = 0, reserved = 0, regions = 0;
     MEMORY_BASIC_INFORMATION region;
     for (BYTE *at = NULL; VirtualQuery(at, &region, sizeof region) == sizeof region; at = (BYTE *)region.BaseAddress + region.RegionSize) {
         regions++;
         if (region.State == MEM_COMMIT) committed += region.RegionSize;
         else if (region.State == MEM_RESERVE) reserved += region.RegionSize;
-        else {
-            free_bytes += region.RegionSize;
-            if (region.RegionSize > largest_free) largest_free = region.RegionSize;
-        }
         if ((uintptr_t)region.BaseAddress + region.RegionSize < (uintptr_t)region.BaseAddress) break;
     }
-    text_printf(t, "Address space: %.0f MB committed, %.0f MB reserved, %.0f MB free (largest free block %.0f MB), %lu regions\n", committed / 1048576.0,
-                reserved / 1048576.0, free_bytes / 1048576.0, largest_free / 1048576.0, (unsigned long)regions);
+    text_printf(t, "Address space: %.0f MB committed, %.0f MB reserved, %llu regions\n", committed / 1048576.0, reserved / 1048576.0,
+                (unsigned long long)regions);
     DWORD handles = 0;
     GetProcessHandleCount(process, &handles);
     DWORD_PTR process_mask, system_mask;
@@ -1406,9 +1402,9 @@ static DWORD WINAPI report_thread(LPVOID unused) {
     int fix_count = 0;
     SYSTEMTIME local;
     GetLocalTime(&local);
-    text_printf(&report, "s2fix debug report, Total War: Shogun 2 (2011)\n%04u-%02u-%02u %02u:%02u:%02u, s2fix %s, run %s\n", local.wYear, local.wMonth, local.wDay,
+    text_printf(&report, "s2fix debug report, Total War: Shogun 2 Complete Edition\n%04u-%02u-%02u %02u:%02u:%02u, s2fix %s, run %s\n", local.wYear, local.wMonth, local.wDay,
                 local.wHour, local.wMinute, local.wSecond, host.version, host.run_id);
-    text_printf(&report, "The player kept the camera still. Times are frame-to-frame intervals at the engine's Frame::present; GPU times are D3D11\n"
+    text_printf(&report, "The player kept the camera still. Times are frame-to-frame intervals at the render device's present; GPU times are D3D11\n"
                          "timestamp queries around each frame on the game's immediate context. A/B frames within %d ms of a switch are left out.\n",
                 SKIP_AFTER_FLIP_MS);
 
