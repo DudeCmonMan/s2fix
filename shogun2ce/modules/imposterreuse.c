@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/imposterreuse.h"
 #include <stdint.h>
 #include <intrin.h>
 
@@ -149,6 +150,8 @@ static uint64_t geometry_hook(void *a1, BYTE *renderer, BYTE *generator, BYTE *s
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, imposterreuse_checks);
+    if (mismatch) return mismatch;
     engine = api->engine;
     fix_enabled = api->fix_enabled;
     frame_stamp = (volatile uint64_t *)(engine + FRAME_STAMP_RVA);

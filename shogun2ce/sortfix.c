@@ -2,7 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include "sortfix.h"
 #include "itemsort.h"
-#include <tlhelp32.h>
+#include "hook.h"
 
 // std::sort over the renderer's 176-byte items (unsigned key at +0xa8).
 #define RENDER_SORT_RVA 0x1afee20
@@ -12,18 +12,10 @@
 #define OBJECT_SORT_RVA 0x1aff420
 #define OBJECT_LIST_RETURN_RVA 0x1b0ebc0
 #define UNKNOWN_CALLER (SORT_CALLERS - 1)
-#define JUMP_SIZE 14
 #define PATCH_SIZE 18
-#define PROLOGUE_CHECK_SIZE 30
-#define MAX_PATCH_THREADS 2048
-#define MAX_HOOKS 64
-#define MAX_HOOK_PATCH 64
-#define PATCH_ATTEMPTS 100
 
-static const BYTE render_sort_prologue[PROLOGUE_CHECK_SIZE] = {0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x55, 0x57, 0x41, 0x54, 0x41,
-                                                               0x56, 0x41, 0x57, 0x48, 0x8d, 0x6c, 0x24, 0xc9, 0x48, 0x81, 0xec, 0xf0, 0x00, 0x00, 0x00};
-static const BYTE object_sort_prologue[PROLOGUE_CHECK_SIZE] = {0x48, 0x89, 0x5c, 0x24, 0x18, 0x48, 0x89, 0x54, 0x24, 0x10, 0x48, 0x89, 0x4c, 0x24, 0x08,
-                                                               0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8d, 0x6c, 0x24};
+static const BYTE render_sort_prologue[PATCH_SIZE] = {0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x55, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57};
+static const BYTE object_sort_prologue[PATCH_SIZE] = {0x48, 0x89, 0x5c, 0x24, 0x18, 0x48, 0x89, 0x54, 0x24, 0x10, 0x48, 0x89, 0x4c, 0x24, 0x08, 0x55, 0x56, 0x57};
 
 typedef void (*RenderSortFn)(uint8_t *first, uint8_t *last, int64_t ideal, uint64_t predicate);
 
@@ -35,11 +27,6 @@ typedef struct {
 
 typedef void (*ObjectSortFn)(VectorIterator *first, VectorIterator *last, int64_t ideal, uint64_t predicate);
 
-typedef struct {
-    BYTE *target;
-    void *trampoline;
-} InstalledHook;
-
 volatile LONG fixes_enabled;
 volatile LONG few_keys_enabled = 1;
 volatile LONG *volatile sort_mode_flag = &fixes_enabled;
@@ -50,8 +37,6 @@ const char *const sort_caller_names[SORT_CALLERS] = {"render list", "other list"
 static RenderSortFn original_render_sort;
 static ObjectSortFn original_object_sort;
 static uintptr_t caller_returns[UNKNOWN_CALLER];
-static InstalledHook installed_hooks[MAX_HOOKS];
-static int installed_hook_count;
 // Both sorts recurse into themselves through the hooked entry, so only the outermost call is replaced and timed.
 static __thread int sort_depth;
 
@@ -127,109 +112,7 @@ static void object_sort_hook(VectorIterator *first, VectorIterator *last, int64_
     record(*sort_mode_flag != 0, caller, count, now_ticks() - started, descents, moved);
 }
 
-static void write_jump(BYTE *at, const void *destination) {
-    at[0] = 0xff;
-    at[1] = 0x25;
-    memset(at + 2, 0, 4);
-    memcpy(at + 6, &destination, sizeof destination);
-}
-
-// Other threads are suspended so none can execute a half-written prologue.
-// One patcher at a time: two threads each suspending all others could suspend each other and stop the process.
-static SRWLOCK patch_lock = SRWLOCK_INIT;
-
-static const char *patch_code_locked(BYTE *target, const BYTE *patch, size_t size) {
-    static HANDLE handles[MAX_PATCH_THREADS];
-    int count = 0;
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) return "thread snapshot failed";
-    THREADENTRY32 entry = {.dwSize = sizeof entry};
-    DWORD process_id = GetCurrentProcessId(), self = GetCurrentThreadId();
-    for (BOOL more = Thread32First(snapshot, &entry); more && count < MAX_PATCH_THREADS; more = Thread32Next(snapshot, &entry)) {
-        if (entry.th32OwnerProcessID != process_id || entry.th32ThreadID == self) continue;
-        HANDLE handle = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, entry.th32ThreadID);
-        if (handle) handles[count++] = handle;
-    }
-    CloseHandle(snapshot);
-    const char *result = "a thread kept executing the patch site";
-    for (int attempt = 0; attempt < PATCH_ATTEMPTS && result; attempt++) {
-        for (int i = 0; i < count; i++) SuspendThread(handles[i]);
-        BOOL busy = FALSE;
-        for (int i = 0; i < count && !busy; i++) {
-            CONTEXT context = {.ContextFlags = CONTEXT_CONTROL};
-            busy = GetThreadContext(handles[i], &context) && context.Rip >= (DWORD64)target && context.Rip < (DWORD64)(target + size);
-        }
-        if (!busy) {
-            DWORD protection;
-            if (VirtualProtect(target, size, PAGE_EXECUTE_READWRITE, &protection)) {
-                memcpy(target, patch, size);
-                VirtualProtect(target, size, protection, &protection);
-                FlushInstructionCache(GetCurrentProcess(), target, size);
-                result = NULL;
-            } else {
-                result = "VirtualProtect failed";
-                attempt = PATCH_ATTEMPTS;
-            }
-        }
-        for (int i = 0; i < count; i++) ResumeThread(handles[i]);
-        if (result && attempt < PATCH_ATTEMPTS) Sleep(1);
-    }
-    for (int i = 0; i < count; i++) CloseHandle(handles[i]);
-    return result;
-}
-
-const char *patch_code(BYTE *target, const BYTE *patch, size_t size) {
-    AcquireSRWLockExclusive(&patch_lock);
-    const char *result = patch_code_locked(target, patch, size);
-    ReleaseSRWLockExclusive(&patch_lock);
-    return result;
-}
-
-const char *patch_checked(BYTE *target, const BYTE *expected, const BYTE *replacement, size_t size) {
-    AcquireSRWLockExclusive(&patch_lock);
-    const char *result = memcmp(target, expected, size) ? "engine code differs from the analysed build" : patch_code_locked(target, replacement, size);
-    ReleaseSRWLockExclusive(&patch_lock);
-    return result;
-}
-
-// A target hooked before keeps its trampoline and only has its jump redirected, so a reloaded module replaces the earlier hook.
-static const char *hook_function_locked(BYTE *target, const BYTE *prologue, size_t size, const void *replacement, void **original) {
-    BYTE patch[MAX_HOOK_PATCH];
-    write_jump(patch, replacement);
-    for (int i = 0; i < installed_hook_count; i++)
-        if (installed_hooks[i].target == target) {
-            *original = installed_hooks[i].trampoline;
-            return patch_code_locked(target, patch, JUMP_SIZE);
-        }
-    if (installed_hook_count == MAX_HOOKS) return "all hook slots used";
-    if (size < JUMP_SIZE || size > MAX_HOOK_PATCH) return "prologue size must fit the jump and the patch buffer";
-    if (memcmp(target, prologue, size)) return "engine code differs from the analysed build";
-    BYTE *trampoline = VirtualAlloc(NULL, size + JUMP_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!trampoline) return "VirtualAlloc for a trampoline failed";
-    memcpy(trampoline, target, size);
-    write_jump(trampoline + size, target + size);
-    FlushInstructionCache(GetCurrentProcess(), trampoline, size + JUMP_SIZE);
-    *original = trampoline;
-    memset(patch + JUMP_SIZE, 0xcc, size - JUMP_SIZE);
-    const char *error = patch_code_locked(target, patch, size);
-    if (!error) installed_hooks[installed_hook_count++] = (InstalledHook){target, trampoline};
-    return error;
-}
-
-const char *hook_function(BYTE *target, const BYTE *prologue, size_t size, const void *replacement, void **original) {
-    AcquireSRWLockExclusive(&patch_lock);
-    const char *result = hook_function_locked(target, prologue, size, replacement, original);
-    ReleaseSRWLockExclusive(&patch_lock);
-    return result;
-}
-
-const char *sortfix_install(void) {
-    BYTE *engine = (BYTE *)GetModuleHandleW(L"empire.retail.x64.dll");
-    if (!engine) return "empire.retail.x64.dll not loaded";
-    // Both prologues are checked before either is patched, so a mismatched build is left untouched.
-    if (memcmp(engine + RENDER_SORT_RVA, render_sort_prologue, PROLOGUE_CHECK_SIZE) ||
-        memcmp(engine + OBJECT_SORT_RVA, object_sort_prologue, PROLOGUE_CHECK_SIZE))
-        return "engine code differs from the analysed build";
+const char *sortfix_install(BYTE *engine) {
     caller_returns[0] = (uintptr_t)engine + RENDER_LIST_RETURN_RVA;
     caller_returns[1] = (uintptr_t)engine + OTHER_LIST_RETURN_RVA;
     caller_returns[2] = (uintptr_t)engine + OBJECT_LIST_RETURN_RVA;

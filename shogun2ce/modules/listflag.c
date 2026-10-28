@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/listflag.h"
 
 // The render-item list's parallel append (sub_181b3d750, parallel flag set) adds the item to the calling thread's sublist
 // and then stores 1 into the list's "needs merge" flag at + 0x30 on every call. TBB workers append to the same list from
@@ -37,6 +38,8 @@ static DWORD list_append_hook(BYTE *list, const BYTE *item, BYTE parallel) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, listflag_checks);
+    if (mismatch) return mismatch;
     fix_enabled = api->fix_enabled;
     thread_registry = (ThreadRegistryFn)(api->engine + THREAD_REGISTRY_RVA);
     sublist_append = (SublistAppendFn)(api->engine + SUBLIST_APPEND_RVA);

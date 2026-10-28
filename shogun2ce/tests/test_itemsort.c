@@ -180,6 +180,34 @@ static int check_entries(size_t count, int pattern) {
     return 1;
 }
 
+// The counting sort takes up to FEW_KEYS_MAX distinct keys; one more falls back to the radix, and that list skips the
+// attempt for its next FEW_KEYS_BACKOFF sorts.
+static int check_few_keys_limit(void) {
+    size_t count = 4 * FEW_KEYS_MAX;
+    uint8_t *items = malloc(count * RENDER_ITEM_SIZE);
+    int ok = 1;
+    for (size_t distinct = FEW_KEYS_MAX; distinct <= FEW_KEYS_MAX + 1; distinct++) {
+        memset(few.backoff, 0, sizeof few.backoff);
+        for (size_t i = 0; i < count; i++) {
+            uint64_t key = (count - i) % distinct;
+            memcpy(items + i * RENDER_ITEM_SIZE, &i, sizeof i);
+            memcpy(items + i * RENDER_ITEM_SIZE + RENDER_ITEM_KEY_OFFSET, &key, sizeof key);
+        }
+        sort_render_items(items, items + count * RENDER_ITEM_SIZE, 1, 0);
+        int expected = distinct > FEW_KEYS_MAX ? FEW_KEYS_BACKOFF : 0;
+        if (few.backoff[0] != expected) ok = !printf("few keys: %zu distinct keys left backoff %d, expected %d\n", distinct, few.backoff[0], expected);
+        for (size_t i = 1; i < count; i++)
+            if (render_item_key(items + i * RENDER_ITEM_SIZE) < render_item_key(items + (i - 1) * RENDER_ITEM_SIZE)) {
+                ok = !printf("few keys: %zu distinct keys out of order at %zu\n", distinct, i);
+                break;
+            }
+    }
+    for (int i = 0; i < FEW_KEYS_BACKOFF; i++) sort_render_items(items, items + count * RENDER_ITEM_SIZE, 1, 0);
+    if (few.backoff[0]) ok = !printf("few keys: backoff still %d after %d sorts\n", few.backoff[0], FEW_KEYS_BACKOFF);
+    free(items);
+    return ok;
+}
+
 int main(void) {
     static const size_t counts[] = {0, 1, 2, 3, 32, 33, 41, 255, 256, 1000, 20000, 100000};
     int failures = 0, runs = 0;
@@ -192,6 +220,8 @@ int main(void) {
             failures += !check_entries(counts[c], pattern);
             runs += 5;
         }
+    failures += !check_few_keys_limit();
+    runs++;
     printf("%d/%d sort checks passed\n", runs - failures, runs);
     return failures != 0;
 }

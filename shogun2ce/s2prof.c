@@ -4,6 +4,7 @@
 #include <winternl.h>
 #include <tlhelp32.h>
 #include <psapi.h>
+#include <imm.h>
 #include <errno.h>
 #include <intrin.h>
 #include <stdarg.h>
@@ -16,6 +17,9 @@
 #include <wchar.h>
 #include "s2module.h"
 #include "sortfix.h"
+#include "hook.h"
+#include "wrap.h"
+#include "checks/s2prof.h"
 
 #define CAPTURE_SECONDS 20
 #define PROGRESS_SECONDS 5
@@ -33,6 +37,8 @@
 #define THREAD_WIN32_START_ADDRESS_CLASS 9
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
 #define MAX_SWITCHES 64
+#define MAX_FIXES 64
+#define MAX_FIX_NAME 32
 // The render overhaul is one of the fixes: its switch follows Apply Fixes.
 #define OVERHAUL_SWITCH "overhaul"
 #define MAX_CRASH_REPORTS 8
@@ -45,6 +51,25 @@ static const BYTE frame_stamp_store[] = {0x48, 0x89, 0x05, 0x58, 0xb8, 0xd4, 0x0
 // D3D11_RENDER_DEVICE::present, which runs on the game's main thread.
 #define PRESENT_RVA 0x1ae7240
 static const BYTE present_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x6c, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x60};
+// D3D11_RENDER_DEVICE::create_device (vtable +0xd0): D3D11CreateDevice through the global below with flags 1
+// (D3D11_CREATE_DEVICE_SINGLETHREADED); the ID3D11Device goes to +0x180 of g_render_device.
+#define CREATE_DEVICE_RVA 0x1ac7e80
+static const BYTE create_device_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x56, 0x57, 0x41, 0x56};
+// D3D11CreateDevice, which the device's constructor looks up in d3d11.dll.
+#define D3D11_CREATE_DEVICE_SLOT_RVA 0x345cac0
+#define RENDER_DEVICE_RVA 0x3450230
+#define DEVICE_INTERFACE 0x180
+// The fixes install in well under a second; past this the device is created without them.
+#define HOLD_WAIT_MS 30000
+#define WAIT_STEP_MS 100
+// The targeted build: its timestamp and image size. Another mod's copy keeps the timestamp and these sections, and may
+// add sections after them.
+#define ENGINE_TIMESTAMP 0x6ac7c293u
+#define ENGINE_IMAGE_SIZE 0x3744000u
+#define BUILD_WARNING L"s2fix is not running with the targeted Shogun 2 build, not all fixes may work!"
+#define LATE_MESSAGE                                                                                                      \
+    L"s2fix was loaded after the game set up its graphics, so some of its fixes are off this session. Keep s2fix's "  \
+    L"d3d11.dll in the game folder so it loads with the game."
 static const char *const mode_names[2] = {"off", "on"};
 
 typedef struct {
@@ -77,6 +102,27 @@ typedef struct {
 } ThreadBasicInfo;
 
 typedef HRESULT(WINAPI *GetThreadDescriptionFn)(HANDLE, PWSTR *);
+typedef uint64_t (*CreateDeviceFn)(BYTE *device, uint64_t adapter);
+typedef enum { ENGINE_NOT_LOADED, ENGINE_TARGETED, ENGINE_MODIFIED, ENGINE_OTHER } EngineBuild;
+static const char *const engine_build_names[] = {"not loaded", "the targeted build", "the targeted build, modified by another mod",
+                                                 "a different build"};
+static const struct {
+    const char *name;
+    DWORD address, size;
+} targeted_sections[] = {{".text", 0x1000, 0x2158adc},     {".rdata", 0x215a000, 0xce314a}, {".data", 0x2e3e000, 0x71fed0},
+                         {".pdata", 0x355e000, 0x18c378}, {"_RDATA", 0x36eb000, 0x2404},   {".fptable", 0x36ee000, 0x100}};
+typedef HRESULT(WINAPI *D3D11CreateDeviceFn)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
+                                             D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
+#define DLL_LOADED 1
+typedef struct {
+    ULONG flags;
+    const UNICODE_STRING *full_name, *base_name;
+    void *base;
+    ULONG size;
+} DllLoaded;
+typedef void(CALLBACK *DllNotificationFn)(ULONG reason, const DllLoaded *loaded, void *context);
+NTSTATUS NTAPI LdrRegisterDllNotification(ULONG flags, DllNotificationFn callback, void *context, void **cookie);
+
 
 typedef struct {
     const char *name;
@@ -118,7 +164,21 @@ static volatile LONG crash_reports;
 static char run_id[32];
 static int capture_number = 1;
 static volatile ULONG64 *frame_stamp;
-static const char *sortfix_error = "not installed yet";
+typedef enum { FIX_INSTALLED, FIX_OFF, FIX_REFUSED } FixState;
+
+typedef struct {
+    char name[MAX_FIX_NAME], module[MAX_PATH];
+    FixState state;
+    // From the fixes folder or the host's own sort fix, so in the closing line.
+    BOOL counted;
+    int first_switch;
+} FixRecord;
+
+static FixRecord fix_records[MAX_FIXES];
+static int fix_count, open_fix;
+static BOOL loading_fixes;
+static char loading_module[MAX_PATH];
+static BYTE *engine;
 static BOOL hotkey_was_down[256];
 static Thread threads[MAX_THREADS];
 static int thread_count;
@@ -682,10 +742,6 @@ static void sync_overhaul(void) {
 }
 
 static void set_apply_fixes(BOOL enabled) {
-    if (sortfix_error) {
-        log_line("Apply Fixes unavailable: the sort fix did not install: %s", sortfix_error);
-        return;
-    }
     fixes_enabled = enabled;
     sync_overhaul();
     log_line("Apply Fixes %s", fixes_enabled ? "ON" : "OFF");
@@ -713,11 +769,6 @@ static void register_switch(const char *name, volatile LONG *flag, void (*report
         return;
     }
     switches[switch_count++] = (Switch){name, flag, report};
-}
-
-// A/B runs flip the switch directly; only the fix switch can be unavailable.
-static const char *switch_unavailable(const Switch *target) {
-    return target == &switches[0] ? sortfix_error : NULL;
 }
 
 static DWORD process_page_faults(void) {
@@ -799,10 +850,6 @@ static void capture(int seconds, Switch *ab) {
     int number = capture_number++;
     BOOL alternating = ab != NULL;
     Switch *mode_switch = ab ? ab : &switches[0];
-    if (alternating && switch_unavailable(ab)) {
-        log_line("A/B capture of %s unavailable: %s", ab->name, switch_unavailable(ab));
-        return;
-    }
     MessageBeep(MB_OK);
     LONG enabled_before = *mode_switch->flag;
     log_line("capture %d: sampling for %d s%s%s...", number, seconds, alternating ? ", switching every 2 s: " : "; Ctrl+Shift+F10 still toggles Apply Fixes",
@@ -858,6 +905,14 @@ static void start_run(void) {
 
 typedef uint64_t (*PresentFn)(BYTE *device);
 static PresentFn original_present;
+static CreateDeviceFn original_create_device;
+static D3D11CreateDeviceFn real_d3d11_create_device;
+static HANDLE engine_event;
+static volatile LONG hold_ran;
+static BOOL multithreaded_device, wrap_context;
+static char device_hooks_error[192];
+static volatile LONG build_warning_open;
+static HHOOK button_hook;
 static volatile DWORD main_thread_id;
 
 static uint64_t present_hook(BYTE *device) {
@@ -865,30 +920,118 @@ static uint64_t present_hook(BYTE *device) {
     return original_present(device);
 }
 
+// "off (...)": the player switched the fix off in s2prof.ini.
+static BOOL switched_off(const char *error) {
+    return !strncmp(error, "off (", 5);
+}
+
+static const char *end_fix(const char *error) {
+    if (!open_fix) return error;
+    FixRecord *fix = &fix_records[open_fix - 1];
+    end_write_group();
+    char undone[128] = "";
+    if (error) {
+        int hooks, patches;
+        const char *undo_error = undo_write_group(open_fix, &hooks, &patches);
+        if (switch_count > fix->first_switch) switch_count = fix->first_switch;
+        if (undo_error) snprintf(undone, sizeof undone, "; undoing its writes failed: %s", undo_error);
+        else if (hooks || patches) snprintf(undone, sizeof undone, " (undone: %d hooks, %d patches)", hooks, patches);
+    }
+    fix->state = !error ? FIX_INSTALLED : switched_off(error) ? FIX_OFF : FIX_REFUSED;
+    size_t module_length = strcspn(fix->module, ".");
+    if (strlen(fix->name) == module_length && !strncmp(fix->name, fix->module, module_length))
+        log_line("module %s: %s%s", fix->module, error ? error : "installed", undone);
+    else
+        log_line("module %s: %s: %s%s", fix->module, fix->name, error ? error : "installed", undone);
+    open_fix = 0;
+    return error;
+}
+
+static void begin_fix(const char *name) {
+    if (open_fix) end_fix(NULL);
+    if (fix_count == MAX_FIXES) {
+        log_line("fix %s: not tracked, all %d fix slots are used; it cannot be undone", name, MAX_FIXES);
+        return;
+    }
+    FixRecord *fix = &fix_records[fix_count++];
+    *fix = (FixRecord){.counted = loading_fixes, .first_switch = switch_count};
+    snprintf(fix->name, sizeof fix->name, "%s", name);
+    snprintf(fix->module, sizeof fix->module, "%s", loading_module[0] ? loading_module : name);
+    open_fix = fix_count;
+    begin_write_group(open_fix);
+}
+
+static const char *check_engine(const S2Check *checks, int count) {
+    static char message[192];
+    for (int i = 0; i < count; i++)
+        if (!engine_hash_matches(engine, checks[i].rva, checks[i].size, checks[i].hash, checks[i].flags & S2_CHECK_ENTRY)) {
+            snprintf(message, sizeof message, "the engine's %s (0x%llx) differs from the targeted build", checks[i].what,
+                     (unsigned long long)(ENGINE_PREFERRED_BASE + checks[i].rva));
+            return message;
+        }
+    return NULL;
+}
+
+static void log_fix_summary(ULONGLONG milliseconds) {
+    int counts[3] = {0};
+    char refused[512] = "";
+    for (int i = 0; i < fix_count; i++) {
+        if (!fix_records[i].counted) continue;
+        counts[fix_records[i].state]++;
+        if (fix_records[i].state == FIX_REFUSED && strlen(refused) + strlen(fix_records[i].name) + 3 < sizeof refused) {
+            strcat(refused, counts[FIX_REFUSED] > 1 ? ", " : ": ");
+            strcat(refused, fix_records[i].name);
+        }
+    }
+    log_line("fixes: %d installed, %d off in s2prof.ini, %d refused%s (%llu ms)", counts[FIX_INSTALLED], counts[FIX_OFF], counts[FIX_REFUSED], refused,
+             milliseconds);
+}
+
+// For the offline install check: the engine writes s2prof holds, and the fix (write group) each belongs to.
+__declspec(dllexport) int s2prof_live_writes(LiveWrite *out, int capacity) {
+    return list_live_writes(out, capacity);
+}
+
+__declspec(dllexport) const char *s2prof_fix(int group, int *state, BOOL *counted) {
+    if (group < 1 || group > fix_count) return NULL;
+    *state = fix_records[group - 1].state;
+    *counted = fix_records[group - 1].counted;
+    return fix_records[group - 1].name;
+}
+
 static S2Api module_api = {.fix_enabled = &fixes_enabled,
                            .log_line = log_line,
                            .hook = hook_function,
                            .register_switch = register_switch,
                            .patch = patch_checked,
-                           .main_thread = &main_thread_id};
+                           .main_thread = &main_thread_id,
+                           .set_hook_owner = set_hook_owner,
+                           .end_fix = end_fix,
+                           .begin_fix = begin_fix,
+                           .check_engine = check_engine};
 
 static void load_module(const char *utf8_path) {
     wchar_t path[MAX_PATH];
     MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, path, MAX_PATH);
     const char *name = strrchr(utf8_path, '\\') ? strrchr(utf8_path, '\\') + 1 : utf8_path;
+    char fix_name[MAX_FIX_NAME];
+    snprintf(fix_name, sizeof fix_name, "%.*s", (int)strcspn(name, "."), name);
+    snprintf(loading_module, sizeof loading_module, "%.*s", (int)sizeof loading_module - 1, name);
+    begin_fix(fix_name);
+    static char error[96];
     HMODULE module = LoadLibraryW(path);
+    S2ModuleMain module_main = module ? (S2ModuleMain)(void *)GetProcAddress(module, "s2_module_main") : NULL;
     if (!module) {
-        log_line("module %s: LoadLibrary failed: %lu", name, GetLastError());
-        return;
+        snprintf(error, sizeof error, "LoadLibrary failed: %lu", GetLastError());
+        end_fix(error);
+    } else if (!module_main) {
+        end_fix("no s2_module_main export");
+    } else {
+        module_api.engine = engine;
+        set_hook_owner(name);
+        end_fix(module_main(&module_api));
     }
-    S2ModuleMain module_main = (S2ModuleMain)(void *)GetProcAddress(module, "s2_module_main");
-    if (!module_main) {
-        log_line("module %s: no s2_module_main export", name);
-        return;
-    }
-    module_api.engine = (BYTE *)GetModuleHandleW(ENGINE_MODULE);
-    const char *error = module_main(&module_api);
-    log_line("module %s: %s", name, error ? error : "installed");
+    loading_module[0] = 0;
 }
 
 static void load_modules(const wchar_t *dir) {
@@ -931,25 +1074,158 @@ static DWORD open_console(void) {
 static HANDLE ready_event;
 
 __declspec(dllexport) BOOL s2prof_wait_ready(DWORD milliseconds) {
-    return ready_event && WaitForSingleObject(ready_event, milliseconds) == WAIT_OBJECT_0;
+    if (!ready_event) return FALSE;
+    // The player may take longer over the build warning; the device must still wait for the fixes Launch Game installs.
+    for (DWORD waited = 0; WaitForSingleObject(ready_event, WAIT_STEP_MS) != WAIT_OBJECT_0;)
+        if (!build_warning_open && (waited += WAIT_STEP_MS) >= milliseconds) return FALSE;
+    return TRUE;
 }
+
+static EngineBuild classify_engine(const BYTE *image) {
+    if (!image) return ENGINE_NOT_LOADED;
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(image + ((const IMAGE_DOS_HEADER *)image)->e_lfanew);
+    if (nt->FileHeader.TimeDateStamp != ENGINE_TIMESTAMP) return ENGINE_OTHER;
+    if (nt->OptionalHeader.SizeOfImage == ENGINE_IMAGE_SIZE) return ENGINE_TARGETED;
+    const int count = sizeof targeted_sections / sizeof *targeted_sections;
+    if (nt->FileHeader.NumberOfSections < count) return ENGINE_OTHER;
+    const IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < count; i++, section++)
+        if (strncmp((const char *)section->Name, targeted_sections[i].name, IMAGE_SIZEOF_SHORT_NAME) || section->VirtualAddress != targeted_sections[i].address ||
+            section->Misc.VirtualSize != targeted_sections[i].size)
+            return ENGINE_OTHER;
+    return ENGINE_MODIFIED;
+}
+
+// MessageBox has no button texts of its own; these are set as the box opens.
+static LRESULT CALLBACK name_buttons(int code, WPARAM wparam, LPARAM lparam) {
+    if (code != HCBT_ACTIVATE) return CallNextHookEx(button_hook, code, wparam, lparam);
+    SetDlgItemTextW((HWND)wparam, IDOK, L"Launch Game");
+    SetDlgItemTextW((HWND)wparam, IDCANCEL, L"Exit Game");
+    UnhookWindowsHookEx(button_hook);
+    return 0;
+}
+
+// No owner window: the game's main thread is held in its device creation until the box is answered.
+static BOOL launch_on_other_build(void) {
+    wchar_t text[768];
+    swprintf(text, sizeof text / sizeof *text,
+             L"%ls\n\nempire.retail.x64.dll was modified or updated and does not match the expected build.\n\nFixes whose engine code still matches "
+             L"are applied; the log in perf-logs lists the others. To launch without this message, set ignore_build_check=1 in s2prof.ini.",
+             BUILD_WARNING);
+    // The box takes no text, and Text Services on this thread could wait on the game's thread, blocked until we finish.
+    ImmDisableIME(0);
+    button_hook = SetWindowsHookExW(WH_CBT, name_buttons, NULL, GetCurrentThreadId());
+    build_warning_open = TRUE;
+    int answer = MessageBoxW(NULL, text, L"Shogun 2 fixes", MB_OKCANCEL | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
+    build_warning_open = FALSE;
+    return answer != IDCANCEL;
+}
+
+static DWORD WINAPI notice_thread(LPVOID text) {
+    // The box takes no text, and Text Services on this thread could wait on the game's thread.
+    ImmDisableIME(0);
+    MessageBoxW(NULL, text, L"Shogun 2 fixes", MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
+    return 0;
+}
+
+// On a thread of its own, so the controller goes on to install the fixes.
+static void show_notice(const wchar_t *text) {
+    HANDLE thread = CreateThread(NULL, 0, notice_thread, (LPVOID)text, 0, NULL);
+    if (thread) CloseHandle(thread);
+}
+
+static HRESULT WINAPI create_d3d11_device(IDXGIAdapter *adapter, D3D_DRIVER_TYPE driver_type, HMODULE software, UINT flags,
+                                          const D3D_FEATURE_LEVEL *feature_levels, UINT feature_level_count, UINT sdk_version, ID3D11Device **device,
+                                          D3D_FEATURE_LEVEL *feature_level, ID3D11DeviceContext **context) {
+    UINT passed = multithreaded_device ? flags & ~D3D11_CREATE_DEVICE_SINGLETHREADED : flags;
+    HRESULT result = real_d3d11_create_device(adapter, driver_type, software, passed, feature_levels, feature_level_count, sdk_version, device,
+                                              feature_level, context);
+    log_line("D3D11CreateDevice: flags 0x%x passed as 0x%x -> 0x%lx%s", flags, passed, result, SUCCEEDED(result) && wrap_context && device ? ", wrapped" : "");
+    if (SUCCEEDED(result) && wrap_context && device) wrap_device(device, context);
+    return result;
+}
+
+// The renderer starts: the fixes go in first, then the device is created through s2fix's D3D11CreateDevice.
+static uint64_t create_device_hook(BYTE *device, uint64_t adapter) {
+    hold_ran = TRUE;
+    if (!s2prof_wait_ready(HOLD_WAIT_MS)) log_line("the fixes were not installed after %d s; the device is created without them", HOLD_WAIT_MS / 1000);
+    void *volatile *slot = (void *volatile *)(engine + D3D11_CREATE_DEVICE_SLOT_RVA);
+    real_d3d11_create_device = (D3D11CreateDeviceFn)*slot;
+    // Without d3d11.dll the engine skips the call itself.
+    if (real_d3d11_create_device) *slot = (void *)create_d3d11_device;
+    uint64_t result = original_create_device(device, adapter);
+    *slot = (void *)real_d3d11_create_device;
+    return result;
+}
+
+// The device may be created soon after the engine loads, so its hook goes in at once, as s2fix or the engine loads.
+static void engine_loaded(BYTE *base) {
+    engine = base;
+    const char *error = S2_CHECK_ENGINE(&module_api, device_checks);
+    if (!error)
+        error = hook_function(engine + CREATE_DEVICE_RVA, create_device_prologue, sizeof create_device_prologue, (const void *)create_device_hook,
+                              (void **)&original_create_device);
+    if (error) snprintf(device_hooks_error, sizeof device_hooks_error, "%s", error);
+    SetEvent(engine_event);
+}
+
+static void CALLBACK dll_loaded(ULONG reason, const DllLoaded *loaded, void *context) {
+    (void)context;
+    size_t length = wcslen(ENGINE_MODULE);
+    if (reason == DLL_LOADED && loaded->base_name->Length == length * sizeof(wchar_t) && !_wcsnicmp(loaded->base_name->Buffer, ENGINE_MODULE, length))
+        engine_loaded(loaded->base);
+}
+
+static BOOL device_created(void) {
+    BYTE *device = *(BYTE *volatile *)(engine + RENDER_DEVICE_RVA);
+    return device && *(void *volatile *)(device + DEVICE_INTERFACE);
+}
+
 
 static DWORD WINAPI controller(LPVOID unused) {
     (void)unused;
+    // Another loader may bring s2fix into the game's helper processes too; there the engine never loads.
+    WaitForSingleObject(engine_event, INFINITE);
     DWORD console_error = open_console();
     start_run();
     AddVectoredExceptionHandler(1, report_crash);
     if (console_error) log_line("console unavailable: error %lu", console_error);
-    sortfix_error = sortfix_install();
-    log_line("s2prof running inside the game.");
-    if (sortfix_error) log_line("sort fix unavailable: %s; Apply Fixes cannot be turned on", sortfix_error);
-    else register_switch("fewkeys", &few_keys_enabled, NULL);
-    BYTE *engine = (BYTE *)GetModuleHandleW(ENGINE_MODULE);
-    const char *present_error = engine ? hook_function(engine + PRESENT_RVA, present_prologue, sizeof present_prologue, (const void *)present_hook,
-                                                       (void **)&original_present)
-                                       : "empire.retail.x64.dll not loaded";
+    EngineBuild engine_build = classify_engine(engine);
+    log_line("s2prof running inside the game (engine at 0x%llx, %s).", (unsigned long long)(uintptr_t)engine, engine_build_names[engine_build]);
+    if (device_hooks_error[0])
+        log_line("device creation: not held for the fixes; multithreaded device and wrapped context off: %s", device_hooks_error);
+    else
+        log_line("device creation: held for the fixes; multithreaded device %s, context %s", multithreaded_device ? "on" : "off (multithreaded_device=0)",
+                 wrap_context ? "wrapped" : "not wrapped (wrap_context=0)");
+    if (!device_hooks_error[0] && !hold_ran && device_created() && (multithreaded_device || wrap_context)) {
+        log_line("s2fix was loaded after the game created its graphics device: %s%s%s are off this session", multithreaded_device ? "the multithreaded device" : "",
+                 multithreaded_device && wrap_context ? " and " : "", wrap_context ? "the wrapped context" : "");
+        show_notice(LATE_MESSAGE);
+    }
+    const char *present_error =
+        hook_function(engine + PRESENT_RVA, present_prologue, sizeof present_prologue, (const void *)present_hook, (void **)&original_present);
     if (present_error) log_line("main thread unknown (fixes that need it stay off): present hook: %s", present_error);
+    if (engine_build == ENGINE_MODIFIED || engine_build == ENGINE_OTHER) {
+        if (GetPrivateProfileIntW(L"s2prof", L"ignore_build_check", 0, config_path)) {
+            log_line("build check off (ignore_build_check=1): installing every fix whose engine code still matches");
+        } else if (launch_on_other_build()) {
+            log_line("build warning: Launch Game; installing every fix whose engine code still matches");
+        } else {
+            log_line("build warning: Exit Game; ending the game");
+            // The game is still starting on its own threads; its shutdown code isn't safe to run from here.
+            TerminateProcess(GetCurrentProcess(), 0);
+        }
+    }
+    ULONGLONG started = GetTickCount64();
+    loading_fixes = TRUE;
+    begin_fix("sortfix");
+    const char *sort_error = S2_CHECK_ENGINE(&module_api, sortfix_checks);
+    if (!sort_error) sort_error = sortfix_install(engine);
+    if (!sort_error) register_switch("fewkeys", &few_keys_enabled, NULL);
+    end_fix(sort_error);
     load_modules(fixes_dir);
+    loading_fixes = FALSE;
+    log_fix_summary(GetTickCount64() - started);
     set_apply_fixes(TRUE);
     log_help();
     SetEvent(ready_event);
@@ -967,16 +1243,34 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     // Present only when the process ends through ExitProcess; a fail-fast or TerminateProcess skips it.
     if (reason == DLL_PROCESS_DETACH && reserved) log_line("process exiting through ExitProcess");
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
+    // One s2fix per process: a second copy, from another loader or under another name, fails to load.
+    wchar_t lock_name[64];
+    swprintf(lock_name, sizeof lock_name / sizeof *lock_name, L"Local\\s2fix.%lu", GetCurrentProcessId());
+    HANDLE instance_lock = CreateMutexW(NULL, FALSE, lock_name);
+    if (!instance_lock || GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (instance_lock) CloseHandle(instance_lock);
+        return FALSE;
+    }
     DisableThreadLibraryCalls(instance);
     ready_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    engine_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     GetModuleFileNameW(instance, output_dir, MAX_PATH);
     wcscpy(fixes_dir, output_dir);
     wcscpy(wcsrchr(fixes_dir, L'\\'), L"\\fixes");
     wcscpy(config_path, output_dir);
     wcscpy(wcsrchr(config_path, L'\\'), L"\\s2prof.ini");
     wcscpy(wcsrchr(output_dir, L'\\'), L"\\perf-logs");
+    multithreaded_device = GetPrivateProfileIntW(L"device", L"multithreaded_device", 0, config_path);
+    wrap_context = GetPrivateProfileIntW(L"device", L"wrap_context", 0, config_path);
+    // The thread first: a load that fails must leave no hook behind. It waits for the engine.
     HANDLE thread = CreateThread(NULL, 0, controller, NULL, 0, NULL);
     if (!thread) return FALSE;
     CloseHandle(thread);
+    void *notification;
+    BYTE *loaded = (BYTE *)GetModuleHandleW(ENGINE_MODULE);
+    if (loaded)
+        engine_loaded(loaded);
+    else
+        LdrRegisterDllNotification(0, dll_loaded, NULL, &notification);
     return TRUE;
 }

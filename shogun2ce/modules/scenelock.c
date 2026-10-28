@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/scenelock.h"
 
 // The Variant node's locked add (sub_181b13060) holds the critical section at node + 0x338 for a soldier's whole
 // emission, and the main thread and up to 15 TBB workers call it from one parallel loop. With the engine's spin count
@@ -39,6 +40,8 @@ static void locked_add_hook(BYTE *scene, void *a2, void *a3, void *a4, void *a5,
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, scenelock_checks);
+    if (mismatch) return mismatch;
     fix_enabled = api->fix_enabled;
     return api->hook(api->engine + LOCKED_ADD_RVA, locked_add_prologue, sizeof locked_add_prologue, (const void *)locked_add_hook,
                      (void **)&original_locked_add);

@@ -1,6 +1,7 @@
 #define _WIN32_WINNT 0x0A00
 #define COBJMACROS
 #include "../s2module.h"
+#include "../checks/overhaul.h"
 #include "../spinwait.h"
 #include "tebslot.h"
 #include <initguid.h>
@@ -444,7 +445,7 @@ typedef struct {
     ID3D11CommandList *list;
 } Submission;
 
-// The proxy's context (wrap_context=1): every method forwards to current.
+// s2fix's wrapped context (wrap_context=1): every method forwards to current.
 typedef struct {
     void *const *vtable;
     ID3D11DeviceContext *current, *immediate;
@@ -580,7 +581,7 @@ typedef struct {
     LONGLONG ticks;
 } ViewStats;
 
-// On from the start; the host keeps it equal to Apply Fixes (Ctrl+Shift+F10).
+// On from the start; Ctrl+Shift+F7 toggles it.
 __declspec(dllexport) volatile LONG overhaul_enabled = 1;
 // Settings read live, so they can be changed while the game runs: workers beside main (0 runs the range path serially
 // on main), the view types to split (bit per VIEW_TYPE), and the fewest groups worth splitting. By default the shadow
@@ -618,7 +619,7 @@ __declspec(dllexport) volatile LONG overhaul_prepare_split = 1;
 // mapping the engine's own buffers on deferred contexts left main's later maps of them waiting in the driver.
 __declspec(dllexport) volatile LONG overhaul_cb_copies = 1;
 // 1 lets main go on to the next view while workers draw a split one: main records into its own deferred context through
-// the proxy's context (wrap_context=1 in s2prof.ini), and the lists are executed in order as they finish and at each drain.
+// s2fix's wrapped context (wrap_context=1 in s2prof.ini), and the lists are executed in order as they finish and at each drain.
 // It takes effect from the next frame, and implies packets.
 __declspec(dllexport) volatile LONG overhaul_overlap;
 // 1 sets each split view's range boundaries from its previous frame's range times, so main and the workers finish
@@ -3052,7 +3053,8 @@ static BOOL start_workers(int wanted, ID3D11DeviceContext *immediate) {
     if (!device) {
         ID3D11DeviceContext_GetDevice(immediate, &device);
         if (ID3D11Device_GetCreationFlags(device) & D3D11_CREATE_DEVICE_SINGLETHREADED) {
-            worker_error = "the device is single-threaded; set multithreaded_device=1 in s2prof.ini";
+            worker_error = "the device is single-threaded (multithreaded_device=0, or s2fix did not hold the device's creation: see the log's device "
+                           "creation line)";
             api->log_line("overhaul: no workers: %s", worker_error);
             return FALSE;
         }
@@ -3071,7 +3073,7 @@ static BOOL start_workers(int wanted, ID3D11DeviceContext *immediate) {
         if (FAILED(result)) {
             static char error[160];
             snprintf(error, sizeof error, "CreateDeferredContext failed: 0x%08lx%s", (unsigned long)result,
-                     result == DXGI_ERROR_INVALID_CALL ? " (a single-threaded device: set multithreaded_device=1 in s2prof.ini)" : "");
+                     result == DXGI_ERROR_INVALID_CALL ? " (a single-threaded device: multithreaded_device=0, or s2fix did not hold the device's creation)" : "");
             worker_error = error;
             api->log_line("overhaul: no more workers: %s", worker_error);
             _aligned_free(worker);
@@ -3502,7 +3504,7 @@ static ViewSlot *take_slot(void) {
     return &slots[slots_taken++ % MAX_SLOTS];
 }
 
-// The proxy forwards every slot of the newest interface, so main's deferred context must have them all.
+// The wrapper forwards every slot of the newest interface, so main's deferred context must have them all.
 static ID3D11DeviceContext *newest_context(ID3D11DeviceContext *context) {
     static const IID *const iids[] = {&IID_ID3D11DeviceContext4, &IID_ID3D11DeviceContext3, &IID_ID3D11DeviceContext2, &IID_ID3D11DeviceContext1};
     for (size_t i = 0; i < sizeof iids / sizeof *iids; i++) {
@@ -3515,7 +3517,7 @@ static ID3D11DeviceContext *newest_context(ID3D11DeviceContext *context) {
     return context;
 }
 
-// The engine must hold the proxy's context, so every holder of it follows main into its deferred context.
+// The engine must hold the wrapped context, so every holder of it follows main into its deferred context.
 static BOOL overlap_ready(BYTE *renderer) {
     if (overlap_checked) return main_deferred != NULL;
     overlap_checked = TRUE;
@@ -3524,7 +3526,7 @@ static BOOL overlap_ready(BYTE *renderer) {
     HMODULE module;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, vtable, &module) ||
         (void *)GetProcAddress(module, "wrapped_context_vtable") != vtable) {
-        api->log_line("overhaul: overlap needs the proxy's context; set wrap_context=1 in s2prof.ini");
+        api->log_line("overhaul: overlap needs the wrapped context; set wrap_context=1 in s2prof.ini");
         return FALSE;
     }
     ID3D11DeviceContext *deferred;
@@ -4623,7 +4625,7 @@ static double per_frame_ms(LONGLONG ticks, double frames) {
 
 // D3D call counts per context method, per mode: main's immediate context and the workers' deferred contexts, so a
 // worker list that differs from what main would have issued shows up method by method. Main's own deferred segments
-// (overlap) are counted on the proxy's context, which forwards them. The thunks go in only for an
+// (overlap) are counted on the wrapped context, which forwards them. The thunks go in only for an
 // A/B run (report start to end), because the runtime may rewrite its own vtable entries.
 __attribute__((used)) volatile uint64_t main_calls[2][CONTEXT_METHODS];
 __attribute__((used)) void *original_immediate_methods[CONTEXT_METHODS], *original_deferred_methods[CONTEXT_METHODS];
@@ -5528,18 +5530,21 @@ static void effects_verify_report(BOOL start) {
     report_switch("effectsverify", &overhaul_effects_verify, start);
 }
 
-static const char *patch_slots(void **slots, int count, void *const *replacements, void **originals) {
-    DWORD protection;
-    if (!VirtualProtect(slots, count * sizeof *slots, PAGE_READWRITE, &protection)) return "VirtualProtect on an engine vtable failed";
+// A vtable slot holds a relocated pointer to its function; patch compares it with the file's bytes, at the preferred base,
+// and keeps the write so a refused install is undone.
+static const char *patch_slots(void **slots, int count, const uint32_t *function_rvas, void *const *replacements, void **originals) {
     for (int i = 0; i < count; i++) {
         if (originals) originals[i] = slots[i];
-        InterlockedExchangePointer(&slots[i], replacements[i]);
+        uint64_t file_value = ENGINE_PREFERRED_BASE + function_rvas[i];
+        const char *error = api->patch((BYTE *)&slots[i], (const BYTE *)&file_value, (const BYTE *)&replacements[i], sizeof *slots);
+        if (error) return error;
     }
-    VirtualProtect(slots, count * sizeof *slots, protection, &protection);
     return NULL;
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
+    const char *mismatch = S2_CHECK_ENGINE(s2, overhaul_checks);
+    if (mismatch) return mismatch;
     api = s2;
     engine = api->engine;
     frame_stamp = (volatile uint64_t *)(engine + FRAME_STAMP_RVA);
@@ -5548,9 +5553,6 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
     tls_index = TlsAlloc();
     if (tls_index == TLS_OUT_OF_INDEXES) return "no TLS slot left";
     void **draw_slots = (void **)(engine + RENDERER_VTABLE_RVA) + FIRST_DRAW_SLOT, **get_renderer_slot = (void **)(engine + GET_RENDERER_SLOT_RVA);
-    for (int i = 0; i < DRAW_SLOTS; i++)
-        if (draw_slots[i] != engine + expected_draw_rvas[i]) return "RENDERER draw slots differ from the analysed build";
-    if (*get_renderer_slot != engine + GET_RENDERER_RVA) return "the device's get_renderer slot differs from the analysed build";
     for (int stage = 0; stage < STAGES; stage++) original_set_shaders[stage] = (SetShaderFn)((void **)(engine + RENDERER_VTABLE_RVA))[set_shader_slots[stage] / 8];
     const char *error = api->hook(engine + EXECUTE_RVA, execute_prologue, sizeof execute_prologue, (const void *)execute_hook, (void **)&original_execute);
     if (!error)
@@ -5568,9 +5570,6 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
     if (!error)
         error = api->hook(engine + FILL_INSTANCE_TEXTURES_RVA, fill_instance_textures_prologue, sizeof fill_instance_textures_prologue,
                           (const void *)fill_instance_textures_hook, (void **)&original_fill_instance_textures);
-    if (!error && (*(BYTE **)(engine + INSTANCE_RING_VTABLE_RVA + RING_ALLOCATE_SLOT) != engine + RING_ALLOCATE_RVA ||
-                   *(BYTE **)(engine + GEOMETRY_RING_VTABLE_RVA + RING_ALLOCATE_SLOT) != engine + RING_ALLOCATE_RVA))
-        error = "the rings' allocate slot differs from the analysed build";
     if (!error)
         error = api->hook(engine + RING_ALLOCATE_RVA, ring_allocate_prologue, sizeof ring_allocate_prologue, (const void *)ring_allocate_hook,
                           (void **)&original_ring_allocate);
@@ -5620,15 +5619,15 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
         error = api->hook(engine + EFFECTS_RECORD_RVA, effects_record_prologue, sizeof effects_record_prologue, (const void *)effects_record_hook,
                           (void **)&original_effects_record);
     void **begin_bucket_slot = (void **)(engine + BUCKET_CALLBACK_VTABLE_RVA);
-    if (!error && *begin_bucket_slot != engine + BEGIN_BUCKET_RVA) error = "the Variant node's bucket callback differs from the analysed build";
     original_begin_bucket = (BeginBucketFn)(engine + BEGIN_BUCKET_RVA);
     void *const begin_bucket_hooks[1] = {(void *)begin_bucket_hook};
-    if (!error) error = patch_slots(begin_bucket_slot, 1, begin_bucket_hooks, NULL);
+    static const uint32_t begin_bucket_rva[1] = {BEGIN_BUCKET_RVA}, get_renderer_rva[1] = {GET_RENDERER_RVA};
+    if (!error) error = patch_slots(begin_bucket_slot, 1, begin_bucket_rva, begin_bucket_hooks, NULL);
     void *const draw_hooks[DRAW_SLOTS] = {(void *)draw_hook, (void *)draw_indexed_hook, (void *)draw_indexed_instanced_hook, (void *)draw_instanced_hook,
                                           (void *)draw_indirect_hook};
     void *const renderer_hook[1] = {(void *)get_renderer_hook};
-    if (!error) error = patch_slots(draw_slots, DRAW_SLOTS, draw_hooks, original_draws);
-    if (!error) error = patch_slots(get_renderer_slot, 1, renderer_hook, NULL);
+    if (!error) error = patch_slots(draw_slots, DRAW_SLOTS, expected_draw_rvas, draw_hooks, original_draws);
+    if (!error) error = patch_slots(get_renderer_slot, 1, get_renderer_rva, renderer_hook, NULL);
     if (error) return error;
     api->register_switch("overhaul", &overhaul_enabled, overhaul_report);
     api->register_switch("prepare", &overhaul_prepare_split, prepare_report);

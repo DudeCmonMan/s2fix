@@ -1,5 +1,6 @@
 #define _WIN32_WINNT 0x0A00
 #include "../s2module.h"
+#include "../checks/cpuplace.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <wchar.h>
@@ -75,7 +76,7 @@ static const char *choose_ccd(const wchar_t *setting, ULONG *chosen) {
             if (bytes == best_bytes) tie = TRUE;
             if (bytes > best_bytes) best = i, best_bytes = bytes, tie = FALSE;
         }
-        if (tie) return "ccd=cache: no CCD has a larger L3 than the others; set ccd to a number";
+        if (tie) return "off (ccd=cache: no CCD has a larger L3 than the others; placement left to Windows)";
         *chosen = ccds[best];
         return NULL;
     }
@@ -102,6 +103,8 @@ static uint64_t frame_hook(void *engine_state, void *frame) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *s2_api) {
+    const char *mismatch = S2_CHECK_ENGINE(s2_api, cpuplace_checks);
+    if (mismatch) return mismatch;
     api = s2_api;
     HMODULE self;
     wchar_t path[MAX_PATH], ccd_setting[16];
@@ -112,7 +115,7 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *s2_api) {
     *wcsrchr(path, L'\\') = 0;
     wcscat(path, L"\\" CONFIG_FILE);
     GetPrivateProfileStringW(L"cpu", L"ccd", L"off", ccd_setting, 16, path);
-    if (!wcscmp(ccd_setting, L"off")) return "ccd=off in s2prof.ini; CPU placement left to Windows";
+    if (!wcscmp(ccd_setting, L"off")) return "off (ccd=off in s2prof.ini; placement left to Windows)";
     const char *error = read_cpus();
     ULONG cache;
     if (!error) error = choose_ccd(ccd_setting, &cache);

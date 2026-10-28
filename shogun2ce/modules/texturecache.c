@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/texturecache.h"
 #include <stdint.h>
 #include <intrin.h>
 
@@ -71,6 +72,8 @@ static BYTE *map_find_hook(BYTE *map, const void *key) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, texturecache_checks);
+    if (mismatch) return mismatch;
     engine = api->engine;
     fix_enabled = api->fix_enabled;
     string_equal = (StringEqualFn)(engine + STRING_EQUAL_RVA);

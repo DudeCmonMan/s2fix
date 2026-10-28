@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/itemcopy.h"
 #include <string.h>
 
 // The engine's field-by-field copy of a 176-byte render item; it runs for every list push, list growth and sort move.
@@ -16,6 +17,8 @@ static void *item_copy(void *destination, const void *source) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, itemcopy_checks);
+    if (mismatch) return mismatch;
     fix_enabled = api->fix_enabled;
     return api->hook(api->engine + ITEM_COPY_RVA, item_copy_prologue, sizeof item_copy_prologue, (const void *)item_copy, (void **)&original_item_copy);
 }

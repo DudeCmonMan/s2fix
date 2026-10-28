@@ -40,7 +40,7 @@ static void (*const forwards[150])(void) = {forward_0, forward_1, forward_2, for
 
 static void *device_vtable[DEVICE_SLOTS];
 // Exported so the overhaul can tell our context from the runtime's.
-void *wrapped_context_vtable[CONTEXT_SLOTS];
+__declspec(dllexport) void *wrapped_context_vtable[CONTEXT_SLOTS];
 
 static WrappedDevice *owner_of_device(void *self) {
     return (WrappedDevice *)((BYTE *)self - offsetof(WrappedDevice, device));

@@ -4,12 +4,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-// A physical core for main alone. The engine leaves main unpinned: it moves over every CPU the process may use (the
-// cpuwhere probe), and pool and TBB threads run on the twin of whichever core it is on, so main shares its core whenever
-// they work. Main gets the CPU set of one core, the last of the fastest efficiency class in the process's default CPU
-// sets (cpuplace's CCD, or all CPUs), and the defaults leave that core out; threads the engine pins inside it move onto
-// the other CPUs that share its L3. In the original game, freeing main's core gave -0.66 ms a frame in a CPU-bound
-// battle. Off, or with Apply Fixes off, all of it goes back. The defaults are checked every POLL_MS, so a change of
+// A physical core for main alone. The engine leaves main unpinned: it moves over every CPU the process may use, and pool
+// and TBB threads run on the twin of whichever core it is on, so main shares its core whenever they work. Main gets the
+// CPU set of one core, the last of the fastest efficiency class in the process's default CPU sets (cpuplace's CCD, or all
+// CPUs), and the defaults leave that core out; threads the engine pins inside it move onto the other CPUs that share its
+// L3. Off, or with Apply Fixes off, all of it goes back. The defaults are checked every POLL_MS, so a change of
 // cpuplace's is followed at once; every RESCAN_MS, threads the engine pins later are moved.
 WINBASEAPI BOOL WINAPI GetSystemCpuSetInformation(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
 WINBASEAPI BOOL WINAPI SetProcessDefaultCpuSets(HANDLE, const ULONG *, ULONG);
@@ -113,8 +112,10 @@ static BOOL pin_main(BOOL pin) {
     return FALSE;
 }
 
-static void set_defaults(const ULONG *ids, ULONG count) {
-    if (!SetProcessDefaultCpuSets(GetCurrentProcess(), count ? ids : NULL, count)) api->log_line("maincore: setting CPU sets failed: error %lu", GetLastError());
+static BOOL set_defaults(const ULONG *ids, ULONG count) {
+    if (SetProcessDefaultCpuSets(GetCurrentProcess(), count ? ids : NULL, count)) return TRUE;
+    api->log_line("maincore: setting CPU sets failed: error %lu", GetLastError());
+    return FALSE;
 }
 
 static MovedThread *find_moved(DWORD thread) {
@@ -169,8 +170,18 @@ static BOOL claim(const ULONG *ids, ULONG count) {
     for (int c = 0; c < cpu_count; c++)
         if (allowed >> c & 1) own_ids[own_count++] = cpus[c].id;
     if (!pin_main(TRUE)) return FALSE;
-    set_defaults(own_ids, own_count);
-    return TRUE;
+    // The defaults as Windows reads them back are what later polls compare against.
+    ULONG read[MAX_CPUS], read_count = 0;
+    if (set_defaults(own_ids, own_count) && GetProcessDefaultCpuSets(GetCurrentProcess(), read, MAX_CPUS, &read_count) &&
+        allowed_mask(read, read_count) == allowed_mask(own_ids, own_count)) {
+        memcpy(own_ids, read, read_count * sizeof *read);
+        own_count = read_count;
+        return TRUE;
+    }
+    pin_main(FALSE);
+    set_defaults(previous_ids, previous_count);
+    own_count = 0;
+    return FALSE;
 }
 
 static DWORD WINAPI follow_switch(LPVOID unused) {
@@ -209,7 +220,6 @@ static DWORD WINAPI follow_switch(LPVOID unused) {
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     api = host;
-    if (!api->main_thread) return "the host is older than this module (no main_thread)";
     const char *error = read_cpus();
     if (error) return error;
     HANDLE thread = CreateThread(NULL, 0, follow_switch, NULL, 0, NULL);

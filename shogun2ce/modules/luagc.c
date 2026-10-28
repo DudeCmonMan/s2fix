@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/luagc.h"
 #include <stdint.h>
 #include <intrin.h>
 
@@ -58,6 +59,8 @@ static void gc_states_hook(BYTE full_collect) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, luagc_checks);
+    if (mismatch) return mismatch;
     engine = api->engine;
     fix_enabled = api->fix_enabled;
     lua_gc = (LuaGcFn)(engine + LUA_GC_RVA);

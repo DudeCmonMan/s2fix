@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/tiegroup.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -182,6 +183,8 @@ static void report(BOOL start) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
+    const char *mismatch = S2_CHECK_ENGINE(s2, tiegroup_checks);
+    if (mismatch) return mismatch;
     api = s2;
     fix_enabled = api->fix_enabled;
     frame_stamp = (volatile uint64_t *)(api->engine + FRAME_STAMP_RVA);

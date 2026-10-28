@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/listkeep.h"
 #include <stdint.h>
 
 // The Variant node's clear (0x181b1a9e0, end of frame) empties its pose list and lists A, B and C. Each list body is
@@ -76,6 +77,8 @@ static void clear_hook(BYTE *node) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, listkeep_checks);
+    if (mismatch) return mismatch;
     api = host;
     const char *error = api->hook(api->engine + CLEAR_RVA, clear_prologue, sizeof clear_prologue, (const void *)clear_hook, (void **)&original_clear);
     if (error) return error;

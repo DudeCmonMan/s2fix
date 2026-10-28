@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/powcache.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -41,6 +42,8 @@ static float powf_hook(float base, float exponent) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, powcache_checks);
+    if (mismatch) return mismatch;
     fix_enabled = api->fix_enabled;
     return api->hook(api->engine + POWF_RVA, powf_prologue, sizeof powf_prologue, (const void *)powf_hook, (void **)&original_powf);
 }

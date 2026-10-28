@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/instancecopy.h"
 #include <stdint.h>
 #include <string.h>
 #include <emmintrin.h>
@@ -83,6 +84,8 @@ static uint64_t record_gather_hook(uint8_t *gatherer, InstanceBuffer *buffer, co
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, instancecopy_checks);
+    if (mismatch) return mismatch;
     fix_enabled = api->fix_enabled;
     const char *error = api->hook(api->engine + INSTANCE_GATHER_RVA, instance_gather_prologue, sizeof instance_gather_prologue,
                                   (const void *)instance_gather_hook, (void **)&original_instance_gather);

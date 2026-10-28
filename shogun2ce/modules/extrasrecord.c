@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/extrasrecord.h"
 #include <stdint.h>
 #include <intrin.h>
 
@@ -95,6 +96,8 @@ static void bulk_extras_loop(BYTE *queue, void *pass) {
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, extrasrecord_checks);
+    if (mismatch) return mismatch;
     engine = api->engine;
     fix_enabled = api->fix_enabled;
     return api->hook(engine + EXTRAS_LOOP_RVA, extras_loop_prologue, sizeof extras_loop_prologue, (const void *)extras_loop_hook,

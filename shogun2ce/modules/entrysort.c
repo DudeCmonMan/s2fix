@@ -1,4 +1,5 @@
 #include "../s2module.h"
+#include "../checks/entrysort.h"
 #pragma GCC diagnostic ignored "-Wunused-function"
 #include "../entrysort.h"
 
@@ -36,6 +37,8 @@ static void entry_sort_hook(BYTE **first, BYTE **last, int64_t ideal, const floa
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, entrysort_checks);
+    if (mismatch) return mismatch;
     fix_enabled = api->fix_enabled;
     return api->hook(api->engine + ENTRY_SORT_RVA, entry_sort_prologue, sizeof entry_sort_prologue, (const void *)entry_sort_hook,
                      (void **)&original_entry_sort);

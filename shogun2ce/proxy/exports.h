@@ -1,4 +1,4 @@
-// The system d3d11.dll's exports with their ordinals (Windows 10.0.22621). OWN marks the ones the proxy implements;
+// The system d3d11.dll's exports with their ordinals (Windows 10.0.22621); the proxy forwards every one (OWN would mark its own);
 // build.sh generates d3d11.def from this list.
 #define D3D11_EXPORTS(STUB, OWN) \
     STUB(D3D11CreateDeviceForD3D12, 1) \
@@ -22,8 +22,8 @@
     STUB(D3D11CoreCreateLayeredDevice, 19) \
     STUB(D3D11CoreGetLayeredDeviceSize, 20) \
     STUB(D3D11CoreRegisterLayers, 21) \
-    OWN(D3D11CreateDevice, 22) \
-    OWN(D3D11CreateDeviceAndSwapChain, 23) \
+    STUB(D3D11CreateDevice, 22) \
+    STUB(D3D11CreateDeviceAndSwapChain, 23) \
     STUB(D3D11On12CreateDevice, 24) \
     STUB(D3DKMTCreateAllocation, 25) \
     STUB(D3DKMTCreateContext, 26) \

@@ -99,7 +99,7 @@ static const char *choose_ccd(const wchar_t *setting, ULONG *chosen) {
             if (bytes == best_bytes) tie = TRUE;
             if (bytes > best_bytes) best = i, best_bytes = bytes, tie = FALSE;
         }
-        if (tie) return "ccd=cache: no CCD has a larger L3 than the others; set ccd to a number";
+        if (tie) return "off (ccd=cache: no CCD has a larger L3 than the others; placement left to the engine and Windows)";
         *chosen = ccds[best];
         return NULL;
     }

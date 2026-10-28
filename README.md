@@ -72,8 +72,9 @@ name and computer name are replaced in everything it writes. Nothing is sent any
 
 - Windows 10 or 11, 64-bit.
 - The engine build these fixes were made for: `empire.retail.x64.dll` with PE timestamp `0x6ac7c293` (SHA-256 starting
-  `f1b609dffb95c1fa`). Each fix checks the engine code it changes first. On any other build it stays off and the log says
-  why.
+  `f1b609dffb95c1fa`). If `empire.retail.x64.dll` is a different build, or another mod's copy of it, a warning asks
+  whether to launch. Either way, each fix checks the engine code it depends on and stays off if it was changed; the log
+  lists which.
 - Tested on native D3D11 with an NVIDIA driver.
 
 ### Files
@@ -85,14 +86,19 @@ s2prof.ini       settings
 fixes\           one DLL per fix
 ```
 
+The game loads `d3d11.dll` as it starts its renderer. It loads `s2prof.dll`, which holds the game's device creation
+until the fixes are installed. If s2fix is loaded later (injected while the game runs), a message says that some fixes
+are off for that session.
+
 ### Settings (`s2prof.ini`)
 
 | Key | Default | Meaning |
 |---|---|---|
-| `[proxy] multithreaded_device` | 1 | at start: creates the D3D11 device without the single-thread flag; the overhaul's worker threads need it |
-| `[proxy] wrap_context` | 1 | at start: gives the game forwarding wrappers of the device and context |
+| `[device] multithreaded_device` | 1 | at start: creates the D3D11 device without the single-thread flag; the overhaul's worker threads need it |
+| `[device] wrap_context` | 1 | at start: gives the game forwarding wrappers of the device and context |
 | `[cpu] ccd` | cache | keeps the game's threads on one CCD: `cache` picks the CCD with the largest L3 (the 3D V-Cache CCD of a dual-CCD X3D chip) and does nothing on other CPUs; `off` leaves it to Windows; a number picks that CCD |
 | `[s2prof] console` | 0 | 1 opens a window that shows the log live |
+| `[s2prof] ignore_build_check` | 0 | 1 skips the warning shown when `empire.retail.x64.dll` is a different build or another mod's copy of it; each fix still checks the engine code it depends on |
 
 ### The fixes
 

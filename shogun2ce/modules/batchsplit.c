@@ -1,5 +1,6 @@
 #define _WIN32_WINNT 0x0A00
 #include "../s2module.h"
+#include "../checks/batchsplit.h"
 #include "../spinwait.h"
 #include <stdint.h>
 #include <stdlib.h>
@@ -286,21 +287,19 @@ static void batch_hook(BYTE *scene, const DWORD *handles, DWORD count, void *vie
     busy = 0;
 }
 
-static const char *patch_slot(void **slot, void *replacement) {
-    DWORD protection;
-    if (!VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &protection)) return "VirtualProtect on a vtable failed";
-    InterlockedExchangePointer(slot, replacement);
-    VirtualProtect(slot, sizeof *slot, protection, &protection);
-    return NULL;
+// A vtable slot holds a relocated pointer to function_rva; patch compares it with the file's bytes, at the preferred base,
+// and keeps the write so a refused install is undone.
+static const char *patch_slot(const S2Api *api, void **slot, DWORD function_rva, void *replacement) {
+    uint64_t file_value = ENGINE_PREFERRED_BASE + function_rva;
+    return api->patch((BYTE *)slot, (const BYTE *)&file_value, (const BYTE *)&replacement, sizeof replacement);
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+    const char *mismatch = S2_CHECK_ENGINE(api, batchsplit_checks);
+    if (mismatch) return mismatch;
     engine = api->engine;
     fix_enabled = api->fix_enabled;
     void **batch_slot = (void **)(engine + SCENE_BATCH_SLOT_RVA), **append_slot = (void **)(engine + LIST_APPEND_SLOT_RVA);
-    // Earlier modules' wrappers in these slots are replaced, not chained: chunks must reach the engine's own functions.
-    if (*batch_slot != engine + BATCH_RVA) api->log_line("batchsplit: replacing another module's wrapper in the batch slot");
-    if (*append_slot != engine + LIST_APPEND_RVA) api->log_line("batchsplit: replacing another module's wrapper in the list append slot");
     original_batch = (BatchFn)(engine + BATCH_RVA);
     original_append = (AppendFn)(engine + LIST_APPEND_RVA);
     per_object = (PerObjectFn)(engine + PER_OBJECT_RVA);
@@ -315,6 +314,6 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *api) {
         if (!thread) return "CreateThread failed";
         CloseHandle(thread);
     }
-    const char *error = patch_slot(append_slot, (void *)append_hook);
-    return error ? error : patch_slot(batch_slot, (void *)batch_hook);
+    const char *error = patch_slot(api, append_slot, LIST_APPEND_RVA, (void *)append_hook);
+    return error ? error : patch_slot(api, batch_slot, BATCH_RVA, (void *)batch_hook);
 }

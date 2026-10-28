@@ -1,5 +1,6 @@
 #define _WIN32_WINNT 0x0A00
 #include "../s2module.h"
+#include "../checks/walksplit.h"
 #include "../spinwait.h"
 #include <stdint.h>
 #include <stdlib.h>
@@ -79,6 +80,7 @@ static const ItemState no_item = {UINT64_MAX, UINT32_MAX, 0xfffffffe, UINT32_MAX
 static const BYTE walk_prologue[] = {0x44, 0x88, 0x4c, 0x24, 0x20, 0x89, 0x54, 0x24, 0x10, 0x53, 0x55, 0x57, 0x41, 0x54};
 static const BYTE record_call[] = {0x49, 0x8b, 0x02, 0x8b, 0xd5, 0x49, 0x8b, 0xca, 0xff, 0x90, 0x58, 0x01, 0x00, 0x00};
 
+static const S2Api *api;
 static BYTE *engine;
 static volatile LONG *fix_enabled;
 // The split has one job and one helper set, so only main splits; the overhaul's parallel records walk on other threads.
@@ -246,23 +248,23 @@ __asm__(".text\n"
         "  jmp [rax+0x158]\n"
         ".att_syntax\n");
 
-// Patched from the walk's only caller thread, between walks, so no thread is executing the bytes being replaced.
-static void patch_record_call(void) {
+// Patched from the walk's only caller thread, between walks, with the others suspended.
+static BOOL patch_record_call(void) {
     BYTE *site = engine + RECORD_CALL_RVA, patch[sizeof record_call] = {0x49, 0xbb};
     void *spy = (void *)record_spy;
     memcpy(patch + 2, &spy, sizeof spy);
     memcpy(patch + 10, (BYTE[]){0x41, 0xff, 0xd3, 0x90}, 4);
-    DWORD protection;
-    VirtualProtect(site, sizeof patch, PAGE_EXECUTE_READWRITE, &protection);
-    memcpy(site, patch, sizeof patch);
-    VirtualProtect(site, sizeof patch, protection, &protection);
-    FlushInstructionCache(GetCurrentProcess(), site, sizeof patch);
-    record_call_patched = TRUE;
+    const char *error = api->patch(site, record_call, patch, sizeof patch);
+    if (error) api->log_line("walksplit: verify unavailable: %s", error);
+    return record_call_patched = !error;
 }
 
 // Predicts the walk's records without making them, runs the engine's walk with its record calls logged, and compares.
 static void verify_walk(BYTE *queue, BYTE *list, DWORD pass_bit, float scale, BYTE alternate_list) {
-    if (!record_call_patched) patch_record_call();
+    if (!record_call_patched && !patch_record_call()) {
+        verify = 0;
+        return;
+    }
     LONG64 generation = start_job(queue, list, pass_bit, scale, alternate_list);
     ItemState previous = no_item;
     for (LONG chunk = 0; chunk < job.chunk_count; chunk++) finish_chunk(chunk, generation, &previous);
@@ -313,10 +315,12 @@ static void walk_hook(BYTE *queue, DWORD pass_bit, float scale, BYTE alternate_l
     InterlockedAdd64(&walk_stats.compared_items[use_engine], count);
 }
 
-__declspec(dllexport) const char *s2_module_main(const S2Api *api) {
+__declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    api = host;
+    const char *mismatch = S2_CHECK_ENGINE(api, walksplit_checks);
+    if (mismatch) return mismatch;
     engine = api->engine;
     fix_enabled = api->fix_enabled;
-    if (memcmp(engine + RECORD_CALL_RVA, record_call, sizeof record_call)) return "walksplit: unexpected bytes at the walk's record call";
     lod_lookup = (LodLookupFn)(engine + LOD_LOOKUP_RVA);
     merge = (MergeFn)(engine + MERGE_RVA);
     alternate_record = (AlternateRecordFn)(engine + ALTERNATE_RECORD_RVA);
