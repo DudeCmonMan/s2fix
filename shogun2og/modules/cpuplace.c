@@ -1,7 +1,7 @@
 #define _WIN32_WINNT 0x0A00
 #include "../s2module.h"
+#include "../cpupick.h"
 #include <winternl.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <wchar.h>
 
@@ -11,19 +11,22 @@ WINBASEAPI BOOL WINAPI SetProcessDefaultCpuSets(HANDLE, const ULONG *, ULONG);
 // Walks this process's threads only; a system-wide thread snapshot takes tens of milliseconds on a busy desktop.
 NTSTATUS NTAPI NtGetNextThread(HANDLE process, HANDLE thread, ACCESS_MASK access, ULONG attributes, ULONG flags, PHANDLE next);
 
-// Keeps the game's threads on one CCD, set by [cpu] ccd in s2prof.ini (off, cache = the largest L3, or a CCD number; CCD
-// 0 holds CPU 0). The engine pins its threads itself, main to CPU 0 and one pool thread to each other logical CPU, so
-// every thread with a narrower mask than the process's is remapped into the CCD keeping the layout (CPU c goes to the
-// CCD's CPU c mod its size: a pool thread on main's SMT twin, as on a CPU with one CCD). Main, the thread that presents
-// frames, gets the CCD's first CPU to itself; the pool threads beyond the CCD's size, which a CPU with one CCD would not
-// have, keep off it. Every other thread is held to the CCD by the process's default CPU sets. With the engine's own
-// placement on a two-CCD CPU, frames stalled 40-60 ms about 2.5 times a second, fixes on or off; on CCD 1, 68 frames over
-// 15 ms fell to 2 and the frame time by 1.0-1.2 ms (army view, 2026-10-25). It follows Apply Fixes and its own switch; off
-// puts the engine's own masks back. A thread rechecks every POLL_MS, so it follows the switches within a bench block's
-// skipped first 200 ms, and rescans every RESCAN_MS for threads the engine pins later.
+// Places the game's threads by cpupick.h's rules, from what Windows reports about this PC. Two fixes:
+// - cpuplace keeps the other threads in main's cache group ([cpu] ccd in s2prof.ini: auto, off, or a group number) when
+//   it leaves them enough CPUs. With the engine's own placement on a two-CCD CPU, frames stalled 40-60 ms about 2.5 times
+//   a second; on one CCD, 68 frames over 15 ms fell to 2 and the frame time by 1.0-1.2 ms (army view, 2026-10-25). Its
+//   twins switch (off: one logical CPU per core) is there to measure SMT sharing.
+// - maincore gives main, the thread that presents frames, the group's highest-ranked core to itself and makes that CPU
+//   its ideal processor. Main sharing its core cost 0.66 ms a frame in a CPU-bound battle (2026-10-25).
+// CPU sets place every thread: the process's default for the others, main's own for main. The engine pins main to CPU 0
+// and a pool thread to each other CPU with hard masks, which CPU sets can only narrow, so while placing a pin that leaves
+// out a CPU its thread may use is widened to the process's mask (a pinned thread that wakes waits for its one CPU while
+// others sit idle). Both follow Apply Fixes and their switches; off puts back the engine's masks and main's CPU set and
+// ideal processor. A thread rechecks every POLL_MS, so it follows the switches within a bench block's skipped first
+// 200 ms, and rescans every RESCAN_MS for threads the engine pins later.
 #define CONFIG_FILE L"s2prof.ini"
 #define MAX_CPUS 32
-#define MAX_PINNED 256
+#define MAX_TRACKED 256
 #define POLL_MS 20
 #define RESCAN_MS 2000
 #define THREAD_BASIC_INFORMATION_CLASS 0
@@ -36,153 +39,183 @@ typedef struct {
     LONG priority, base_priority;
 } ThreadBasicInfo;
 
+// What this module changed on a thread, to put back.
 typedef struct {
     DWORD thread;
-    DWORD_PTR engine_mask;
-} PinnedThread;
+    ULONGLONG created;
+    DWORD_PTR engine_mask, set_mask;
+    DWORD ideal_before;
+    BOOL selected, ideal_set, seen;
+} TrackedThread;
 
-typedef struct {
-    ULONG id, cache;
-} Cpu;
-
-// 0 leaves placement to the engine and Windows; exported, and a switch, so it can be A/B tested while the game runs.
+// 0 leaves the threads where the engine and Windows put them; exported so each can be A/B tested live.
 __declspec(dllexport) volatile LONG placement_enabled = 1;
+__declspec(dllexport) volatile LONG main_core_enabled = 1;
+__declspec(dllexport) volatile LONG twins_enabled = 1;
 
 static const S2Api *api;
-static Cpu cpus[MAX_CPUS];
-static int cpu_count;
-static int ccd_cpus[MAX_CPUS], ccd_size;
-static ULONG ccd_set_ids[MAX_CPUS];
-static PinnedThread pinned[MAX_PINNED];
-static int pinned_count;
-static BOOL applied;
+static CpuInfo cpus[MAX_CPUS];
+static ULONG set_ids[MAX_CPUS];
+static int cpu_count, group_cpu;
+static BOOL confine, own_core;
+static TrackedThread tracked[MAX_TRACKED];
+static int tracked_count;
 
 static const char *read_cpus(void) {
     ULONG size;
+    const char *error = NULL;
     GetSystemCpuSetInformation(NULL, 0, &size, GetCurrentProcess(), 0);
     BYTE *sets = malloc(size);
-    if (!sets || !GetSystemCpuSetInformation((PSYSTEM_CPU_SET_INFORMATION)sets, size, &size, GetCurrentProcess(), 0)) return "GetSystemCpuSetInformation failed";
-    for (BYTE *at = sets; at < sets + size; at += ((PSYSTEM_CPU_SET_INFORMATION)at)->Size) {
+    if (!sets || !GetSystemCpuSetInformation((PSYSTEM_CPU_SET_INFORMATION)sets, size, &size, GetCurrentProcess(), 0)) error = "GetSystemCpuSetInformation failed";
+    for (BYTE *at = sets; !error && at < sets + size; at += ((PSYSTEM_CPU_SET_INFORMATION)at)->Size) {
         PSYSTEM_CPU_SET_INFORMATION set = (PSYSTEM_CPU_SET_INFORMATION)at;
-        if (set->CpuSet.Group || set->CpuSet.LogicalProcessorIndex >= MAX_CPUS) return "more than 32 CPUs or one processor group is not supported";
-        cpus[set->CpuSet.LogicalProcessorIndex] = (Cpu){set->CpuSet.Id, set->CpuSet.LastLevelCacheIndex};
-        if (set->CpuSet.LogicalProcessorIndex >= cpu_count) cpu_count = set->CpuSet.LogicalProcessorIndex + 1;
+        int cpu = set->CpuSet.LogicalProcessorIndex;
+        if (set->CpuSet.Group || cpu >= MAX_CPUS) {
+            error = "more than 32 CPUs or one processor group is not supported";
+            break;
+        }
+        set_ids[cpu] = set->CpuSet.Id;
+        cpus[cpu] = (CpuInfo){set->CpuSet.CoreIndex, set->CpuSet.LastLevelCacheIndex, set->CpuSet.EfficiencyClass, set->CpuSet.SchedulingClass, 0};
+        if (cpu >= cpu_count) cpu_count = cpu + 1;
     }
     free(sets);
-    return NULL;
-}
-
-static ULONG l3_bytes(ULONG cache) {
     DWORD length = 0;
     GetLogicalProcessorInformationEx(RelationCache, NULL, &length);
     BYTE *caches = malloc(length);
-    ULONG bytes = 0;
-    if (caches && GetLogicalProcessorInformationEx(RelationCache, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)caches, &length))
+    if (!error && caches && GetLogicalProcessorInformationEx(RelationCache, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)caches, &length))
         for (BYTE *at = caches; at < caches + length; at += ((PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)at)->Size) {
             CACHE_RELATIONSHIP *relation = &((PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)at)->Cache;
-            if (relation->Level == 3 && relation->GroupMask.Mask & (1ull << cache)) bytes = relation->CacheSize;
+            for (int cpu = 0; cpu < cpu_count; cpu++)
+                if (relation->Level == 3 && !relation->GroupMask.Group && relation->GroupMask.Mask >> cpu & 1) cpus[cpu].l3_bytes = relation->CacheSize;
         }
     free(caches);
-    return bytes;
+    return error;
 }
 
-// CCDs are numbered by their first logical CPU; a CCD's cache index is that CPU's index.
-static const char *choose_ccd(const wchar_t *setting, ULONG *chosen) {
-    ULONG ccds[MAX_CPUS] = {0}, ccd_count = 0;
+static ULONG ids_of(uint64_t mask, ULONG *ids) {
+    ULONG count = 0;
     for (int cpu = 0; cpu < cpu_count; cpu++)
-        if (cpus[cpu].cache == (ULONG)cpu) ccds[ccd_count++] = cpu;
-    if (!wcscmp(setting, L"cache")) {
-        ULONG best = 0, best_bytes = l3_bytes(ccds[0]);
-        BOOL tie = FALSE;
-        for (ULONG i = 1; i < ccd_count; i++) {
-            ULONG bytes = l3_bytes(ccds[i]);
-            if (bytes == best_bytes) tie = TRUE;
-            if (bytes > best_bytes) best = i, best_bytes = bytes, tie = FALSE;
-        }
-        if (tie) return "off (ccd=cache: no CCD has a larger L3 than the others; placement left to the engine and Windows)";
-        *chosen = ccds[best];
+        if (mask >> cpu & 1) ids[count++] = set_ids[cpu];
+    return count;
+}
+
+static BOOL set_defaults(uint64_t others) {
+    ULONG ids[MAX_CPUS], count = ids_of(others, ids);
+    return SetProcessDefaultCpuSets(GetCurrentProcess(), count ? ids : NULL, count);
+}
+
+static TrackedThread *find_tracked(DWORD thread, ULONGLONG created) {
+    for (int i = 0; i < tracked_count; i++) {
+        if (tracked[i].thread != thread) continue;
+        if (tracked[i].created == created) return &tracked[i];
+        // A new thread with an exited one's id: what was changed went with the old one.
+        tracked[i] = tracked[--tracked_count];
         return NULL;
     }
-    wchar_t *end;
-    ULONG index = wcstoul(setting, &end, 10);
-    if (*end || end == setting || index >= ccd_count) return "ccd must be off, cache or a CCD number that exists";
-    *chosen = ccds[index];
     return NULL;
 }
 
-static PinnedThread *pinned_entry(DWORD thread) {
-    for (int i = 0; i < pinned_count; i++)
-        if (pinned[i].thread == thread) return &pinned[i];
-    if (pinned_count == MAX_PINNED) return NULL;
-    pinned[pinned_count] = (PinnedThread){thread, 0};
-    return &pinned[pinned_count++];
-}
-
-// Before the first frame main is known only as the thread the engine pins to CPU 0.
-static BOOL is_main(DWORD thread, DWORD_PTR engine_mask) {
-    return *api->main_thread ? thread == *api->main_thread : engine_mask == 1;
-}
-
-static DWORD_PTR ccd_mask_for(DWORD thread, DWORD_PTR engine_mask) {
-    DWORD_PTR mask = 0, main_cpu = (DWORD_PTR)1 << ccd_cpus[0];
-    if (is_main(thread, engine_mask)) return main_cpu;
-    for (int cpu = 0; cpu < cpu_count; cpu++)
-        if (engine_mask & (DWORD_PTR)1 << cpu) mask |= (DWORD_PTR)1 << ccd_cpus[cpu % ccd_size];
-    mask &= ~main_cpu;
-    if (mask) return mask;
-    for (int i = 1; i < ccd_size; i++) mask |= (DWORD_PTR)1 << ccd_cpus[i];
-    return mask;
-}
-
-// Remaps the engine's pins into the CCD, or puts them back; returns how many threads it moved.
-static int place_pinned_threads(BOOL into_ccd) {
-    int moved = 0;
+// Gives main its CPU set and ideal processor and widens the engine's pins while placing, or puts all of it back; returns
+// how many masks it changed.
+static int place_threads(CpuPlacement placement, DWORD main_thread) {
+    int changed = 0;
     DWORD_PTR process_mask, system_mask;
     if (!GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask)) return 0;
+    BOOL placing = placement.main_cpu >= 0 || placement.others;
+    DWORD_PTR others = placement.others ? (DWORD_PTR)placement.others : process_mask;
+    ULONG main_ids[MAX_CPUS], main_count = ids_of(placement.main_cpus, main_ids);
+    for (int i = 0; i < tracked_count; i++) tracked[i].seen = FALSE;
     HANDLE handle = NULL, next;
-    while (NtGetNextThread(GetCurrentProcess(), handle, THREAD_QUERY_LIMITED_INFORMATION | THREAD_SET_LIMITED_INFORMATION, 0, 0, &next) >= 0) {
+    while (NtGetNextThread(GetCurrentProcess(), handle, THREAD_QUERY_LIMITED_INFORMATION | THREAD_SET_INFORMATION | THREAD_SET_LIMITED_INFORMATION, 0, 0,
+                           &next) >= 0) {
         if (handle) CloseHandle(handle);
         handle = next;
-        DWORD thread_id = GetThreadId(handle);
-        if (thread_id == GetCurrentThreadId()) continue;
+        DWORD thread = GetThreadId(handle);
         ThreadBasicInfo basic;
-        if (NtQueryInformationThread(handle, (THREADINFOCLASS)THREAD_BASIC_INFORMATION_CLASS, &basic, sizeof basic, NULL) >= 0) {
-            PinnedThread *known = NULL;
-            for (int i = 0; i < pinned_count; i++)
-                if (pinned[i].thread == thread_id) known = &pinned[i];
-            // A mask that is neither the recorded one nor its remap belongs to a new thread with a reused id, or the
-            // engine pinned the thread again: it becomes the engine's mask.
-            if (known && basic.affinity != known->engine_mask && basic.affinity != ccd_mask_for(thread_id, known->engine_mask))
-                known->engine_mask = basic.affinity;
-            BOOL main = thread_id == *api->main_thread;
-            if (!known && (main || (basic.affinity & process_mask) != process_mask) && (known = pinned_entry(thread_id))) known->engine_mask = basic.affinity;
-            if (known && (main || (known->engine_mask & process_mask) != process_mask)) {
-                DWORD_PTR wanted = into_ccd ? ccd_mask_for(thread_id, known->engine_mask) : known->engine_mask;
-                if (basic.affinity != wanted && SetThreadAffinityMask(handle, wanted)) moved++;
-            }
+        FILETIME created, exited, kernel, user;
+        if (thread == GetCurrentThreadId() || NtQueryInformationThread(handle, (THREADINFOCLASS)THREAD_BASIC_INFORMATION_CLASS, &basic, sizeof basic, NULL) < 0 ||
+            !GetThreadTimes(handle, &created, &exited, &kernel, &user))
+            continue;
+        ULONGLONG created_at = (ULONGLONG)created.dwHighDateTime << 32 | created.dwLowDateTime;
+        TrackedThread *t = find_tracked(thread, created_at);
+        // Before the first frame main is known only as the thread the engine pins to CPU 0.
+        BOOL main = main_thread ? thread == main_thread : (t ? t->engine_mask : basic.affinity) == 1;
+        BOOL main_placed = main && placement.main_cpu >= 0;
+        if (!t && ((basic.affinity & process_mask) != process_mask || main_placed) && tracked_count < MAX_TRACKED) {
+            t = &tracked[tracked_count++];
+            *t = (TrackedThread){.thread = thread, .created = created_at};
+        }
+        if (!t) continue;
+        t->seen = TRUE;
+        // A mask other than the one set here is the engine's, first seen or changed since.
+        if (basic.affinity != t->set_mask) t->engine_mask = basic.affinity, t->set_mask = 0;
+        DWORD_PTR allowed = main_placed ? (DWORD_PTR)placement.main_cpus : others;
+        DWORD_PTR wanted = placing && (allowed & ~t->engine_mask) ? process_mask : t->engine_mask;
+        if (basic.affinity != wanted && SetThreadAffinityMask(handle, wanted)) {
+            changed++;
+            t->set_mask = wanted == t->engine_mask ? 0 : wanted;
+        }
+        if (main_placed ? SetThreadSelectedCpuSets(handle, main_ids, main_count) : t->selected && SetThreadSelectedCpuSets(handle, NULL, 0))
+            t->selected = main_placed;
+        if (main_placed) {
+            DWORD before = SetThreadIdealProcessor(handle, (DWORD)placement.main_cpu);
+            if (!t->ideal_set && before != (DWORD)-1) t->ideal_before = before, t->ideal_set = TRUE;
+        } else if (t->ideal_set && SetThreadIdealProcessor(handle, t->ideal_before) != (DWORD)-1) {
+            t->ideal_set = FALSE;
         }
     }
     if (handle) CloseHandle(handle);
-    return moved;
+    // Exited threads, and threads with nothing to put back, are dropped.
+    int kept = 0;
+    for (int i = 0; i < tracked_count; i++) {
+        TrackedThread *t = &tracked[i];
+        if (t->seen && (t->engine_mask != process_mask || t->set_mask || t->selected || t->ideal_set)) tracked[kept++] = *t;
+    }
+    tracked_count = kept;
+    return changed;
 }
 
-static DWORD WINAPI follow_switch(LPVOID unused) {
+static void log_placement(CpuPlacement placement, BOOL confined, int moved) {
+    char main_text[96] = "with them", list[160];
+    if (placement.main_cpu < 0 && !placement.others) {
+        api->log_line("cpuplace: placement back to the engine and Windows (%d thread masks restored)", moved);
+        return;
+    }
+    uint64_t main_core = placement.main_cpu >= 0 ? cpu_core_of(cpus, cpu_count, placement.main_cpu) : 0;
+    if (placement.main_cpu >= 0 && placement.main_cpus == main_core)
+        snprintf(main_text, sizeof main_text, "alone on CPUs %s", cpu_list(main_core, list, sizeof list));
+    else if (placement.main_cpu >= 0)
+        snprintf(main_text, sizeof main_text, "on CPU %d first, which the others keep off", placement.main_cpu);
+    char wide_text[64] = "";
+    if (confined && (placement.others & ~cpu_group(cpus, cpu_count, group_cpu)))
+        snprintf(wide_text, sizeof wide_text, " (every CPU: the cache group leaves them fewer than %d)", CPU_MIN_OTHERS);
+    api->log_line("cpuplace: main %s; the other threads on CPUs %s%s (%d thread masks widened)", main_text,
+                  placement.others ? cpu_list(placement.others, list, sizeof list) : "all", wide_text, moved);
+}
+
+static DWORD WINAPI follow_switches(LPVOID unused) {
     (void)unused;
-    for (DWORD since_scan = RESCAN_MS;; since_scan += POLL_MS) {
-        BOOL wanted = placement_enabled && *api->fix_enabled;
-        if (wanted == applied && since_scan < RESCAN_MS) {
-            Sleep(POLL_MS);
-            continue;
-        }
+    CpuPlacement applied = {-1, 0, 0};
+    DWORD placed_main = 0;
+    BOOL defaults_set = TRUE;
+    for (DWORD since_scan = RESCAN_MS;; since_scan += POLL_MS, Sleep(POLL_MS)) {
+        BOOL fixes = *api->fix_enabled, confined = confine && placement_enabled && fixes;
+        CpuPlacement wanted = cpu_placement(cpus, cpu_count, group_cpu, confined, own_core && main_core_enabled && fixes, twins_enabled);
+        BOOL changed = wanted.main_cpu != applied.main_cpu || wanted.main_cpus != applied.main_cpus || wanted.others != applied.others;
+        // Main is known from the first frame and gets its CPU set at once.
+        DWORD main_thread = *api->main_thread;
+        if (!changed && main_thread == placed_main && since_scan < RESCAN_MS) continue;
         since_scan = 0;
-        int moved = place_pinned_threads(wanted);
-        if (wanted != applied) {
-            applied = wanted;
-            if (!SetProcessDefaultCpuSets(GetCurrentProcess(), wanted ? ccd_set_ids : NULL, wanted ? ccd_size : 0))
-                api->log_line("cpuplace: setting CPU sets failed: error %lu", GetLastError());
-            api->log_line("cpuplace: %s (%d pinned threads moved)", wanted ? "game threads on the chosen CCD" : "placement back to the engine and Windows", moved);
+        if (changed || !defaults_set) {
+            defaults_set = set_defaults(wanted.others);
+            if (!defaults_set && changed) api->log_line("cpuplace: setting CPU sets failed: error %lu; retried every %d s", GetLastError(), RESCAN_MS / 1000);
         }
-        Sleep(POLL_MS);
+        int moved = place_threads(wanted, main_thread);
+        placed_main = main_thread;
+        if (changed) {
+            log_placement(wanted, confined, moved);
+            applied = wanted;
+        }
     }
     return 0;
 }
@@ -190,28 +223,39 @@ static DWORD WINAPI follow_switch(LPVOID unused) {
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     api = host;
     HMODULE self;
-    wchar_t path[MAX_PATH], ccd_setting[16];
+    wchar_t path[MAX_PATH], setting[16];
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)(void *)s2_module_main, &self);
     GetModuleFileNameW(self, path, MAX_PATH);
     // The module sits in fixes\ next to s2prof.ini.
     *wcsrchr(path, L'\\') = 0;
     *wcsrchr(path, L'\\') = 0;
     wcscat(path, L"\\" CONFIG_FILE);
-    GetPrivateProfileStringW(L"cpu", L"ccd", L"off", ccd_setting, 16, path);
-    if (!wcscmp(ccd_setting, L"off")) return "off (ccd=off in s2prof.ini; placement left to the engine and Windows)";
-    const char *error = read_cpus();
-    ULONG cache;
-    if (!error) error = choose_ccd(ccd_setting, &cache);
-    if (error) return error;
-    for (int cpu = 0; cpu < cpu_count; cpu++)
-        if (cpus[cpu].cache == cache) {
-            ccd_set_ids[ccd_size] = cpus[cpu].id;
-            ccd_cpus[ccd_size++] = cpu;
-        }
-    api->log_line("cpuplace: game threads go to the CCD at CPU %lu (CPUs %d-%d, L3 %lu MB)", cache, ccd_cpus[0], ccd_cpus[ccd_size - 1], l3_bytes(cache) >> 20);
-    HANDLE thread = CreateThread(NULL, 0, follow_switch, NULL, 0, NULL);
-    if (!thread) return "CreateThread failed";
-    CloseHandle(thread);
-    api->register_switch("cpuplace", &placement_enabled, NULL);
-    return NULL;
+    GetPrivateProfileStringW(L"cpu", L"ccd", L"auto", setting, 16, path);
+    confine = wcscmp(setting, L"off") != 0;
+    // cache is the setting's name before the rules (the largest L3), which they still apply first.
+    long number = -1;
+    const char *error = read_cpus(), *why = NULL;
+    if (!error && confine && wcscmp(setting, L"auto") && wcscmp(setting, L"cache")) {
+        wchar_t *end;
+        number = wcstol(setting, &end, 10);
+        if (*end || end == setting || number < 0 || number >= CPU_MAX) error = "ccd must be auto, off or a cache group number (s2prof.ini)";
+    }
+    if (!error && (group_cpu = cpu_pick_group(cpus, cpu_count, (int)number, &why)) < 0) error = "ccd names a cache group this CPU does not have (s2prof.ini)";
+    if (!error) {
+        char list[160];
+        cpu_describe(cpus, cpu_count, api->log_line);
+        api->log_line("cpuplace: the cache group at CPU %d (%s): CPUs %s", group_cpu, why, cpu_list(cpu_group(cpus, cpu_count, group_cpu), list, sizeof list));
+        own_core = cpu_placement(cpus, cpu_count, group_cpu, confine, TRUE, TRUE).main_cpu >= 0;
+        HANDLE thread = CreateThread(NULL, 0, follow_switches, NULL, 0, NULL);
+        if (thread) CloseHandle(thread);
+        else error = "CreateThread failed";
+    }
+    if (!error && confine) {
+        api->register_switch("cpuplace", &placement_enabled, NULL);
+        api->register_switch("twins", &twins_enabled, NULL);
+    }
+    api->end_fix(error ? error : confine ? NULL : "off (ccd=off in s2prof.ini; the other threads are left to the engine and Windows)");
+    api->begin_fix("maincore");
+    if (!error && own_core) api->register_switch("maincore", &main_core_enabled, NULL);
+    return error ? error : own_core ? NULL : "off (one core: none left for the other threads)";
 }

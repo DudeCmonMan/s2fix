@@ -860,12 +860,12 @@ static void section_system(Text *t) {
     if (get_cpu_sets) get_cpu_sets(NULL, 0, &length, GetCurrentProcess(), 0);
     buffer = length ? malloc(length) : NULL;
     if (buffer && get_cpu_sets(( PSYSTEM_CPU_SET_INFORMATION)buffer, length, &length, GetCurrentProcess(), 0)) {
-        text_printf(t, "CPU sets (id: logical, core, last-level cache, efficiency class, flags):\n ");
+        text_printf(t, "CPU sets (id: logical, core, last-level cache, efficiency class, flags, rank):\n ");
         for (ULONG at = 0; at < length;) {
             PSYSTEM_CPU_SET_INFORMATION set = (PSYSTEM_CPU_SET_INFORMATION)(buffer + at);
             if (set->Type == CpuSetInformation)
-                text_printf(t, " %lu:%u/%u/%u/%u/%02x", set->CpuSet.Id, set->CpuSet.LogicalProcessorIndex, set->CpuSet.CoreIndex, set->CpuSet.LastLevelCacheIndex,
-                            set->CpuSet.EfficiencyClass, set->CpuSet.AllFlags);
+                text_printf(t, " %lu:%u/%u/%u/%u/%02x/%u", set->CpuSet.Id, set->CpuSet.LogicalProcessorIndex, set->CpuSet.CoreIndex, set->CpuSet.LastLevelCacheIndex,
+                            set->CpuSet.EfficiencyClass, set->CpuSet.AllFlags, set->CpuSet.SchedulingClass);
             at += set->Size;
         }
         text_printf(t, "\n");

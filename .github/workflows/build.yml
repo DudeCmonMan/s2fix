@@ -1,6 +1,7 @@
 name: build-steps
 
-# The build both workflows share: the compilers, the sort tests and both games' zips, uploaded as the artifact "s2fix".
+# The build both workflows share: the compilers, the sort and CPU placement tests and both games' zips, uploaded as the
+# artifact "s2fix".
 # Called by release.yml (every push, pull request and version tag) and pre-release.yml (pre-release tags).
 on:
   workflow_call:
@@ -35,7 +36,7 @@ jobs:
           7z x -y -bd -o"$RUNNER_TEMP/winlibs-i686" "$RUNNER_TEMP/winlibs-i686.zip" > /dev/null
           cygpath -w "$RUNNER_TEMP/winlibs-i686/mingw32/bin" >> "$GITHUB_PATH"
 
-      - name: Sort tests
+      - name: Sort and CPU placement tests
         run: |
           x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Ishogun2ce -o "$RUNNER_TEMP/test_itemsort_ce.exe" shogun2ce/tests/test_itemsort.c
           "$RUNNER_TEMP/test_itemsort_ce.exe"
@@ -43,6 +44,10 @@ jobs:
           "$RUNNER_TEMP/test_itemsort_og.exe"
           i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -msse2 -mfpmath=sse -Ishogun2og -o "$RUNNER_TEMP/test_entrysort_og.exe" shogun2og/tests/test_entrysort.c
           "$RUNNER_TEMP/test_entrysort_og.exe"
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Ishogun2ce -o "$RUNNER_TEMP/test_cpupick_ce.exe" shogun2ce/tests/test_cpupick.c
+          "$RUNNER_TEMP/test_cpupick_ce.exe"
+          i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Ishogun2og -o "$RUNNER_TEMP/test_cpupick_og.exe" shogun2og/tests/test_cpupick.c
+          "$RUNNER_TEMP/test_cpupick_og.exe"
 
       - name: Build and package
         run: |

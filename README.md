@@ -96,7 +96,7 @@ are off for that session.
 |---|---|---|
 | `[device] multithreaded_device` | 1 | at start: creates the D3D11 device without the single-thread flag; the overhaul's worker threads need it |
 | `[device] wrap_context` | 1 | at start: gives the game forwarding wrappers of the device and context |
-| `[cpu] ccd` | cache | keeps the game's threads on one CCD: `cache` picks the CCD with the largest L3 (the 3D V-Cache CCD of a dual-CCD X3D chip) and does nothing on other CPUs; `off` leaves it to Windows; a number picks that CCD |
+| `[cpu] ccd` | auto | which CPUs the game's threads use: `auto` gives the main thread the best core of the CPU's largest cache group (the 3D V-Cache CCD of an X3D chip, the P-cores of an Intel chip) and keeps the other threads on that group when it leaves them 10 CPUs, else on every CPU; a number picks a cache group (0 holds CPU 0); `off` leaves the other threads to Windows, and the main thread still gets its core. `cache`, the old default, means `auto` |
 | `[s2prof] console` | 0 | 1 opens a window that shows the log live |
 | `[s2prof] ignore_build_check` | 0 | 1 skips the warning shown when `empire.retail.x64.dll` is a different build or another mod's copy of it; each fix still checks the engine code it depends on |
 
@@ -123,8 +123,8 @@ are off for that session.
 | `focuscache` | asks Windows for the foreground window once per frame instead of on every key query |
 | `scenelock` | spins longer on the unit emission lock instead of sleeping in the kernel |
 | `buildingblock` | skips work the building draw throws away every frame: a loop over each building piece's neighbours, and the value that decided it (most noticeable in sieges and towns) |
-| `cpuplace` | keeps the game's threads on the CCD `[cpu] ccd` names |
-| `maincore` | gives the main thread a CPU core of its own and keeps the game's other threads off it |
+| `cpuplace` | keeps the game's other threads on the main thread's CCD or P-cores, as `[cpu] ccd` sets |
+| `maincore` | gives the main thread the best CPU core and keeps the game's other threads off it |
 
 On the campaign map:
 
@@ -179,7 +179,7 @@ Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 | Key | Default | Meaning |
 |---|---|---|
 | `[device] multithreaded_device` | 1 | at start: creates the D3D11 device without the single-thread flag; the overhaul's worker threads need it |
-| `[cpu] ccd` | cache | keeps the game's threads on one CCD: `cache` picks the CCD with the largest L3 (the 3D V-Cache CCD of a dual-CCD X3D chip) and does nothing on other CPUs; `off` leaves it to Windows; a number picks that CCD |
+| `[cpu] ccd` | auto | which CPUs the game's threads use: `auto` gives the main thread the best core of the CPU's largest cache group (the 3D V-Cache CCD of an X3D chip, the P-cores of an Intel chip) and keeps the other threads on that group when it leaves them 10 CPUs, else on every CPU; a number picks a cache group (0 holds CPU 0); `off` leaves the other threads to Windows, and the main thread still gets its core. `cache`, the old default, means `auto` |
 | `[flipmodel] enabled` | 1 | at start: creates the swap chain with the flip model instead of the 2011 blt model; 0 keeps the game's |
 | `[flipmodel] buffers` | 3 | at start: flip-model back buffers, 2 to 4 |
 | `[flipmodel] tearing` | 1 | at start: allows tearing (an uncapped frame rate, variable refresh in a window) when Windows supports it |
@@ -218,8 +218,8 @@ Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 | `flipmodel` | replaces the game's 2011 swap chain, which copies every frame through the desktop compositor and stalls now and then, with a flip-model one: no stalls, tearing allowed (an uncapped frame rate, variable refresh in a window), and at most two frames queued for lower input lag |
 | `vram` | By default, Windows tells Shogun 2 to use a maximum of 3GB (which Shogun 2 uses 95% of), this patch pushes it to as much as your GPU can give (up to 4GB, engine limitation). |
 | `borderless` | with `[window] borderless=1`: borderless windowed mode at the resolution set in the game's options, scaled to the monitor, with the mouse scaled to match (the game itself has only a framed window or exclusive fullscreen) |
-| `cpuplace` | keeps the game's threads on the CCD `[cpu] ccd` names |
-| `maincore` | keeps the game's other threads off the main thread's CPU core, so the main thread has the whole core |
+| `cpuplace` | keeps the game's other threads on the main thread's CCD or P-cores, as `[cpu] ccd` sets |
+| `maincore` | gives the main thread the best CPU core and keeps the game's other threads off it |
 | `timerperiod` | holds Windows' 1 ms timer period, which the game otherwise switches on and off around every timestamp |
 
 On the campaign map:

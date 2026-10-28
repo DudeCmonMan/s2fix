@@ -1034,6 +1034,14 @@ static void load_module(const char *utf8_path) {
     loading_module[0] = 0;
 }
 
+// Fixes that moved into another module: an older s2fix's file left in fixes\ would install them twice.
+static BOOL retired_module(const wchar_t *file) {
+    static const wchar_t *const retired[] = {L"maincore.dll"};
+    for (size_t i = 0; i < sizeof retired / sizeof *retired; i++)
+        if (!_wcsicmp(file, retired[i])) return TRUE;
+    return FALSE;
+}
+
 static void load_modules(const wchar_t *dir) {
     wchar_t pattern[MAX_PATH];
     swprintf(pattern, MAX_PATH, L"%ls\\*.dll", dir);
@@ -1046,6 +1054,10 @@ static void load_modules(const wchar_t *dir) {
     do {
         wchar_t path[MAX_PATH];
         char utf8_path[MAX_PATH * 3];
+        if (retired_module(found.cFileName)) {
+            log_line("%ls: from an older s2fix, now part of another fix; not loaded (it can be deleted)", found.cFileName);
+            continue;
+        }
         swprintf(path, MAX_PATH, L"%ls\\%ls", dir, found.cFileName);
         WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8_path, sizeof utf8_path, NULL, NULL);
         load_module(utf8_path);
