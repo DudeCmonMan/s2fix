@@ -7,6 +7,11 @@ static const S2Check device_checks[] = {
     {0x19c34ce, 0x7, 0x5538dd3703f7fe58ull, 0, "reference to the render device global"},
 };
 
+static const S2Check report_checks[] = {
+    {0x19c34ce, 0x7, 0x5538dd3703f7fe58ull, 0, "reference to the render device global"},
+    {0x1aaa7db, 0x7, 0xb3b465910b80182cull, 0, "reference to the D3D11 render device vtable"},
+};
+
 static const S2Check sortfix_checks[] = {
     {0x1afee20, 0x127, 0x160b812e92b238e6ull, 0, "render item sort"},
     {0x1afef47, 0x145, 0x6a9dbf5537d40dcdull, 0, "render item sort"},

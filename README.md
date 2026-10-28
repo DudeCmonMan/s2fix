@@ -34,7 +34,7 @@ You don't need any hotkeys to play. They exist to compare the game with the fixe
 | Ctrl+Shift+F10 | switches all fixes off and on (on at start) |
 | Ctrl+Shift+F9 | 20-second A/B capture: all fixes switch off and on every 2 s; the summary goes to the log |
 | Ctrl+Shift+F8 | 20-second capture without switching anything |
-| Ctrl+Shift+F6 | debug report, the original game only for now (see "Reporting a problem" below) |
+| Ctrl+Shift+F6 | debug report (see "Reporting a problem" below) |
 
 A few settings apply when the game starts (marked "at start" below). The hotkeys don't switch those.
 
@@ -52,7 +52,7 @@ blend into one number. Use the captures as diagnostics for a bug report, not as 
 Each run writes `perf-logs\<date-time>_s2prof.log` in the game folder. It lists which fixes installed, the hotkeys used,
 capture results and, if the game crashes, where. Captures also write thread and stack files there.
 
-### Reporting a problem (the original game)
+### Reporting a problem
 
 1. In a battle, put the camera somewhere busy and keep it still.
 2. Press Ctrl+Shift+F6. You hear a beep, and a banner in the middle of the screen shows "Snapshot Running", what it is

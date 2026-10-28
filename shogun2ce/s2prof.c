@@ -20,6 +20,7 @@
 #include "hook.h"
 #include "wrap.h"
 #include "checks/s2prof.h"
+#include "report.h"
 
 #define CAPTURE_SECONDS 20
 #define PROGRESS_SECONDS 5
@@ -104,6 +105,9 @@ typedef struct {
 typedef HRESULT(WINAPI *GetThreadDescriptionFn)(HANDLE, PWSTR *);
 typedef uint64_t (*CreateDeviceFn)(BYTE *device, uint64_t adapter);
 typedef enum { ENGINE_NOT_LOADED, ENGINE_TARGETED, ENGINE_MODIFIED, ENGINE_OTHER } EngineBuild;
+static EngineBuild engine_build;
+// The render device global and vtable are where the targeted build has them, so the debug report may read the device.
+static BOOL device_readable;
 static const char *const engine_build_names[] = {"not loaded", "the targeted build", "the targeted build, modified by another mod",
                                                  "a different build"};
 static const struct {
@@ -846,11 +850,13 @@ static BOOL sample(HANDLE timer, CaptureStats *stats, int seconds) {
 }
 
 // ab is the switch an A/B capture alternates, or NULL for a plain capture, whose profile splits by the fix switch.
+static BOOL capture_quiet;
+
 static void capture(int seconds, Switch *ab) {
     int number = capture_number++;
     BOOL alternating = ab != NULL;
     Switch *mode_switch = ab ? ab : &switches[0];
-    MessageBeep(MB_OK);
+    if (!capture_quiet) MessageBeep(MB_OK);
     LONG enabled_before = *mode_switch->flag;
     log_line("capture %d: sampling for %d s%s%s...", number, seconds, alternating ? ", switching every 2 s: " : "; Ctrl+Shift+F10 still toggles Apply Fixes",
              alternating ? ab->name : "");
@@ -866,7 +872,7 @@ static void capture(int seconds, Switch *ab) {
         log_line("capture %d: setup failed: %lu", number, GetLastError());
         if (timer) CloseHandle(timer);
         release_capture();
-        MessageBeep(MB_ICONHAND);
+        if (!capture_quiet) MessageBeep(MB_ICONHAND);
         return;
     }
     CaptureStats stats = {.alternating = alternating, .mode_switch = mode_switch};
@@ -884,11 +890,51 @@ static void capture(int seconds, Switch *ab) {
     log_line("capture %d: %s (%d threads, %zu unique stacks) -> %s_s2prof_%d_threads.tsv, %s_s2prof_%d_stacks.txt; %s now %s", number,
              ok ? "done" : "FAILED", thread_count, entry_count, run_id, number, run_id, number, mode_switch->name, *mode_switch->flag ? "ON" : "OFF");
     release_capture();
-    MessageBeep(ok ? MB_ICONASTERISK : MB_ICONHAND);
+    if (!capture_quiet) MessageBeep(ok ? MB_ICONASTERISK : MB_ICONHAND);
+}
+
+// The debug report drives these: the switches, and the A/B capture without its own beeps (the report beeps once at its
+// start and once at its end).
+
+static int report_switch_count(void) {
+    return switch_count;
+}
+
+static ReportSwitch report_switch_at(int index) {
+    return (ReportSwitch){switches[index].name, switches[index].flag, switches[index].report};
+}
+
+static int report_capture(int seconds, int switch_index) {
+    int number = capture_number;
+    capture_quiet = TRUE;
+    capture(seconds, &switches[switch_index]);
+    capture_quiet = FALSE;
+    return number;
+}
+
+static void start_report(void) {
+    static BOOL initialised;
+    if (!initialised) {
+        report_init(&(ReportHost){.engine = engine,
+                                  .engine_build = engine_build_names[engine_build],
+                                  .device_readable = device_readable,
+                                  .output_dir = output_dir,
+                                  .config_path = config_path,
+                                  .run_id = run_id,
+                                  .version = S2FIX_VERSION,
+                                  .log_line = log_line,
+                                  .switch_count = report_switch_count,
+                                  .switch_at = report_switch_at,
+                                  .capture = report_capture,
+                                  .output_path = output_path});
+        initialised = TRUE;
+    }
+    report_start();
 }
 
 static void log_help(void) {
-    log_line("Hotkeys (in game): Ctrl+Shift+F9 A/B capture %d s (Apply Fixes alternates every %d s) | Ctrl+Shift+F10 toggle Apply Fixes | Ctrl+Shift+F8 plain capture",
+    log_line("Hotkeys (in game): Ctrl+Shift+F9 A/B capture %d s (Apply Fixes alternates every %d s) | Ctrl+Shift+F10 toggle Apply Fixes | Ctrl+Shift+F8 plain capture"
+             " | Ctrl+Shift+F6 debug report (keep the camera still, about 3 minutes)",
              CAPTURE_SECONDS, AB_SEGMENT_SECONDS);
 }
 
@@ -917,7 +963,10 @@ static volatile DWORD main_thread_id;
 
 static uint64_t present_hook(BYTE *device) {
     if (!main_thread_id) main_thread_id = GetCurrentThreadId();
-    return original_present(device);
+    report_before_present();
+    uint64_t result = original_present(device);
+    report_after_present();
+    return result;
 }
 
 // "off (...)": the player switched the fix off in s2prof.ini.
@@ -1202,8 +1251,11 @@ static DWORD WINAPI controller(LPVOID unused) {
     start_run();
     AddVectoredExceptionHandler(1, report_crash);
     if (console_error) log_line("console unavailable: error %lu", console_error);
-    EngineBuild engine_build = classify_engine(engine);
+    engine_build = classify_engine(engine);
     log_line("s2prof running inside the game (engine at 0x%llx, %s).", (unsigned long long)(uintptr_t)engine, engine_build_names[engine_build]);
+    const char *device_mismatch = S2_CHECK_ENGINE(&module_api, report_checks);
+    device_readable = !device_mismatch;
+    if (device_mismatch) log_line("the debug report's device readout (screenshots, GPU times) is off: %s", device_mismatch);
     if (device_hooks_error[0])
         log_line("device creation: not held for the fixes; multithreaded device and wrapped context off: %s", device_hooks_error);
     else
@@ -1243,9 +1295,12 @@ static DWORD WINAPI controller(LPVOID unused) {
     SetEvent(ready_event);
     for (;;) {
         Sleep(50);
-        if (hotkey_pressed(VK_F10)) toggle_apply_fixes();
-        if (hotkey_pressed(VK_F9)) capture(CAPTURE_SECONDS, &switches[0]);
-        if (hotkey_pressed(VK_F8)) capture(CAPTURE_SECONDS, NULL);
+        // While the report runs it owns the switches and the capture, so the other hotkeys wait.
+        BOOL busy = report_running();
+        if (hotkey_pressed(VK_F10) && !busy) toggle_apply_fixes();
+        if (hotkey_pressed(VK_F9) && !busy) capture(CAPTURE_SECONDS, &switches[0]);
+        if (hotkey_pressed(VK_F8) && !busy) capture(CAPTURE_SECONDS, NULL);
+        if (hotkey_pressed(VK_F6)) start_report();
     }
     return 0;
 }
