@@ -50,6 +50,10 @@ jobs:
           "$RUNNER_TEMP/test_overhaul_ce.exe"
           i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Ishogun2og -o "$RUNNER_TEMP/test_cpupick_og.exe" shogun2og/tests/test_cpupick.c
           "$RUNNER_TEMP/test_cpupick_og.exe"
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Ishogun2ce -o "$RUNNER_TEMP/test_pathsplit_ce.exe" shogun2ce/tests/test_pathsplit.c -lsynchronization
+          "$RUNNER_TEMP/test_pathsplit_ce.exe"
+          i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -msse2 -mfpmath=sse -Ishogun2og -o "$RUNNER_TEMP/test_pathsplit_og.exe" shogun2og/tests/test_pathsplit.c -lsynchronization
+          "$RUNNER_TEMP/test_pathsplit_og.exe"
 
       - name: Build and package
         run: |

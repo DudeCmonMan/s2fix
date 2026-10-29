@@ -133,6 +133,13 @@ On the campaign map:
 | `camprelations` | remembers where each faction's record is: every character on the map searched the whole faction list for it several times a frame |
 | `campappearance` | remembers which appearance entry each character's model uses instead of searching the character's appearance set again every frame |
 
+When loading:
+
+| Fix | What it does |
+|---|---|
+| `packcache` | keeps the game's pack files in Windows' file cache between starts: the game reopened them in a way that bypasses the cache, so every start read all its data from disk again |
+| `pathsplit` | builds a battle's pathfinding map on several threads: its searches over the map's triangles are split across helper threads, and the game's second and third tries run alongside the first (the result is the same) |
+
 `s2prof.dll` also replaces two engine sorts (render items and effect objects) with stable sorts: a counting sort when a list has few distinct keys, otherwise a radix sort.
 
 ## Shogun 2, the original game
@@ -228,6 +235,15 @@ On the campaign map:
 |---|---|
 | `camprelations` | remembers where each faction's record is: every character on the map searched the whole faction list for it several times a frame |
 | `campappearance` | remembers which appearance entry each character's model uses instead of searching the character's appearance set again every frame |
+
+When loading:
+
+| Fix | What it does |
+|---|---|
+| `texdirect` | creates the game's compressed textures straight from their files instead of having D3DX decompress and recompress every block, which took most of a load; the textures show the artwork's own blocks |
+| `packcache` | keeps the game's pack files and loose data files in Windows' file cache between starts: the game opened them in a way that bypasses the cache, so every start read all its data from disk again |
+| `lookupcache` | remembers, for the rest of the session, each loose file in `data\` that Windows said is not there, so the game's repeated checks for it are answered from memory; loose files that exist (mods) are always found |
+| `pathsplit` | builds a battle's pathfinding map on several threads: its searches over the map's triangles are split across helper threads, and the game's second and third tries run alongside the first (the result is the same) |
 
 ## Privacy and safety
 
