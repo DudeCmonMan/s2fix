@@ -1,11 +1,13 @@
 // Usage: test_borderless.exe <folder holding fixes\borderless.dll and s2prof.ini with [window] borderless=1>
 //
 // The borderless module against a stand-in engine: a block holding the engine's import slots (the real user32
-// functions), its window, settings and render device globals, and a window made as the engine makes its windowed one.
+// functions), its window, settings and render device globals, and a window made as the engine makes its windowed one,
+// for a resolution wider than the desktop (as at a downsampling resolution on one monitor), which Windows makes smaller.
 // Through the slots, as the engine calls them: the window is restyled to cover its monitor while GetClientRect reports
-// the engine's resolution; mouse messages are scaled to it; a display change (SetWindowLongW, AdjustWindowRect,
-// MoveWindow, GetClientRect, as at 0x11416729) keeps the window on its monitor and takes the new resolution; a popup
-// style hands the window back. Runs on a desktop of its own, since the window covers the monitor.
+// the engine's resolution; mouse messages are scaled to it, the monitor's last pixel to the resolution's last; a display
+// change (SetWindowLongW, AdjustWindowRect, MoveWindow, GetClientRect, as at 0x11416729) keeps the window on its monitor
+// and takes the new resolution; a popup style hands the window back. Runs on a desktop of its own, since the window
+// covers the monitor.
 #define _WIN32_WINNT 0x0A00
 #include <windows.h>
 #include <windowsx.h>
@@ -126,7 +128,10 @@ static int child(const wchar_t *folder) {
 
     WNDCLASSW window_class = {.lpfnWndProc = DefWindowProcW, .hInstance = GetModuleHandleW(NULL), .lpszClassName = L"s2fix_borderless_check"};
     RegisterClassW(&window_class);
-    RECT rect = {0, 0, 1280, 720};
+    LONG first_width = GetSystemMetrics(SM_CXVIRTUALSCREEN) + 256, first_height = 720;
+    *(LONG *)(settings + 0x20) = first_width;
+    *(LONG *)(settings + 0x24) = first_height;
+    RECT rect = {0, 0, first_width, first_height};
     AdjustWindowRect(&rect, WINDOWED_STYLE, FALSE);
     HWND window = CreateWindowExW(0, window_class.lpszClassName, L"Shogun 2", WINDOWED_STYLE, 50, 50, rect.right - rect.left, rect.bottom - rect.top,
                                   NULL, NULL, window_class.hInstance, NULL);
@@ -155,10 +160,12 @@ static int child(const wchar_t *folder) {
 
     pump(300);
     expect(covers_monitor(window, monitor), "the window lost its frame and covers its monitor");
-    expect(client_is(window, 1280, 720), "GetClientRect reports the resolution the engine made the window for");
+    printf("  the engine made the window for %ldx%ld\n", first_width, first_height);
+    expect(client_is(window, first_width, first_height), "GetClientRect reports the resolution the engine made the window for, wider than the desktop");
     LPARAM corner = mouse_through_engine(window, WM_MOUSEMOVE, monitor_width - 1, monitor_height - 1);
     printf("  mouse at %ld,%ld arrives at %d,%d\n", monitor_width - 1, monitor_height - 1, GET_X_LPARAM(corner), GET_Y_LPARAM(corner));
-    expect(GET_X_LPARAM(corner) == 1279 && GET_Y_LPARAM(corner) == 719, "a mouse message's position is scaled to the resolution: the last pixel to the last");
+    expect(GET_X_LPARAM(corner) == first_width - 1 && GET_Y_LPARAM(corner) == first_height - 1,
+           "a mouse message's position is scaled to the resolution: the last pixel to the last");
     LPARAM wheel = mouse_through_engine(window, WM_MOUSEWHEEL, 900, 500);
     expect(GET_X_LPARAM(wheel) == 900 && GET_Y_LPARAM(wheel) == 500, "the wheel's screen position is left alone");
 
@@ -169,6 +176,8 @@ static int child(const wchar_t *folder) {
     LPARAM middle = mouse_through_engine(window, WM_LBUTTONDOWN, monitor_width / 2, monitor_height / 2);
     expect(GET_X_LPARAM(middle) == monitor_width / 2 * 1600 / monitor_width && GET_Y_LPARAM(middle) == monitor_height / 2 * 900 / monitor_height,
            "a click is scaled to 1600x900");
+    corner = mouse_through_engine(window, WM_MOUSEMOVE, monitor_width - 1, monitor_height - 1);
+    expect(GET_X_LPARAM(corner) == 1599 && GET_Y_LPARAM(corner) == 899, "at 1600x900 the last pixel goes to the last too");
 
     change_resolution(window, monitor_width, monitor_height);
     pump(300);

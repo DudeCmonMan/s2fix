@@ -18,12 +18,16 @@
 //   sets itself is fullscreen, which hands the window back to it.
 // - The engine takes the window's client size as its resolution (the display change at 0x114167de, WM_SIZE 0x11401695,
 //   the settings refresh 0x113fd793), so its GetClientRect of the window reports the size the engine asked for: the size
-//   it created the window with, then each MoveWindow's size less the frame of the style it set.
+//   in its settings, which it created the window for (Windows makes a window larger than the desktop smaller, as at a
+//   downsampling resolution on one monitor), then each MoveWindow's size less the frame of the style it set.
 // - The engine reads the cursor from mouse messages in client coordinates (window procedure 0x1009d2e0) and never scales
-//   them, so they are scaled from the window to that size.
+//   them, so they are scaled from the window to that size, the first pixel to the first and the last to the last at any
+//   scale, so edge scrolling still reaches the edges.
 #define WINDOW_RVA 0x1c9a938
 #define SETTINGS_RVA 0x1c9a924
 #define SETTINGS_WINDOWED_OFFSET 0x1c
+#define SETTINGS_WIDTH_OFFSET 0x20
+#define SETTINGS_HEIGHT_OFFSET 0x24
 #define RENDER_DEVICE_RVA 0x1c9a93c
 #define SWAP_CHAIN_OFFSET 0xbc
 #define SET_WINDOW_LONG_IAT_RVA 0x15a1618
@@ -85,12 +89,11 @@ static void log_layout(HWND window) {
                   monitor.right - monitor.left, monitor.bottom - monitor.top, monitor.left, monitor.top, game_resolution.cx, game_resolution.cy);
 }
 
-// The engine sized the window for its resolution before handing it over.
+// The engine sized the window for the resolution in its settings before handing it over.
 static void take_window(HWND window) {
     if (window == borderless_window) return;
-    RECT client;
-    real_get_client_rect(window, &client);
-    game_resolution = (SIZE){client.right, client.bottom};
+    BYTE *settings = *(BYTE **)(api->engine + SETTINGS_RVA);
+    game_resolution = (SIZE){*(LONG *)(settings + SETTINGS_WIDTH_OFFSET), *(LONG *)(settings + SETTINGS_HEIGHT_OFFSET)};
     engine_style = GetWindowLongW(window, GWL_STYLE);
     borderless_window = window;
 }
@@ -129,7 +132,8 @@ static void scale_mouse(MSG *message) {
         return;
     RECT client;
     real_get_client_rect(message->hwnd, &client);
-    int x = GET_X_LPARAM(message->lParam) * game_resolution.cx / client.right, y = GET_Y_LPARAM(message->lParam) * game_resolution.cy / client.bottom;
+    int x = (2 * GET_X_LPARAM(message->lParam) * (game_resolution.cx - 1) + client.right - 1) / (2 * (client.right - 1));
+    int y = (2 * GET_Y_LPARAM(message->lParam) * (game_resolution.cy - 1) + client.bottom - 1) / (2 * (client.bottom - 1));
     message->lParam = MAKELPARAM(x, y);
 }
 
