@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 CC=i686-w64-mingw32-gcc
 # Known-size copies up to 512 bytes inline as SSE2 loops: msvcrt's memcpy takes rep movsd for misaligned ones, which
 # the 312-byte render items mostly are. Variable sizes stay library calls.
-CFLAGS="-O2 -Wall -Wextra -D__USE_MINGW_ANSI_STDIO=1 -static -s -msse2 -mfpmath=sse -ffp-contract=off -mstackrealign -mmemcpy-strategy=vector_loop:512:noalign,libcall:-1:noalign"
+CFLAGS="-O2 -Wall -Wextra -Werror -D__USE_MINGW_ANSI_STDIO=1 -static -s -msse2 -mfpmath=sse -ffp-contract=off -mstackrealign -mmemcpy-strategy=vector_loop:512:noalign,libcall:-1:noalign"
 # The debug report names the version it came from: the release workflow passes the tag.
 $CC $CFLAGS -DS2FIX_VERSION="\"${VERSION:-local build}\"" -shared -o s2prof.dll s2prof.c hook.c report.c -lpsapi -lntdll -lversion -lole32 -lgdi32 -limm32
 # The proxy's export table comes from its export list.

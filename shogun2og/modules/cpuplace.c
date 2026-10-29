@@ -13,11 +13,11 @@ NTSTATUS NTAPI NtGetNextThread(HANDLE process, HANDLE thread, ACCESS_MASK access
 
 // Places the game's threads by cpupick.h's rules, from what Windows reports about this PC. Two fixes:
 // - cpuplace keeps the other threads in main's cache group ([cpu] ccd in s2prof.ini: auto, off, or a group number) when
-//   it leaves them enough CPUs. With the engine's own placement on a two-CCD CPU, frames stalled 40-60 ms about 2.5 times
-//   a second; on one CCD, 68 frames over 15 ms fell to 2 and the frame time by 1.0-1.2 ms (army view, 2026-10-25). Its
-//   twins switch (off: one logical CPU per core) is there to measure SMT sharing.
+//   it leaves them enough CPUs. With the engine's own placement on a two-CCD CPU, frames stall several times a second;
+//   kept on one CCD they don't, and frames are faster. Its twins switch (off: one logical CPU per core) is there to
+//   measure SMT sharing.
 // - maincore gives main, the thread that presents frames, the group's highest-ranked core to itself and makes that CPU
-//   its ideal processor. Main sharing its core cost 0.66 ms a frame in a CPU-bound battle (2026-10-25).
+//   its ideal processor. Main sharing its core with other threads slows every frame.
 // CPU sets place every thread: the process's default for the others, main's own for main. The engine pins main to CPU 0
 // and a pool thread to each other CPU with hard masks, which CPU sets can only narrow, so while placing a pin that leaves
 // out a CPU its thread may use is widened to the process's mask (a pinned thread that wakes waits for its one CPU while
@@ -231,6 +231,10 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     *wcsrchr(path, L'\\') = 0;
     wcscat(path, L"\\" CONFIG_FILE);
     GetPrivateProfileStringW(L"cpu", L"ccd", L"auto", setting, 16, path);
+#ifdef CCD_OVERRIDE
+    // Development builds can force the setting, to A/B a placement without changing the installed ini.
+    wcscpy(setting, CCD_OVERRIDE);
+#endif
     confine = wcscmp(setting, L"off") != 0;
     // cache is the setting's name before the rules (the largest L3), which they still apply first.
     long number = -1;

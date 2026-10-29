@@ -17,8 +17,7 @@ NTSTATUS NTAPI NtGetNextThread(HANDLE process, HANDLE thread, ACCESS_MASK access
 //   cache-missing render code runs far faster on a 3D V-Cache CCD. Its twins switch (off: one logical CPU per core) is
 //   there to measure SMT sharing.
 // - maincore gives main, the thread that presents frames, the group's highest-ranked core to itself and makes that CPU
-//   its ideal processor. The engine leaves main unpinned, so pool threads ran on its core's twin (-0.395 ms a frame,
-//   2026-10-27).
+//   its ideal processor. The engine leaves main unpinned, so pool threads would run on its core's twin.
 // CPU sets place every thread: the process's default for the others, main's own for main. Hard masks can only be
 // narrowed by CPU sets, so while placing a pin that leaves out a CPU its thread may use is widened to the process's mask
 // (a pinned thread that wakes waits for its one CPU while others sit idle). Both follow Apply Fixes and their switches; off puts back the engine's masks and main's CPU set and

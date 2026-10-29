@@ -3,11 +3,11 @@
 #include "../texdirect.h"
 #include <stdio.h>
 
-// The engine's sRGB texture requests, served from the file's own blocks instead of D3DX's re-encode (texdirect.h). In
-// battle loads they took 16.6 of 24 s, and 10.8 of 19 s in campaign loads (2026-10-28); offline, 24 such textures took
-// 567 ms through D3DX and 1.6 ms created directly. The game then shows the artwork's own blocks, as it already does for
-// its legacy DXT textures, instead of D3DX's lossy re-encode of them. Follows Apply Fixes and its switch for the textures
-// loaded afterwards.
+// The engine's sRGB texture requests, served from the file's own blocks instead of D3DX's re-encode (texdirect.h). D3DX
+// decodes and re-encodes every block on the CPU, most of a battle or campaign load; created from the blocks, a texture
+// takes a tiny fraction of that. The game then shows the artwork's own blocks, as it already does for its legacy DXT
+// textures, instead of D3DX's lossy re-encode of them. Follows Apply Fixes and its switch for the textures loaded
+// afterwards.
 #define D3DX_CREATE_TEXTURE_IAT_RVA 0x15a17b4
 
 typedef HRESULT(WINAPI *CreateTextureFn)(ID3D11Device *device, const void *data, SIZE_T size, const TexLoadInfo *info, void *pump,

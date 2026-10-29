@@ -468,8 +468,7 @@ typedef struct {
     volatile LONG varies;
 } BindingInfo;
 
-// On since stage 1 and the G-buffer split ran in game (2026-10-25); a switch, and it follows Apply Fixes. Off, every hook
-// passes straight to the engine and only counts.
+// On by default; a switch, and it follows Apply Fixes. Off, every hook passes straight to the engine and only counts.
 __declspec(dllexport) volatile LONG overhaul_enabled = 1;
 __declspec(dllexport) volatile LONG overhaul_workers = 3;
 // Set by the contention fix: main waits on the workers, so they run above normal priority and wake straight onto a CPU
@@ -477,8 +476,8 @@ __declspec(dllexport) volatile LONG overhaul_workers = 3;
 // doesn't push other threads off.
 __declspec(dllexport) volatile LONG overhaul_worker_priority;
 __declspec(dllexport) volatile LONG overhaul_spin_us = 50;
-// View types split (bit = type, from view vtbl+0x30): 1 the shadow map, 24 the G-buffer view (vtable 0x1175ffec; split
-// in game 2026-10-25, -0.34 to -0.57 ms in a CPU-bound battle, no visible difference). Others are too small to pay.
+// View types split (bit = type, from view vtbl+0x30): 1 the shadow map, 24 the G-buffer view (vtable 0x1175ffec). Others
+// are too small to pay.
 __declspec(dllexport) volatile uint64_t overhaul_views = 1ull << 1 | 1ull << 24;
 // Shadow cascades split (bit = cascade index).
 __declspec(dllexport) volatile LONG overhaul_cascades = 7;

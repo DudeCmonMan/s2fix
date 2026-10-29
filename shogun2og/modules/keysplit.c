@@ -10,8 +10,8 @@
 // prepare) do right after it; their own fill call is then skipped. The poses are flushed and both lists merged first, as
 // compute_keys does; the per-item lookup (0x114c74f0) only reads the node's pose table and its textures' row counts, and
 // the fill reads only the pose list and the textures' sizes, never the item fields the keys write. compute_keys returns
-// once every key is written. In a CPU-bound battle the helpers finish inside main's fill: -0.13 and -0.28 ms a frame
-// (2026-10-25). keyverify recomputes the keys with the engine's own function and counts items that differ (0 of 736).
+// once every key is written. The helpers finish inside main's fill. keyverify recomputes the keys with the engine's own
+// function and counts items that differ.
 #define COMPUTE_KEYS_RVA 0x14e7d90
 #define FILL_RVA 0x14e78e0
 #define KEY_LOOKUP_RVA 0x14c74f0

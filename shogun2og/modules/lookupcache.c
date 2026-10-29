@@ -4,12 +4,12 @@
 #include <wctype.h>
 
 // Before reading a file from its packs, the engine asks Windows whether a loose copy is in the data folder (mods can
-// override pack files there): 124,000 checks in a campaign load, 1.2 s, nearly all for files that are not there, many
-// asked again and again (2026-10-28). Each "no such file" answer Windows gives for a path in the data folder is
-// remembered for the rest of the session, and later checks of that path are answered from memory. The cache holds only
-// what the engine has asked during play, never a list or a scan of the folder, so a loose file that exists is always
-// found on disk; it keeps filling on every load. The game never writes into its data folder; if the engine opens a file
-// there for writing anyway, the cache is emptied. A loose file added while the game runs is seen after a restart.
+// override pack files there): over 100,000 checks in a campaign load, nearly all for files that are not there, many
+// asked again and again. Each "no such file" answer Windows gives for a path in the data folder is remembered for the
+// rest of the session, and later checks of that path are answered from memory. The cache holds only what the engine has
+// asked during play, never a list or a scan of the folder, so a loose file that exists is always found on disk; it keeps
+// filling on every load. The game never writes into its data folder; if the engine opens a file there for writing
+// anyway, the cache is emptied. A loose file added while the game runs is seen after a restart.
 #define GET_FILE_ATTRIBUTES_W_IAT_RVA 0x15a1270
 #define GET_FILE_ATTRIBUTES_EX_W_IAT_RVA 0x15a1058
 #define FIND_FIRST_FILE_W_IAT_RVA 0x15a114c

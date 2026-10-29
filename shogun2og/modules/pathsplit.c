@@ -6,9 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-// The battle pathfinder triangulates the whole map in one call (0x11350ec0); when an edge cannot be
-// inserted the engine reorders the edges and runs it again, up to three times (0x11349ab0). Two changes, each leaving
-// the triangulation the same:
+// The battle pathfinder triangulates the whole map in one call (0x11350ec0); when an edge cannot be inserted the
+// engine reorders the edges and runs it again, up to three times (0x11349ab0). Two changes, each leaving the
+// triangulation the same:
 // - The searches. Inserting a point searches the triangle array from the first triangle for the one holding it
 //   (0x1134e930); inserting an edge tests every triangle for a crossing (0x11369370). The tests read the triangles and
 //   the points and write nothing, so the searches run on helper threads (pathsplit.h) with the engine's own tests: the

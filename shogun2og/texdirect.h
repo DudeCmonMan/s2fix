@@ -64,8 +64,8 @@ static inline BOOL texdirect_unchanged(UINT file_format, const TexLoadInfo *info
 
 // The texture D3DX would make from a file it only has to copy, with the file's blocks for each level; 0 when the
 // request asks for any change. For a full chain (mips 0) D3DX adds the levels a file lacks, each the top-left corner of
-// the file's last level (filter NONE crops; checked on the game's files), so those levels read
-// the last level's blocks at its own row pitch.
+// the file's last level (filter NONE crops; checked on the game's files), so those levels read the last level's
+// blocks at its own row pitch.
 static inline int texdirect_plan(const BYTE *data, SIZE_T size, const TexLoadInfo *info, TexPlan *plan) {
     SIZE_T blocks_at = 0;
     UINT format = info && data ? texdirect_source(data, size, &blocks_at) : 0;

@@ -6,8 +6,8 @@
 // The CPU placement rules, apart from Windows so they can be checked on any layout. They read only what Windows reports
 // for each logical CPU, never a CPU model. Main gets the best-ranked core of the fastest core type's largest cache group
 // (a CCD, or the P-cores); the other threads stay in that group, SMT twins included, when it leaves them enough CPUs, and
-// otherwise go wide. Measured in the original game (2026-10-27): one CCD of 8 SMT cores ran as well as every CPU, while
-// 7 CPUs froze frames up to 100 ms when the camera moved, and main held to one CPU stalled 50-130 ms.
+// otherwise go wide. One CCD of 8 SMT cores runs the game as well as every CPU, while too few CPUs freeze frames when
+// the camera moves, and main held to one CPU stalls.
 #define CPU_MAX 64
 // A 6-core SMT group less main's core, expected to behave like the 8-core one measured.
 #define CPU_MIN_OTHERS 10

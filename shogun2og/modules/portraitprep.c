@@ -7,13 +7,12 @@
 // adds the model's pose and items, calls the node's prepare-now (vtbl+0x84, 0x114c47f0), draws the model into its
 // rectangle and clears the node. Prepare-now runs the whole prepare again: keys for every item of lists A and B, the
 // instance textures, and list A's sort, over the ~10,000 battle items it already prepared this frame, to add ~8. The
-// model's draws carry only its own instances (10 draws, 10 instances, measured 2026-10-25), and nothing draws the
-// battle's items after it, so this prepares only what was added since the frame's prepare: keys for the new items,
-// the instance-texture rows of the new poses, and the new items sorted among themselves after the battle's. The model's
-// view then records the same sequence, since its walk records none of the battle's items. The engine's fill would
-// rewrite every row of every instance texture (WRITE_DISCARD) for the model's one pose: 62% of the model's time
-// (measured 2026-10-25). Only the new rows are written, into the textures and rows the engine's fill puts them in; the
-// discarded rows are read by nothing after this.
+// model's draws carry only its own instances, and nothing draws the battle's items after it, so this prepares only what
+// was added since the frame's prepare: keys for the new items, the instance-texture rows of the new poses, and the new
+// items sorted among themselves after the battle's. The model's view then records the same sequence, since its walk
+// records none of the battle's items. The engine's fill would rewrite every row of every instance texture
+// (WRITE_DISCARD) for the model's one pose, most of the model's time. Only the new rows are written, into the textures
+// and rows the engine's fill puts them in; the discarded rows are read by nothing after this.
 #define PREPARE_RVA 0x14c4780
 #define PREPARE_NOW_RVA 0x14c47f0
 #define UI_MODEL_RVA 0x10ddc00

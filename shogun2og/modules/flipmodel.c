@@ -11,9 +11,9 @@
 
 // The game's windowed swap chain is the 2011 blt model (DXGI_SWAP_EFFECT_DISCARD, one buffer): every Present copies the
 // frame through the desktop compositor, and the copy stalls main for ~20 ms two or three times a second in a battle (with
-// or without the fixes). This creates it as a flip-model chain instead (FLIP_DISCARD, 3
-// buffers, tearing allowed when the system supports it), which a borderless full-screen window can present without the
-// compositor's copy. The swap chain is made once, as the device is created, so this takes effect from the next start.
+// or without the fixes). This creates it as a flip-model chain instead (FLIP_DISCARD, 3 buffers, tearing allowed when
+// the system supports it), which a borderless full-screen window can present without the compositor's copy. The swap
+// chain is made once, as the device is created, so this takes effect from the next start.
 // Remove it by deleting fixes\flipmodel.dll or with [flipmodel] enabled=0 in s2prof.ini.
 //
 // - Creation: 0x1147c050 fills the description at device+0xc0 and calls factory->CreateSwapChain through ecx; the two

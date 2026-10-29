@@ -8,8 +8,8 @@
 #include <wchar.h>
 
 // The original game's pathsplit on the Complete Edition. The battle pathfinder triangulates the map in one call
-// (0x18198a2d0) and, when an edge cannot be inserted, reorders the edges and runs it again, up to three
-// times (0x181980a80). Two changes, each leaving the triangulation the same:
+// (0x18198a2d0) and, when an edge cannot be inserted, reorders the edges and runs it again, up to three times
+// (0x181980a80). Two changes, each leaving the triangulation the same:
 // - The searches. Inserting a point scans the 56-byte triangles from the first for the one holding it, with the test
 //   inline (0x181987480); inserting an edge calls the crossing test (0x18199b320) for every triangle (0x1819a6330). The
 //   tests read the triangles and the points and write nothing, so the searches run on helper threads (pathsplit.h):
