@@ -7,7 +7,8 @@
 // data\ folder beside this program (the module takes the data folder beside the executable): a missing data file is
 // answered from memory after Windows said so once, with the same error; files that exist, paths outside the data
 // folder, wildcard searches and the switch turned off always go to Windows; a write open in the data folder drops what
-// was remembered.
+// was remembered. A mod's folder counts as the data folder does: one whose pack is open when the module loads, and one
+// whose pack the engine opens later.
 #define ENGINE_BYTES 0x1600000
 
 static BYTE *engine;
@@ -58,6 +59,18 @@ int main(void) {
     swprintf(ui, MAX_PATH, L"%ls\\data\\ui", folder);
     CreateDirectoryW(ui, NULL);
     CloseHandle(CreateFileW(present, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL));
+    wchar_t mod[MAX_PATH], mod_pack[MAX_PATH], mod_missing[MAX_PATH], late[MAX_PATH], late_pack[MAX_PATH], late_missing[MAX_PATH];
+    swprintf(mod, MAX_PATH, L"%ls\\lookupcache_mod", folder);
+    swprintf(mod_pack, MAX_PATH, L"%ls\\lookupcache_mod\\mod.pack", folder);
+    swprintf(mod_missing, MAX_PATH, L"%ls\\lookupcache_mod\\rigidmodels\\icon.rigid_model_v2", folder);
+    swprintf(late, MAX_PATH, L"%ls\\lookupcache_late", folder);
+    swprintf(late_pack, MAX_PATH, L"%ls\\lookupcache_late\\late.pack", folder);
+    swprintf(late_missing, MAX_PATH, L"%ls\\lookupcache_late\\icon.dds", folder);
+    CreateDirectoryW(mod, NULL);
+    CreateDirectoryW(late, NULL);
+    CloseHandle(CreateFileW(late_pack, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL));
+    // Held open while the module loads, as the engine holds its packs.
+    HANDLE mod_handle = CreateFileW(mod_pack, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
 
     S2Api api = {.engine = engine, .fix_enabled = &fixes_on, .log_line = log_line, .patch = patch, .register_switch = register_switch};
     HMODULE module = LoadLibraryW(L"modules\\lookupcache.dll");
@@ -116,6 +129,17 @@ int main(void) {
     expect("with the switch off every check asks Windows", *answered == at);
     *enabled = 1;
 
+    at = *answered;
+    attributes(mod_missing);
+    SetLastError(0);
+    BOOL mod_again = attributes(mod_missing) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_PATH_NOT_FOUND;
+    expect("a missing file in the folder of a pack open as the module loaded is answered from memory", mod_again && *answered == at + 1);
+    attributes(late_missing), attributes(late_missing);
+    expect("a mod's folder is not known before its pack is opened", *answered == at + 1);
+    CloseHandle(open(late_pack, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL));
+    attributes(late_missing), attributes(late_missing);
+    expect("once the engine opens a mod's pack, missing files in its folder are answered from memory", *answered == at + 2);
+
     HANDLE made = CreateFileW(missing, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
     CloseHandle(made);
     expect("a file added behind the engine's back stays missing for the session", attributes(missing) == INVALID_FILE_ATTRIBUTES);
@@ -125,6 +149,11 @@ int main(void) {
 
     DeleteFileW(missing);
     DeleteFileW(present);
+    CloseHandle(mod_handle);
+    DeleteFileW(mod_pack);
+    DeleteFileW(late_pack);
+    RemoveDirectoryW(mod);
+    RemoveDirectoryW(late);
     RemoveDirectoryW(ui);
     if (made_data) RemoveDirectoryW(data);
     printf("test_lookupcache: %d checks, %d failures\n", checks, failures);

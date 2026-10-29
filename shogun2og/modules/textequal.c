@@ -1,0 +1,69 @@
+#include "../s2module.h"
+#include "../checks/textequal.h"
+#include <stdint.h>
+
+// The engine compares a stored name (a wide string: length at +0, characters at +8) with text written in its code
+// (0x100ee2d0, thiscall string, text): it copies the text into a new wide string from its locked memory pool, widening
+// each byte by sign extension (0x100ec280), compares the lengths and then the characters (0x100e6740), and frees the
+// copy, even when the lengths differ. The campaign AI makes such comparisons constantly in an end turn, each copy
+// taking the pool's lock twice. This compares the text in place, character by character, with the same widening: the
+// same answer, without the copy. The switch textequalverify runs the engine's comparison beside each one and counts any
+// difference. Follows Apply Fixes.
+#define EQUALS_RVA 0xee2d0
+#define STRING_LENGTH 0x0
+#define STRING_CHARACTERS 0x8
+#define REPORT_MS 10000
+
+typedef uint8_t(__attribute__((thiscall)) *EqualsFn)(const BYTE *string, const char *text);
+
+// Plain counters: another thread's comparison can lose a count.
+typedef struct {
+    LONG64 comparisons, mismatches;
+} Stats;
+
+__declspec(dllexport) volatile LONG equal_enabled = 1;
+__declspec(dllexport) volatile LONG verify;
+__declspec(dllexport) volatile Stats equal_stats;
+
+static const BYTE equals_prologue[] = {0x83, 0xec, 0x10, 0x53, 0x55, 0x56, 0x57};
+static const S2Api *api;
+static EqualsFn original_equals;
+
+static uint8_t __attribute__((thiscall)) equals_hook(const BYTE *string, const char *text) {
+    if (!*api->fix_enabled || !equal_enabled) return original_equals(string, text);
+    equal_stats.comparisons++;
+    uint32_t length = *(const uint32_t *)(string + STRING_LENGTH);
+    const uint16_t *characters = *(const uint16_t *const *)(string + STRING_CHARACTERS);
+    uint32_t i = 0;
+    while (text[i] && i < length && characters[i] == (uint16_t)(int16_t)(int8_t)text[i]) i++;
+    uint8_t equal = !text[i] && i == length;
+    if (verify && original_equals(string, text) != equal) equal_stats.mismatches++;
+    return equal;
+}
+
+static DWORD WINAPI report_loop(LPVOID unused) {
+    (void)unused;
+    Stats last = {0};
+    for (;; Sleep(REPORT_MS)) {
+        Stats now = equal_stats;
+        LONG64 comparisons = now.comparisons - last.comparisons;
+        if (comparisons)
+            api->log_line("textequal: %lld comparisons a second without a copy%s", comparisons * 1000 / REPORT_MS, verify ? "" : "; verify off");
+        if (verify && comparisons) api->log_line("textequal: %lld differed from the engine's comparison", now.mismatches - last.mismatches);
+        last = now;
+    }
+    return 0;
+}
+
+__declspec(dllexport) const char *s2_module_main(const S2Api *host) {
+    const char *mismatch = S2_CHECK_ENGINE(host, textequal_checks);
+    if (mismatch) return mismatch;
+    api = host;
+    const char *error = api->hook(api->engine + EQUALS_RVA, equals_prologue, sizeof equals_prologue, (const void *)equals_hook, (void **)&original_equals);
+    if (error) return error;
+    HANDLE thread = CreateThread(NULL, 0, report_loop, NULL, 0, NULL);
+    if (thread) CloseHandle(thread);
+    api->register_switch("textequal", &equal_enabled, NULL);
+    api->register_switch("textequalverify", &verify, NULL);
+    return NULL;
+}

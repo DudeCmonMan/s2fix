@@ -3,18 +3,20 @@
 #include <wchar.h>
 #include <wctype.h>
 
-// Before reading a file from its packs, the engine asks Windows whether a loose copy is in the data folder (mods can
-// override pack files there): over 100,000 checks in a campaign load, nearly all for files that are not there, many
-// asked again and again. Each "no such file" answer Windows gives for a path in the data folder is remembered for the
-// rest of the session, and later checks of that path are answered from memory. The cache holds only what the engine has
-// asked during play, never a list or a scan of the folder, so a loose file that exists is always found on disk; it keeps
-// filling on every load. The game never writes into its data folder; if the engine opens a file there for writing
-// anyway, the cache is emptied. A loose file added while the game runs is seen after a restart.
+// Before reading a file from its packs, the engine asks Windows whether a loose copy is in the data folder, and in each
+// mod's folder (mods can override pack files there): thousands of checks in a load and in an end turn, nearly all for
+// files that are not there, many asked again and again. Each "no such file" answer Windows gives for a path in the data
+// folder or a mod's folder (a folder the engine loads a pack file from) is remembered for the rest of the session, and
+// later checks of that path are answered from memory. The cache holds only what the engine has asked during play, never
+// a list or a scan of a folder, so a loose file that exists is always found on disk; it keeps filling on every load.
+// The game never writes into these folders; if the engine opens a file there for writing anyway, the cache is emptied.
+// A loose file added while the game runs is seen after a restart.
 #define GET_FILE_ATTRIBUTES_W_IAT_RVA 0x15a1270
 #define GET_FILE_ATTRIBUTES_EX_W_IAT_RVA 0x15a1058
 #define FIND_FIRST_FILE_W_IAT_RVA 0x15a114c
 #define CREATE_FILE_W_IAT_RVA 0x15a1144
 #define KEY_CHARS 520
+#define MAX_FOLDERS 64
 #define MAX_BYTES (16 << 20)
 #define REPORT_SECONDS 10
 #define WRITE_ACCESS (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | DELETE | WRITE_DAC | WRITE_OWNER)
@@ -29,8 +31,11 @@ __declspec(dllexport) volatile LONG cache_enabled = 1;
 __declspec(dllexport) volatile LONG answered, remembered;
 
 static const S2Api *api;
-static wchar_t data_folder[KEY_CHARS];
-static DWORD data_length;
+// The data folder first, then each mod's folder. Only added to: a folder is written before the count that publishes it.
+static wchar_t folders[MAX_FOLDERS][KEY_CHARS];
+static DWORD folder_lengths[MAX_FOLDERS];
+static volatile LONG folder_count;
+static SRWLOCK folders_lock = SRWLOCK_INIT;
 static SRWLOCK lock = SRWLOCK_INIT;
 static HANDLE heap;
 static Missing **slots;
@@ -47,13 +52,47 @@ static BOOL active(void) {
     return cache_enabled && *api->fix_enabled;
 }
 
-// The path as a key (full, lower case, backslashes) and its length; 0 when it is not in the data folder.
-static DWORD make_key(LPCWSTR path, wchar_t *key) {
+static BOOL in_folders(const wchar_t *key, DWORD length) {
+    LONG count = folder_count;
+    for (LONG i = 0; i < count; i++)
+        if (length > folder_lengths[i] && !wmemcmp(key, folders[i], folder_lengths[i])) return TRUE;
+    return FALSE;
+}
+
+// The path in key form (full, lower case, backslashes) and its length; 0 when it has none.
+static DWORD normalize(LPCWSTR path, wchar_t *key) {
     if (!path || wcspbrk(path, L"*?")) return 0;
     DWORD length = GetFullPathNameW(path, KEY_CHARS, key, NULL);
     if (!length || length >= KEY_CHARS) return 0;
     for (DWORD i = 0; i < length; i++) key[i] = key[i] == L'/' ? L'\\' : (wchar_t)towlower(key[i]);
-    return length > data_length && !wmemcmp(key, data_folder, data_length) ? length : 0;
+    return length;
+}
+
+// The path as a key and its length; 0 when it is not in the data folder or a mod's folder.
+static DWORD make_key(LPCWSTR path, wchar_t *key) {
+    DWORD length = normalize(path, key);
+    return length && in_folders(key, length) ? length : 0;
+}
+
+static BOOL is_pack(const wchar_t *key, DWORD length) {
+    return length > 5 && !wmemcmp(key + length - 5, L".pack", 5);
+}
+
+// A pack outside the known folders is a mod's: its folder holds the mod's loose files.
+static void add_pack_folder(const wchar_t *key, DWORD length) {
+    DWORD folder = length;
+    while (folder && key[folder - 1] != L'\\') folder--;
+    if (!folder || in_folders(key, length)) return;
+    AcquireSRWLockExclusive(&folders_lock);
+    LONG count = folder_count;
+    BOOL known = FALSE;
+    for (LONG i = 0; i < count && !known; i++) known = folder_lengths[i] == folder && !wmemcmp(folders[i], key, folder);
+    if (!known && count < MAX_FOLDERS) {
+        wmemcpy(folders[count], key, folder);
+        folder_lengths[count] = folder;
+        InterlockedExchange(&folder_count, count + 1);
+    }
+    ReleaseSRWLockExclusive(&folders_lock);
 }
 
 static DWORD hash_of(const wchar_t *key, DWORD length) {
@@ -167,6 +206,12 @@ static HANDLE WINAPI hook_CreateFileW(LPCWSTR path, DWORD access, DWORD share, L
     }
     HANDLE file = real_CreateFileW(path, access, share, security, disposition, flags, template_file);
     if (length && reading && file == INVALID_HANDLE_VALUE) remember(key, length);
+    if (reading && file != INVALID_HANDLE_VALUE && active()) {
+        DWORD error = GetLastError();
+        if (!length) length = normalize(path, key);
+        if (length && is_pack(key, length)) add_pack_folder(key, length);
+        SetLastError(error);
+    }
     return file;
 }
 
@@ -197,13 +242,29 @@ static const struct {
 
 // The data folder sits beside the game's executable.
 static BOOL find_data_folder(void) {
-    DWORD length = GetModuleFileNameW(NULL, data_folder, KEY_CHARS - 8);
-    wchar_t *slash = length && length < KEY_CHARS - 8 ? wcsrchr(data_folder, L'\\') : NULL;
+    wchar_t *folder = folders[0];
+    DWORD length = GetModuleFileNameW(NULL, folder, KEY_CHARS - 8);
+    wchar_t *slash = length && length < KEY_CHARS - 8 ? wcsrchr(folder, L'\\') : NULL;
     if (!slash) return FALSE;
     wcscpy(slash, L"\\data\\");
-    data_length = (DWORD)wcslen(data_folder);
-    for (DWORD i = 0; i < data_length; i++) data_folder[i] = (wchar_t)towlower(data_folder[i]);
+    folder_lengths[0] = (DWORD)wcslen(folder);
+    for (DWORD i = 0; i < folder_lengths[0]; i++) folder[i] = (wchar_t)towlower(folder[i]);
+    folder_count = 1;
     return TRUE;
+}
+
+// The packs the engine opened before s2fix loaded, mods' included: every handle value is tried (the game holds a few
+// thousand handles, and an invalid value fails at once).
+static void find_open_packs(void) {
+    for (ULONG_PTR value = 4; value < 0x40000; value += 4) {
+        HANDLE file = (HANDLE)value;
+        if (GetFileType(file) != FILE_TYPE_DISK) continue;
+        wchar_t path[KEY_CHARS], key[KEY_CHARS];
+        DWORD length = GetFinalPathNameByHandleW(file, path, KEY_CHARS, 0);
+        if (!length || length >= KEY_CHARS || wcsncmp(path, L"\\\\?\\", 4) || !wcsncmp(path, L"\\\\?\\UNC\\", 8)) continue;
+        length = normalize(path + 4, key);
+        if (length && is_pack(key, length)) add_pack_folder(key, length);
+    }
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
@@ -216,6 +277,7 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
             return error;
         }
     if (!find_data_folder()) return "the game's folder could not be found";
+    find_open_packs();
     if (!(heap = HeapCreate(HEAP_NO_SERIALIZE, 0, 0))) return "HeapCreate failed";
     for (size_t i = 0; i < sizeof imports / sizeof *imports; i++) {
         BYTE *slot = api->engine + imports[i].rva;
@@ -227,5 +289,7 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     if (!thread) return "CreateThread failed";
     CloseHandle(thread);
     api->register_switch("lookupcache", &cache_enabled, NULL);
+    api->log_line("lookupcache: remembering missing files in the data folder and %ld mod folders (more as the engine opens their packs)",
+                  folder_count - 1);
     return NULL;
 }

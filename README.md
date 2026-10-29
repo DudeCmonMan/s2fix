@@ -1,6 +1,6 @@
 # s2fix: performance fixes for Total War: Shogun 2
 
-Runtime fixes that make battles in Total War: Shogun 2 render faster, and the original game's campaign map run faster.
+Runtime fixes that make battles in Total War: Shogun 2 render faster, and its campaign map and end turns run faster.
 There is one package for each version of the game:
 the Complete Edition and the original 2011 game. No game file is changed: a proxy DLL next to the game loads the fixes,
 and they patch the engine in memory only.
@@ -132,12 +132,15 @@ On the campaign map:
 |---|---|
 | `camprelations` | remembers where each faction's record is: every character on the map searched the whole faction list for it several times a frame |
 | `campappearance` | remembers which appearance entry each character's model uses instead of searching the character's appearance set again every frame |
+| `cailookup` | in the end turn, remembers where the AI finds each faction's value for another faction: rating how two factions stand, it averages over every other faction and searched two faction tables for each, so the end turn's cost grew with the cube of the faction count (the result is the same) |
+| `textequal` | in the end turn, compares the AI's names with fixed text in place, instead of copying the text through the engine's locked memory pool for every comparison (the answer is the same) |
 
 When loading:
 
 | Fix | What it does |
 |---|---|
 | `packcache` | keeps the game's pack files in Windows' file cache between starts: the game reopened them in a way that bypasses the cache, so every start read all its data from disk again |
+| `lookupcache` | remembers, for the rest of the session, each loose file in `data\` or a mod's folder that Windows said is not there, so the game's repeated checks for it, in loads and end turns, are answered from memory; loose files that exist (mods) are always found |
 | `pathsplit` | builds a battle's pathfinding map on several threads: its searches over the map's triangles are split across helper threads, and the game's second and third tries run alongside the first (the result is the same) |
 
 `s2prof.dll` also replaces two engine sorts (render items and effect objects) with stable sorts: a counting sort when a list has few distinct keys, otherwise a radix sort.
@@ -235,6 +238,8 @@ On the campaign map:
 |---|---|
 | `camprelations` | remembers where each faction's record is: every character on the map searched the whole faction list for it several times a frame |
 | `campappearance` | remembers which appearance entry each character's model uses instead of searching the character's appearance set again every frame |
+| `cailookup` | in the end turn, remembers where the AI finds each faction's value for another faction: rating how two factions stand, it averages over every other faction and searched two faction tables for each, so the end turn's cost grew with the cube of the faction count (the result is the same) |
+| `textequal` | in the end turn, compares the AI's names with fixed text in place, instead of copying the text through the engine's locked memory pool for every comparison (the answer is the same) |
 
 When loading:
 
@@ -242,7 +247,7 @@ When loading:
 |---|---|
 | `texdirect` | creates the game's compressed textures straight from their files instead of having D3DX decompress and recompress every block, which took most of a load; the textures show the artwork's own blocks |
 | `packcache` | keeps the game's pack files and loose data files in Windows' file cache between starts: the game opened them in a way that bypasses the cache, so every start read all its data from disk again |
-| `lookupcache` | remembers, for the rest of the session, each loose file in `data\` that Windows said is not there, so the game's repeated checks for it are answered from memory; loose files that exist (mods) are always found |
+| `lookupcache` | remembers, for the rest of the session, each loose file in `data\` or a mod's folder that Windows said is not there, so the game's repeated checks for it, in loads and end turns, are answered from memory; loose files that exist (mods) are always found |
 | `pathsplit` | builds a battle's pathfinding map on several threads: its searches over the map's triangles are split across helper threads, and the game's second and third tries run alongside the first (the result is the same) |
 
 ## Privacy and safety

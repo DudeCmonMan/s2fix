@@ -17,7 +17,7 @@
 #define TABLE_COUNT 0x8
 #define TABLE_ARRAY 0xc
 #define RECORD_KEY 0x4
-#define CACHE_BITS 12
+#define CACHE_BITS 16
 #define TEB_TLS_SLOTS 0xe10
 #define TEB_TLS_EXPANSION 0xf94
 #define TEB_SLOT_COUNT 64

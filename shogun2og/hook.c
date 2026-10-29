@@ -8,7 +8,7 @@
 
 #define JUMP_SIZE 5
 #define MAX_PATCH_THREADS 2048
-#define MAX_HOOKS 128
+#define MAX_HOOKS 256
 // Trampolines share executable blocks: a VirtualAlloc of its own would take 64 KB of the 32-bit address space each.
 #define TRAMPOLINE_BLOCK_BYTES 0x10000
 #define MAX_HOOK_PATCH 64

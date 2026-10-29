@@ -18,7 +18,7 @@
 #define TABLE_COUNT 0xc
 #define TABLE_ARRAY 0x10
 #define RECORD_KEY 0x8
-#define CACHE_BITS 12
+#define CACHE_BITS 16
 #define REPORT_MS 10000
 
 typedef struct {

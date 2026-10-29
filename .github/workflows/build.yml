@@ -64,13 +64,15 @@ jobs:
           VERSION="${GITHUB_REF_NAME//\//-}" ./package.sh
           sha256sum dist/*.zip
 
-      # These load the fixes package.sh built: lookupcache from modules\ (it runs from shogun2og/), borderless from a
-      # folder laid out as the game's.
+      # These load the fixes package.sh built: lookupcache from each game's modules\ (each runs from its game's folder),
+      # borderless from a folder laid out as the game's.
       - name: Tests against the built fixes
         run: |
           OG_FLAGS="-O2 -Wall -Wextra -Werror -D__USE_MINGW_ANSI_STDIO=1 -static -msse2 -mfpmath=sse -ffp-contract=off -mstackrealign -Ishogun2og"
           i686-w64-mingw32-gcc $OG_FLAGS -o "$RUNNER_TEMP/test_lookupcache_og.exe" shogun2og/tests/test_lookupcache.c
           (cd shogun2og && "$RUNNER_TEMP/test_lookupcache_og.exe")
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -D__USE_MINGW_ANSI_STDIO=1 -static -Ishogun2ce -o "$RUNNER_TEMP/test_lookupcache_ce.exe" shogun2ce/tests/test_lookupcache.c
+          (cd shogun2ce && "$RUNNER_TEMP/test_lookupcache_ce.exe")
           i686-w64-mingw32-gcc $OG_FLAGS -municode -o "$RUNNER_TEMP/test_borderless_og.exe" shogun2og/tests/test_borderless.c
           mkdir -p "$RUNNER_TEMP/borderless/fixes"
           cp shogun2og/modules/borderless.dll "$RUNNER_TEMP/borderless/fixes/"
