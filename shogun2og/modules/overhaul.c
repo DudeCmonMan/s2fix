@@ -615,6 +615,8 @@ static WrappedClass wrapped_classes[WRAPPED_CLASSES];
 static LONG wrapped_class_count;
 static BindingInfo binding_infos[BINDING_INFOS];
 static LONG binding_info_count;
+// The SCENE the learned buffers and binding infos belong to.
+static BYTE *writers_scene;
 static void *unwrapped_callers[MAX_CALLERS], *leak_callers[MAX_CALLERS];
 static volatile LONG unwrapped_caller_count, leak_caller_count;
 static struct {
@@ -751,6 +753,7 @@ static BOOL build_library(void) {
     }
     contexts.record_count = contexts.buffer_count = contexts.data_bytes = 0;
     memset(contexts.index, 0, sizeof contexts.index);
+    uint32_t lookalikes = 0;
     for (uint32_t offset = 0; offset + 0x64 <= LIBRARY_SIZE; offset += 4) {
         int typed = parameter_typed_offset(contexts.shared + offset);
         if (typed < 0) continue;
@@ -760,6 +763,11 @@ static BOOL build_library(void) {
             !read_memory(binding + 0x1c, &buffer, sizeof buffer) || !heap_pointer(buffer) || !read_memory(buffer + 0x28, &shadow, sizeof shadow) ||
             !read_memory(buffer + 0x2c, &bytes, sizeof bytes) || !shadow || !bytes || bytes > 65536 || value < shadow || value >= shadow + bytes)
             continue;
+        // Memory that only looks like a parameter: one seen at a Complete Edition battle load had a shadow of 1.
+        if (!heap_pointer(shadow)) {
+            lookalikes++;
+            continue;
+        }
         int b = add_library_buffer(buffer, binding, shadow, bytes);
         if (b < 0 || contexts.record_count == MAX_LIBRARY_RECORDS) {
             api->log_line("overhaul: paramcontexts: the shader library has more parameters or buffers than the tables hold");
@@ -787,6 +795,7 @@ static BOOL build_library(void) {
     contexts.epoch++;
     api->log_line("overhaul: paramcontexts: %u parameters in %u buffers (%u bytes) in the shader library", contexts.record_count, contexts.buffer_count,
                   contexts.data_bytes);
+    if (lookalikes) api->log_line("overhaul: paramcontexts: %u entries that only looked like parameters were left out", lookalikes);
     return contexts.record_count > 0;
 }
 
@@ -1032,7 +1041,7 @@ static void lock_values(ValueState *state) {
     state->wait_ticks += now_ticks() - waiting;
 }
 
-// Lock-free lookup; entries are added under the value lock and never removed.
+// Lock-free lookup; entries are added under the value lock and removed only between split views.
 static BindingInfo *binding_info(BYTE *binding, BOOL create) {
     uint32_t mask = BINDING_INFOS - 1;
     for (uint32_t i = (uint32_t)((uintptr_t)binding >> 3) * 0x9e3779b9u & mask;; i = (i + 1) & mask) {
@@ -1213,9 +1222,29 @@ static void *const writer_wrappers[WRITER_SLOTS] = {(void *)group_writer_wrapper
 
 static BYTE *job_item(const Job *job);
 
+// A load replaces SCENE (0x1140b6f0 deletes it and allocates another), and with it the buffers the writers were seen
+// writing; one allocated where the old one was holds the same buffers at the same addresses.
+static void forget_replaced_scene(void) {
+    BYTE *scene = *(BYTE **)(*(BYTE **)(engine + ENGINE_RVA) + SCENE_OFFSET);
+    if (scene == writers_scene) return;
+    int learned = 0;
+    for (int i = 0; i < WRAPPED_CLASSES; i++) {
+        for (int s = 0; s < WRITER_SLOTS; s++)
+            for (int k = 0; k < LEARNED_BUFFERS && wrapped_classes[i].learned[s][k]; k++) learned++;
+        memset(wrapped_classes[i].learned, 0, sizeof wrapped_classes[i].learned);
+    }
+    if (writers_scene)
+        api->log_line("overhaul: a load replaced the scene; %d buffers the writers wrote and %ld reference copies are forgotten", learned, binding_info_count);
+    for (int i = 0; i < BINDING_INFOS; i++) free(binding_infos[i].reference);
+    memset(binding_infos, 0, sizeof binding_infos);
+    binding_info_count = 0;
+    writers_scene = scene;
+}
+
 // On main, before a split view's workers start: the writer slots of each effect class it draws point at the wrappers from
 // then on (they pass straight through outside a split view's ranges).
 static void wrap_writers(const ViewSlot *slot) {
+    forget_replaced_scene();
     void **last = NULL;
     for (uint32_t j = 0; j < slot->job_count; j++) {
         void **vtable = **(void ****)(job_item(&slot->jobs[j]) + 0x8);
