@@ -17,8 +17,8 @@
 #include <wincodec.h>
 #include <winternl.h>
 
-// The Complete Edition's render device (g_render_device): the swap chain and the immediate context (its renderer's, at
-// +0x1f0 + 0x10) the screenshots and GPU times use.
+// The Complete Edition's render device, a global: the swap chain and the immediate context (its renderer's, at +0x1f0 +
+// 0x10) the screenshots and GPU times use.
 #define DEVICE_GLOBAL_RVA 0x3450230
 #define D3D11_DEVICE_VTABLE_RVA 0x23de040
 #define SWAP_CHAIN_OFFSET 0x188

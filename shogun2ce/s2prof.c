@@ -49,11 +49,11 @@
 #define FRAME_STAMP_STORE_RVA 0x161fd1
 #define FRAME_STAMP_RVA 0x2ead830
 static const BYTE frame_stamp_store[] = {0x48, 0x89, 0x05, 0x58, 0xb8, 0xd4, 0x02};
-// D3D11_RENDER_DEVICE::present, which runs on the game's main thread.
+// The render device's present, which runs on the game's main thread.
 #define PRESENT_RVA 0x1ae7240
 static const BYTE present_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x6c, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x60};
-// D3D11_RENDER_DEVICE::create_device (vtable +0xd0): D3D11CreateDevice through the global below with flags 1
-// (D3D11_CREATE_DEVICE_SINGLETHREADED); the ID3D11Device goes to +0x180 of g_render_device.
+// The render device's device creation (vtable +0xd0): D3D11CreateDevice through the global below with flags 1
+// (D3D11_CREATE_DEVICE_SINGLETHREADED); the ID3D11Device goes to the render device's +0x180.
 #define CREATE_DEVICE_RVA 0x1ac7e80
 static const BYTE create_device_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x56, 0x57, 0x41, 0x56};
 // D3D11CreateDevice, which the device's constructor looks up in d3d11.dll.

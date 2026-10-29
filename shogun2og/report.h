@@ -33,6 +33,6 @@ void report_init(const ReportHost *host);
 BOOL report_running(void);
 // From the hotkey: runs the sequence on a thread of its own.
 void report_start(void);
-// On the main thread, around the engine's Frame::present.
+// On the main thread, around the engine's present.
 void report_before_present(void);
 void report_after_present(void);

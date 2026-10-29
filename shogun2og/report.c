@@ -1406,7 +1406,7 @@ static DWORD WINAPI report_thread(LPVOID unused) {
     GetLocalTime(&local);
     text_printf(&report, "s2fix debug report, Total War: Shogun 2 (2011)\n%04u-%02u-%02u %02u:%02u:%02u, s2fix %s, run %s\n", local.wYear, local.wMonth, local.wDay,
                 local.wHour, local.wMinute, local.wSecond, host.version, host.run_id);
-    text_printf(&report, "The player kept the camera still. Times are frame-to-frame intervals at the engine's Frame::present; GPU times are D3D11\n"
+    text_printf(&report, "The player kept the camera still. Times are frame-to-frame intervals at the engine's present; GPU times are D3D11\n"
                          "timestamp queries around each frame on the game's immediate context. A/B frames within %d ms of a switch are left out.\n",
                 SKIP_AFTER_FLIP_MS);
 

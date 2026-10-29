@@ -2,10 +2,10 @@
 #include "../checks/powcache.h"
 #include <stdint.h>
 
-// The engine converts colours from gamma to linear space with powf(channel, 2.2): the gamma helpers RigidNode::add_model
-// calls for every mesh of every object, and RIGID_TEXTURE_BLEND_SHADER::set_blend_colours, 24 inline calls per draw
-// chunk. Every call goes to the CRT's __libm_sse2_powf (x in xmm0, y in xmm1, result in xmm0). Objects share few colours,
-// so results with y = 2.2 are cached by input bits; a hit returns what powf computed for those same bits.
+// The engine converts colours from gamma to linear space with powf(channel, 2.2): the gamma helpers called for every
+// mesh of every object as models are added, and 24 inline calls per draw chunk as the rigid blend shader sets its
+// colours. Every call goes to the CRT's __libm_sse2_powf (x in xmm0, y in xmm1, result in xmm0). Objects share few
+// colours, so results with y = 2.2 are cached by input bits; a hit returns what powf computed for those same bits.
 #define POWF_RVA 0x15136d8
 #define GAMMA_BITS 0x400ccccd
 #define SLOT_BITS 12

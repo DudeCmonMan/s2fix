@@ -20,10 +20,10 @@
 // Everything a range touches that the engine shares gets a per-thread copy: the renderer, each draw item's chunker and
 // streams and the rings they allocate from, programs and their bound outputs, texture slots, constant-buffer uploads,
 // and the shader library's parameter values. Stage 2 adds the Variant node's instance-texture fill on a worker beside
-// its keys and sort (prepare), the whole prepare started on workers as BattleView::update ends (earlyprepare), and the
-// next shadow cascade recorded while the current one draws (recordcascades, checked by recordverify); not ported: early
-// effects, view record-ahead and overlap. It counts the draws and instances each mode issues, because a version that
-// drops draws would look faster.
+// its keys and sort (prepare), the whole prepare started on workers as the battle view's update ends (earlyprepare), and
+// the next shadow cascade recorded while the current one draws (recordcascades, checked by recordverify); not ported:
+// early effects, view record-ahead and overlap. It counts the draws and instances each mode issues, because a version
+// that drops draws would look faster.
 #define EXECUTE_RVA 0x140c020
 #define UPLOAD_CONSTANT_BUFFERS_RVA 0x14520b0
 #define ALWAYS_UPDATE_CB_RVA 0x1ca3274
@@ -495,7 +495,7 @@ __declspec(dllexport) volatile LONG overhaul_forced_flags = 0x1be;
 __declspec(dllexport) volatile LONG overhaul_force_bones = 0;
 // The prepare's texture fill on a worker; off until it has run in game.
 __declspec(dllexport) volatile LONG overhaul_prepare_split = 0;
-// The prepare started on two workers as BattleView::update ends, beside the UI update; off until it has run in game.
+// The prepare started on two workers as the battle view's update ends, beside the UI update; off until run in game.
 __declspec(dllexport) volatile LONG overhaul_early_prepare = 0;
 // The next shadow cascade recorded while the current one draws; off until it has run in game.
 __declspec(dllexport) volatile LONG overhaul_record_cascades = 0;
@@ -564,7 +564,7 @@ static void *immediate_lock;
 static BOOL immediate_lock_failed, protected_before, protection_logged;
 static PrepareStats prepare_stats[PREPARE_MODES];
 static uint64_t prepare_stamp;
-// BattleView::update calls counted, the call after which this frame's nodes were prepared, and those nodes.
+// The battle view's update calls counted, the call after which this frame's nodes were prepared, and those nodes.
 static uint64_t update_sequence, prepared_after;
 static BYTE *frame_nodes[EARLY_NODES];
 static int frame_node_count;
@@ -997,7 +997,7 @@ static void context_touch(ValueState *state, BYTE *parameter, BYTE *binding, voi
     }
 }
 
-// SHADER_PARAMETER::touch (0x11498040) follows every parameter write: it bumps the parameter's version (+0x10) and its
+// The parameter touch (0x11498040) follows every parameter write: it bumps the parameter's version (+0x10) and its
 // buffer's (binding +0x20). The engine's increments are not atomic, and a lost one is a missed upload.
 static void __attribute__((thiscall)) touch_hook(BYTE *parameter) {
     BYTE *binding = *(BYTE **)(parameter + 0xc);
@@ -1354,7 +1354,7 @@ static void __attribute__((thiscall)) draw_instanced_hook(BYTE *renderer, UINT v
     ((DrawInstancedFn)original_draws[3])(renderer, vertex_count, instances, start_vertex, start_instance);
 }
 
-// CB uploads and texture streaming reach the renderer through g_render_device->get_renderer(), not execute's argument.
+// CB uploads and texture streaming reach the renderer through the render device's renderer, not execute's argument.
 static BYTE *__attribute__((thiscall)) get_renderer_hook(BYTE *render_device) {
     Worker *worker = current_worker();
     return worker ? worker->renderer : render_device + RENDERER_OFFSET;
@@ -1409,7 +1409,7 @@ static void note_library_slot(const BYTE *slot) {
     if (next < MAX_LIBRARY_SLOTS) contexts.slot_offsets[next] = index * 4;
 }
 
-// SHADER_TEXTURE::set (0x11449ef0), the one writer of texture slots (202 call sites): a worker's lands in its copy.
+// The texture-slot set (0x11449ef0), the one writer of texture slots (202 call sites): a worker's lands in its copy.
 static BYTE *__attribute__((thiscall)) texture_set_hook(BYTE *slot, BYTE *texture) {
     BYTE *passed = slot;
     // The commits read the engine's slots: a set in a thread's library copy is one of the engine's, and the copy's slot
@@ -1428,8 +1428,8 @@ static BYTE *__attribute__((thiscall)) texture_set_hook(BYTE *slot, BYTE *textur
     return passed;
 }
 
-// Device::build_srv_list (0x11452220), behind every stage's SRV commit, as the engine has it (each branch of its switch
-// on the resource kind ends in the same store), reading a worker's copy of the slots it set.
+// The SRV list build (0x11452220), behind every stage's SRV commit, as the engine has it (each branch of its switch on
+// the resource kind ends in the same store), reading a worker's copy of the slots it set.
 static BYTE *__attribute__((thiscall)) build_srv_list_hook(BYTE *list, uint32_t *count, uint32_t *first, BYTE **cache) {
     Worker *worker = current_worker();
     if (!worker || !worker->texture_generation) return original_build_srv_list(list, count, first, cache);
@@ -2807,8 +2807,8 @@ static void __attribute__((thiscall)) node_flush_hook(BYTE *list) {
     original_node_flush(list);
 }
 
-// BattleView::update ends with the frame's render lists and poses complete; the UI update runs next, then the nodes'
-// prepares. The nodes are those prepared after the previous update, one worker each.
+// The battle view's update ends with the frame's render lists and poses complete; the UI update runs next, then the
+// nodes' prepares. The nodes are those prepared after the previous update, one worker each.
 static void __attribute__((thiscall)) battle_view_update_hook(BYTE *battle_view, void *argument) {
     if (GetCurrentThreadId() != *api->main_thread) {
         original_battle_view_update(battle_view, argument);

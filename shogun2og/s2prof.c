@@ -54,7 +54,7 @@
 #define ENGINE_IMAGE_SIZE 0x1d88000u
 #define BUILD_WARNING L"s2fix is not running with the targeted Shogun 2 build, not all fixes may work!"
 #define WAIT_STEP_MS 100
-// Frame::present (g_engine vtbl+0x28c, thiscall) presents once a frame, for DX9 and DX11 alike.
+// The frame's present (the engine object's vtbl+0x28c, thiscall) presents once a frame, for DX9 and DX11 alike.
 #define PRESENT_RVA 0x1401ce0
 static const BYTE present_prologue[] = {0xff, 0x81, 0xcc, 0x9c, 0x06, 0x00};
 // The main tick stores each tick's timestamp at this u64 (low dword first); counting its changes counts frames.

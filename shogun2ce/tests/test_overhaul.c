@@ -84,7 +84,7 @@ static void check(BOOL ok, const char *what) {
     printf("%s %s\n", ok ? "ok" : "FAIL", what);
 }
 
-// The engine's constructor, as far as the overhaul reads it: a cleared SCENE that g_engine points at.
+// The engine's constructor, as far as the overhaul reads it: a cleared SCENE that the engine object points at.
 static BYTE *new_scene(BYTE *at) {
     memset(at, 0, SCENE_BYTES);
     *(BYTE **)(engine_object + 0x30) = at;
@@ -92,7 +92,7 @@ static BYTE *new_scene(BYTE *at) {
 }
 
 // A constant buffer at library offset `at` and its parameter at `parameter_at`, whose value is `value_offset` into the
-// shadow; the device object and the shadow come from the heap, as CONSTANT_BUFFER::create (0x181acb9e0) makes them.
+// shadow; the device object and the shadow come from the heap, as the constant buffer's create (0x181acb9e0) makes them.
 static FakeBuffer add_buffer(BYTE *scene, uint32_t at, uint32_t parameter_at, uint32_t bytes, uint32_t value_offset) {
     BYTE *library = scene + LIBRARY_OFFSET, *device = calloc(1, 0x50);
     FakeBuffer fake = {library + at, library + parameter_at, calloc(1, bytes)};

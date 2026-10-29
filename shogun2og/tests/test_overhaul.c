@@ -90,7 +90,7 @@ static void check(BOOL ok, const char *what) {
     printf("%s %s\n", ok ? "ok" : "FAIL", what);
 }
 
-// The engine's constructor, as far as the overhaul reads it: a cleared SCENE that g_engine points at.
+// The engine's constructor, as far as the overhaul reads it: a cleared SCENE that the engine object points at.
 static BYTE *new_scene(BYTE *at) {
     memset(at, 0, SCENE_BYTES);
     *(BYTE **)(engine_object + SCENE_OFFSET) = at;

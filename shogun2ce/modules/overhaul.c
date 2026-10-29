@@ -14,14 +14,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-// The render overhaul: a view's Draw::execute_pass split into contiguous ranges of its recorded groups. Main draws the
-// first range on the immediate context; each worker runs the engine's own execute loop over its range into a deferred
-// context, and main replays the command lists in range order, so the GPU sees the original draw order. Each range is
-// fed through a private DRAW_CONTEXT whose recorders hand out only that range's groups; a worker gets private copies of
-// each DRAW_ITEM's chunker and streams, and its own clones of the rings they allocate from.
-// With overlap, main does not wait: it records on into its own deferred context while workers draw, and the lists are
-// executed in their original order.
-// It also counts the draws and instances each mode issues, because a version that drops draws would look faster.
+// The render overhaul: a view's execute pass split into contiguous ranges of its recorded groups. Main draws the first
+// range on the immediate context; each worker runs the engine's own execute loop over its range into a deferred context,
+// and main replays the command lists in range order, so the GPU sees the original draw order. Each range is fed through
+// a private DRAW_CONTEXT whose recorders hand out only that range's groups; a worker gets private copies of each
+// DRAW_ITEM's chunker and streams, and its own clones of the rings they allocate from. With overlap, main does not wait:
+// it records on into its own deferred context while workers draw, and the lists are executed in their original order. It
+// also counts the draws and instances each mode issues, because a version that drops draws would look faster.
 #define EXECUTE_RVA 0x19f2940
 #define BIND_PASS_STATE_RVA 0x1ac58d0
 #define UPLOAD_CONSTANT_BUFFERS_RVA 0x1abecc0
@@ -133,8 +132,8 @@
 #define BINDING_INFOS 4096
 #define LIBRARY_GETTER_RVA 0x19f80d0
 #define LIBRARY_OFFSET 0x26c8
-// SHADERS, inline in SCENE ([g_engine+0x30]), up to SCENE's next member: its destructor (0x181a477d0) frees +0xa9f78
-// after the library's own.
+// SHADERS, inline in SCENE ([engine+0x30]), up to SCENE's next member: its destructor (0x181a477d0) frees +0xa9f78 after
+// the library's own.
 #define LIBRARY_SIZE (0xa9f78 - LIBRARY_OFFSET)
 #define LIBRARY_BUFFERS 512
 #define MAX_LIBRARY_RECORDS 8192
@@ -506,7 +505,7 @@ typedef struct {
     uint32_t index, flags, queue;
 } RecordPacket;
 
-// What VegetationNode::record would have stored in a group-instance mesh for the view.
+// What the vegetation node's record would have stored in a group-instance mesh for the view.
 typedef struct {
     BYTE *mesh;
     uint32_t count, bit;
@@ -1284,7 +1283,7 @@ static void context_touch(ValueState *state, BYTE *parameter, BYTE *binding, voi
     }
 }
 
-// SHADER_PARAMETER::touch (0x181aeed70) follows every parameter write: it bumps the parameter's version (+0x20) and its
+// The parameter touch (0x181aeed70) follows every parameter write: it bumps the parameter's version (+0x20) and its
 // buffer's (binding +0x38). The engine's increments are not atomic, and a lost one is a missed upload.
 static void touch_hook(BYTE *parameter) {
     BYTE *binding = *(BYTE **)(parameter + 0x18);
@@ -1641,7 +1640,7 @@ static void draw_indirect_hook(BYTE *renderer, BYTE *arguments, UINT offset) {
     ((DrawIndirectFn)original_draws[4])(renderer, arguments, offset);
 }
 
-// CB uploads and texture streaming reach the renderer through g_render_device->get_renderer(), not execute's argument.
+// CB uploads and texture streaming reach the renderer through the render device's renderer, not execute's argument.
 static BYTE *get_renderer_hook(BYTE *render_device) {
     Worker *worker = current_worker();
     return worker ? worker->renderer : render_device + RENDERER_OFFSET;
@@ -1708,7 +1707,7 @@ static TextureCopy *texture_copy(Worker *worker, BYTE *slot, BOOL create) {
     }
 }
 
-// SHADER_TEXTURE::set (0x181ab6470), the one writer of texture slots (340 call sites): a worker's lands in its copy.
+// The texture-slot set (0x181ab6470), the one writer of texture slots (340 call sites): a worker's lands in its copy.
 static void note_library_slot(const BYTE *slot) {
     uint32_t qword = (uint32_t)(slot - contexts.shared) / 8;
     if (contexts.volatile_qwords[qword] == 2) return;
@@ -1735,8 +1734,8 @@ static BYTE *texture_set_hook(BYTE *slot, BYTE *texture) {
     return passed;
 }
 
-// Device::build_srv_list (0x181abee50), behind every stage's SRV commit, as the engine has it (each branch of its switch
-// on the resource kind ends in the same store), reading a worker's copy of the slots it set.
+// The SRV list build (0x181abee50), behind every stage's SRV commit, as the engine has it (each branch of its switch on
+// the resource kind ends in the same store), reading a worker's copy of the slots it set.
 static BYTE *build_srv_list_hook(BYTE *list, uint32_t *count, uint32_t *first, BYTE **cache) {
     Worker *worker = current_worker();
     if (!worker || !worker->texture_generation) return original_build_srv_list(list, count, first, cache);
@@ -1852,8 +1851,8 @@ static BYTE *ring_allocate_hook(BYTE *holder, BYTE *span, uint64_t renderer, uin
     return original_ring_allocate(holder, span, renderer, bytes, c, d, e);
 }
 
-// Device::upload_constant_buffers (0x181abecc0) as the engine has it, for main's range of a split view, uploading main's
-// own values where it wrote the buffer in its range.
+// The constant-buffer upload (0x181abecc0) as the engine has it, for main's range of a split view, uploading main's own
+// values where it wrote the buffer in its range.
 static BYTE *upload_main_values(BYTE *bindings, uint32_t *count, uint32_t *first, BYTE **cache) {
     BYTE *renderer = *(BYTE **)(engine + RENDER_DEVICE_RVA) + RENDERER_OFFSET;
     *count = *first = 0;
@@ -2445,9 +2444,9 @@ static size_t chunker_size(BYTE *chunker) {
 }
 
 // A group-instance mesh as one view's draws must see it: record writes the view's instance count (+0x1f0) and pass bit
-// (+0x1f4) into the shared mesh (VegetationNode::record 0x181b6cb00), and the chunker's size and the gatherer read them
-// while the next view may already be recording. The view also holds the thread's own chunker (+0x1e8), and the chunker's
-// mesh (+0x28) points back at it.
+// (+0x1f4) into the shared mesh (the vegetation node's record, 0x181b6cb00), and the chunker's size and the gatherer
+// read them while the next view may already be recording. The view also holds the thread's own chunker (+0x1e8), and the
+// chunker's mesh (+0x28) points back at it.
 static BOOL bind_group_view(BYTE *view, BYTE *chunker, const Job *job) {
     BYTE *mesh = *(BYTE **)(job_item(job) + 0x10);
     if (!overhaul_group_gather || *(BYTE **)mesh != engine + GROUP_INSTANCE_MESH_VTABLE_RVA) return FALSE;
@@ -3348,7 +3347,7 @@ static void join_early_prepare(void) {
     early.pending = FALSE;
 }
 
-// BattleView::update ends by joining the producers; the UI update runs next, then the first view group's prepare.
+// The battle view's update ends by joining the producers; the UI update runs next, then the first view group's prepare.
 static void battle_view_update_hook(BYTE *battle_view, BYTE *frame_argument) {
     original_battle_view_update(battle_view, frame_argument);
     uint32_t stamp = scene_stamp();
@@ -3773,8 +3772,8 @@ static uint64_t record_whole_hook(BYTE *effect) {
     return original_record_whole(effect);
 }
 
-// VegetationNode::record (0x181b6cb00) without its stores into the shared meshes: the instance count and pass bit it would
-// store for this view go into the packets, where the cascade's group-instance jobs take them from.
+// The vegetation node's record (0x181b6cb00) without its stores into the shared meshes: the instance count and pass bit
+// it would store for this view go into the packets, where the cascade's group-instance jobs take them from.
 static void vegetation_record_packets(BYTE *queue, BYTE *view, PacketBuffer *buffer) {
     uint32_t count = *(uint32_t *)(queue + 0xdc);
     BYTE **meshes = *(BYTE ***)(queue + 0xe0);
@@ -3996,9 +3995,9 @@ static void open_group(RecordEntry *entry, uint32_t e, BYTE *item, uint32_t inde
     entry->used++;
 }
 
-// BatchRecorder::record (0x1819d2310): a flagged record opens a group; an unflagged one joins the newest earlier group of
-// the same item with room, searching back no further than a flagged group, or is dropped when the recorder has no groups or
-// none spare.
+// The batch recorder's record (0x1819d2310): a flagged record opens a group; an unflagged one joins the newest earlier
+// group of the same item with room, searching back no further than a flagged group, or is dropped when the recorder has
+// no groups or none spare.
 static void batch_record(uint32_t e, BYTE *item, uint32_t index, uint32_t flags) {
     RecordEntry *entry = &build_entries[e];
     if (flags) {
@@ -4060,7 +4059,7 @@ static void grow_batch_groups(BYTE *recorder, uint32_t size) {
 
 // The jobs execute_pass would have drawn had the engine recorded this view: the two threads' packets merged into record
 // order, each bucket's recorders in first-record order (program-sorted where the bucket sorts), a single recorder's indices
-// in record order, a batch recorder's groups as BatchRecorder::record builds them.
+// in record order, a batch recorder's groups as its record builds them.
 static void build_packet_jobs(ViewSlot *slot, BYTE *context, const CascadeRecord *record, BOOL verifying) {
     uint32_t bucket_count = *(uint32_t *)(context + 0x1c);
     BYTE *sort_flags = *(BYTE **)(context + 0x30);
@@ -4379,8 +4378,8 @@ static void kick_early_effects(BYTE *context) {
     for (int e = 0; e < n; e++) kick_task(effects_records[e]->worker, effects_record_task, (BYTE *)effects_records[e]);
 }
 
-// EffectsView::record (0x181b0e980) at the view's turn: what the worker recorded goes into the buckets as the record would
-// have put it there.
+// The effects view's record (0x181b0e980) at the view's turn: what the worker recorded goes into the buckets as the
+// record would have put it there.
 static void effects_record_hook(BYTE *view) {
     CascadeRecord *record = NULL;
     for (int e = 0; e < EARLY_EFFECTS && !record; e++)
