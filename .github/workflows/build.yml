@@ -1,6 +1,6 @@
 name: build-steps
 
-# The build both workflows share: the compilers, the sort and CPU placement tests and both games' zips, uploaded as the
+# The build both workflows share: the compilers, the unit tests and both games' zips, uploaded as the
 # artifact "s2fix".
 # Called by release.yml (every push, pull request and version tag) and pre-release.yml (pre-release tags).
 on:
@@ -36,7 +36,7 @@ jobs:
           7z x -y -bd -o"$RUNNER_TEMP/winlibs-i686" "$RUNNER_TEMP/winlibs-i686.zip" > /dev/null
           cygpath -w "$RUNNER_TEMP/winlibs-i686/mingw32/bin" >> "$GITHUB_PATH"
 
-      - name: Sort and CPU placement tests
+      - name: Unit tests
         run: |
           x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Ishogun2ce -o "$RUNNER_TEMP/test_itemsort_ce.exe" shogun2ce/tests/test_itemsort.c
           "$RUNNER_TEMP/test_itemsort_ce.exe"
@@ -46,6 +46,8 @@ jobs:
           "$RUNNER_TEMP/test_entrysort_og.exe"
           x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Ishogun2ce -o "$RUNNER_TEMP/test_cpupick_ce.exe" shogun2ce/tests/test_cpupick.c
           "$RUNNER_TEMP/test_cpupick_ce.exe"
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -D__USE_MINGW_ANSI_STDIO=1 -static -Ishogun2ce -o "$RUNNER_TEMP/test_overhaul_ce.exe" shogun2ce/tests/test_overhaul.c -lntdll -lsynchronization
+          "$RUNNER_TEMP/test_overhaul_ce.exe"
           i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Ishogun2og -o "$RUNNER_TEMP/test_cpupick_og.exe" shogun2og/tests/test_cpupick.c
           "$RUNNER_TEMP/test_cpupick_og.exe"
 
