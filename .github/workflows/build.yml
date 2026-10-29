@@ -56,11 +56,26 @@ jobs:
           "$RUNNER_TEMP/test_pathsplit_ce.exe"
           i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -msse2 -mfpmath=sse -Ishogun2og -o "$RUNNER_TEMP/test_pathsplit_og.exe" shogun2og/tests/test_pathsplit.c -lsynchronization
           "$RUNNER_TEMP/test_pathsplit_og.exe"
+          i686-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Ishogun2og -o "$RUNNER_TEMP/test_texdirect_og.exe" shogun2og/tests/test_texdirect.c -ld3d11
+          "$RUNNER_TEMP/test_texdirect_og.exe"
 
       - name: Build and package
         run: |
           VERSION="${GITHUB_REF_NAME//\//-}" ./package.sh
           sha256sum dist/*.zip
+
+      # These load the fixes package.sh built: lookupcache from modules\ (it runs from shogun2og/), borderless from a
+      # folder laid out as the game's.
+      - name: Tests against the built fixes
+        run: |
+          OG_FLAGS="-O2 -Wall -Wextra -Werror -D__USE_MINGW_ANSI_STDIO=1 -static -msse2 -mfpmath=sse -ffp-contract=off -mstackrealign -Ishogun2og"
+          i686-w64-mingw32-gcc $OG_FLAGS -o "$RUNNER_TEMP/test_lookupcache_og.exe" shogun2og/tests/test_lookupcache.c
+          (cd shogun2og && "$RUNNER_TEMP/test_lookupcache_og.exe")
+          i686-w64-mingw32-gcc $OG_FLAGS -municode -o "$RUNNER_TEMP/test_borderless_og.exe" shogun2og/tests/test_borderless.c
+          mkdir -p "$RUNNER_TEMP/borderless/fixes"
+          cp shogun2og/modules/borderless.dll "$RUNNER_TEMP/borderless/fixes/"
+          printf '[window]\nborderless=1\nclip_cursor=0\n' > "$RUNNER_TEMP/borderless/s2prof.ini"
+          "$RUNNER_TEMP/test_borderless_og.exe" "$(cygpath -w "$RUNNER_TEMP/borderless")"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
