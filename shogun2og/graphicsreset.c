@@ -25,6 +25,9 @@
 // The device's status (0 working, 3 removed or gone, 4 another failure), as the engine's present path reads it.
 #define DEVICE_STATUS_SLOT (0x104 / 4)
 #define MAX_LISTENERS 16
+// Rebuilds back to back can leave the Complete Edition's shadows flickering, and a held key or a module asking again
+// would otherwise run them so: requests keep this far from the end of the last rebuild.
+#define MIN_GAP_MS 5000
 
 typedef BYTE(__attribute__((thiscall)) *RecoveryFn)(BYTE *engine_object);
 typedef DWORD(__cdecl *ReleaseFn)(int first, int mask);
@@ -51,6 +54,8 @@ static volatile LONG requested;
 static const char *reason;
 static BOOL rebuilding, screen_shown;
 static LARGE_INTEGER started;
+static volatile DWORD last_rebuild_end;
+static volatile LONG rebuilt_once;
 
 static BYTE *engine_object(void) {
     return *(BYTE **)(host.engine + ENGINE_GLOBAL_RVA);
@@ -109,6 +114,8 @@ static BYTE __attribute__((thiscall)) recovery_hook(BYTE *engine) {
                   1000.0 * (double)(ended.QuadPart - started.QuadPart) / (double)frequency.QuadPart,
                   reason && !screen_shown ? " (without the loading screen: not the engine's own kind)" : "");
     rebuilding = screen_shown = FALSE;
+    last_rebuild_end = GetTickCount();
+    InterlockedExchange(&rebuilt_once, 1);
     reason = NULL;
     return result;
 }
@@ -123,11 +130,25 @@ const char *graphics_reset_init(const GraphicsResetHost *reset_host, const char 
     return error;
 }
 
-void graphics_reset_request(const char *why) {
+BOOL graphics_reset_allowed(const char *why) {
     if (!original_recovery) {
         host.log_line("graphics reset: %s: unavailable this session", why);
-        return;
+        return FALSE;
     }
+    if (requested || rebuilding) {
+        host.log_line("graphics reset: %s: not run, one is already asked for or running", why);
+        return FALSE;
+    }
+    DWORD since = GetTickCount() - last_rebuild_end;
+    if (rebuilt_once && since < MIN_GAP_MS) {
+        host.log_line("graphics reset: %s: not run, %.1f s after the last one (resets are at least %d s apart)", why, since / 1000.0, MIN_GAP_MS / 1000);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+void graphics_reset_request(const char *why) {
+    if (!graphics_reset_allowed(why)) return;
     requested_reason = why;
     InterlockedExchange(&requested, 1);
     host.log_line("graphics reset: %s: asked for; it runs at the next frame", why);

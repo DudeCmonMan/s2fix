@@ -43,7 +43,8 @@ typedef struct {
     // NULL when every check holds, else which engine code differs; fixes call it before installing anything.
     const char *(*check_engine)(const S2Check *checks, int count);
     // Asks the engine to release and rebuild every GPU resource it holds, through its own recovery, at the start of the
-    // next frame, with its loading screen shown; any thread may ask.
+    // next frame, with its loading screen shown; any thread may ask. Resets are at least 5 s apart, from the end of the
+    // last rebuild: a request sooner, or while one is asked for or running, is dropped (the log says so).
     // The reason goes to the log, so it must outlive the request: a string literal.
     void (*request_graphics_reset)(const char *reason);
     // before runs on the main thread each time the engine releases GPU resources and after each time it creates them

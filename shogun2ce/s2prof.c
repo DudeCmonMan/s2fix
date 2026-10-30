@@ -939,8 +939,9 @@ static void start_report(void) {
 
 // The escape hatch for a picture gone wrong: the snapshot records the frame on screen and the state, then the engine
 // rebuilds its graphics resources. Without a snapshot (the debug report is running, or perf-logs can't be written) the
-// reset still runs.
+// reset still runs. A press the reset would refuse (too soon after the last one) takes no snapshot either.
 static void snapshot_and_reset(const char *reason) {
+    if (!graphics_reset_allowed(reason)) return;
     init_report();
     if (!report_snapshot(reason, graphics_reset_request)) graphics_reset_request(reason);
 }

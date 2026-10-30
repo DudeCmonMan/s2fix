@@ -14,8 +14,11 @@ typedef struct {
 // NULL once the engine's recovery is hooked, else why requests can't run: unavailable when the host already knows
 // (an engine check failed), or the hook's error. Listeners are kept either way.
 const char *graphics_reset_init(const GraphicsResetHost *host, const char *unavailable);
-// Any thread: the rebuild runs at the start of the next frame, with the engine's loading screen. reason is kept until
-// then: a string literal, or one that lives as long.
+// FALSE, the reason logged, when a request now would not run: the reset is unavailable, one is already asked for or
+// running, or the last rebuild ended less than 5 s ago.
+BOOL graphics_reset_allowed(const char *reason);
+// Any thread: the rebuild runs at the start of the next frame, with the engine's loading screen, unless
+// graphics_reset_allowed refuses it. reason is kept until then: a string literal, or one that lives as long.
 void graphics_reset_request(const char *reason);
 // before runs on the main thread each time the engine releases GPU resources, after each time it creates them again,
 // whatever started it; a rebuild can release more than once before it creates.

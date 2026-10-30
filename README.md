@@ -77,8 +77,8 @@ report. Then the game releases and rebuilds all of its graphics, the way it reco
 the loading screen shows for a moment (longer with the fixes off) and the game carries on. If the problem comes back,
 attach the snapshot to your issue.
 
-On the Complete Edition, after several resets in quick succession, shadows can flicker as the camera moves over an
-area. Leave a few seconds between resets.
+Resets are at least 5 seconds apart: a press sooner does nothing, and the log says why. On the Complete Edition, after
+several resets in a row, shadows can flicker as the camera moves over an area.
 
 ## Shogun 2 — Complete Edition
 
