@@ -4,10 +4,8 @@
 #include <stdio.h>
 #include "exports.h"
 
-// Loaded from the game folder in place of the system d3d11.dll, which the engine loads by bare name as it creates its
-// D3D11 device (0x1144fc42), so only in DirectX 11 mode. Every export jumps to the system DLL's. Inside the game it
-// also loads the host (s2prof.dll) before returning: the host puts its device-time patches in place as it loads, so
-// they are there before the engine creates its device. Without the host the proxy only forwards.
+// Stands in for the system d3d11.dll, which the engine loads by bare name in DX11 mode, and loads the host, so its
+// device-time patches are in before the engine creates its device.
 #define HOST_FILE L"s2prof.dll"
 #define ENGINE_MODULE L"empire.retail.dll"
 #define LOG_FOLDER L"perf-logs"
@@ -83,8 +81,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     }
     D3D11_EXPORTS(RESOLVE)
     log_line("proxy loaded");
-    // Here, before the engine's LoadLibrary returns, as the system DLL above: the host's device-time patches then come
-    // before anything the engine does next.
+    // Before the engine's LoadLibrary returns, so the host's patches precede anything the engine does next.
     load_host();
     return TRUE;
 }

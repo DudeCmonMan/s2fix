@@ -30,7 +30,7 @@ static int reserve(size_t count) {
     return 1;
 }
 
-// 11-bit digits: 6 passes for a 64-bit key instead of 8, 10-13% faster on list A's keys (offline, 8,460 keys).
+// 11-bit digits: 6 passes for a 64-bit key instead of 8.
 #define DIGIT_BITS 11
 #define DIGITS ((64 + DIGIT_BITS - 1) / DIGIT_BITS)
 #define BUCKETS (1u << DIGIT_BITS)

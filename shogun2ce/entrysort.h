@@ -1,8 +1,7 @@
 #pragma once
 #include "itemsort.h"
 
-// Objects as the engine's per-entry std::sort sees them: a model pointer at +0x28 (64-bit key at +8, position at +0xf8)
-// and a 32-bit id at +0x27c, ordered by key, then id, then squared distance to the camera.
+// The engine's per-entry std::sort orders by model key, then id, then squared distance to the camera.
 #define ENTRY_MODEL_OFFSET 0x28
 #define ENTRY_ID_OFFSET 0x27c
 #define MODEL_KEY_OFFSET 0x8

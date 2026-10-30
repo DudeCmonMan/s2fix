@@ -32,7 +32,7 @@
 #define MAX_THREADS 512
 #define MAX_MODULES 1024
 #define MAX_DEPTH 64
-// Without unwind data the profiler scans the stack for return addresses; deeper scans find more frames and cost more.
+// Deeper stack scans find more frames but cost more.
 #define FULL_RATE_SCAN_BYTES (32 * 1024)
 #define OTHER_SCAN_BYTES (8 * 1024)
 #define MAX_EXEC_RANGES 4
@@ -55,30 +55,30 @@
 #define ENGINE_IMAGE_SIZE 0x1d88000u
 #define BUILD_WARNING L"s2fix is not running with the targeted Shogun 2 build, not all fixes may work!"
 #define WAIT_STEP_MS 100
-// The frame's present (the engine object's vtbl+0x28c, thiscall) presents once a frame, for DX9 and DX11 alike.
+// The engine's present (thiscall) runs once a frame, in DX9 and DX11 alike.
 #define PRESENT_RVA 0x1401ce0
 static const BYTE present_prologue[] = {0xff, 0x81, 0xcc, 0x9c, 0x06, 0x00};
-// The main tick stores each tick's timestamp at this u64 (low dword first); counting its changes counts frames.
+// The main tick stores its u64 timestamp here, low dword first; counting the changes counts frames.
 #define FRAME_STAMP_STORE_RVA 0xb68d0
 #define FRAME_STAMP_RVA 0x17cc340
 static const BYTE frame_stamp_store[] = {0xa3, 0x40, 0xc3, 0x7c, 0x11};
-// g_device holds the D3D11 or the D3D9 render device; their vtables tell the two apart.
+// The engine's device global holds its D3D11 or D3D9 device; their vtables tell the two apart.
 #define DEVICE_GLOBAL_RVA 0x1c9a93c
 #define D3D11_DEVICE_VTABLE_RVA 0x17666f8
 #define D3D9_DEVICE_VTABLE_RVA 0x1766c68
-// The engine stores its device object at its start; a D3D11 one is created once it holds its ID3D11Device.
+// The D3D11 device object exists before its ID3D11Device: null here means not created yet.
 #define D3D11_DEVICE_INTERFACE 0xb8
 #define DX9_MESSAGE L"Game launched with DX9, s2fix will not load the DX11 fixes."
 #define LATE_MESSAGE                                                                                                      \
     L"s2fix was loaded after the game set up its graphics, so some of its fixes are off this session. Keep s2fix's "  \
     L"d3d11.dll in the game folder so it loads with the game."
-// The engine's D3D11 device creation (thiscall, ret 0x18; D3D11 device vtable slot 24): the device, then its swap chain.
+// The engine's D3D11 device creation (thiscall, ret 0x18): the device, then its swap chain.
 #define CREATE_DEVICE_RVA 0x145fdb0
 static const BYTE create_device_prologue[] = {0x83, 0xec, 0x0c, 0x53, 0x56};
 // Its D3D11CreateDevice Flags argument: push 1, D3D11_CREATE_DEVICE_SINGLETHREADED.
 #define DEVICE_FLAGS_RVA 0x145fe67
 static const BYTE single_threaded_flags[] = {0x6a, 0x01}, multithreaded_flags[] = {0x6a, 0x00};
-// The fixes install in well under a second; past this the device is created without them.
+// Past this the device is created without the fixes, which install far sooner.
 #define HOLD_WAIT_MS 30000
 static const char *const mode_names[2] = {"off", "on"};
 
@@ -215,7 +215,7 @@ static Switch switches[MAX_SWITCHES] = {{"fixes", &fixes_enabled, NULL}};
 static int switch_count = 1;
 static FixRecord fix_records[MAX_FIXES];
 static int fix_count;
-// The fix being installed (its index + 1, which is also its write group); 0 when none.
+// The installing fix's index + 1, which is also its write group; 0 when none.
 static int open_fix;
 static char loading_module[MAX_PATH];
 static BOOL loading_fixes;
@@ -378,7 +378,7 @@ static BOOL collect_threads(void) {
         NtQueryInformationThread(handle, (THREADINFOCLASS)THREAD_WIN32_START_ADDRESS_CLASS, &thread->start_address, sizeof thread->start_address, NULL);
         thread->is_main = thread->start_address == entry_point;
         read_thread_name(thread);
-        // Workers of a future parallel renderer do main-thread work, so they would be sampled at main's rate.
+        // A parallel renderer's workers do main-thread work, so they're sampled at main's rate.
         thread->full_rate = thread->is_main || !strncmp(thread->name, "overhaul", 8);
         thread_count++;
     }
@@ -446,7 +446,7 @@ static BOOL in_exec_range(const Module *module, uintptr_t address) {
     return FALSE;
 }
 
-// A return address follows a call: rel32, through a register, or through memory (absolute, [reg], [reg+disp], SIB forms).
+// A return address must follow a call, in any of its encodings.
 static BOOL follows_call(const BYTE *code) {
     if (code[-5] == 0xe8) return TRUE;
     if (code[-2] == 0xff && (code[-1] & 0xf8) == 0xd0) return TRUE;
@@ -459,7 +459,7 @@ static BOOL follows_call(const BYTE *code) {
     return FALSE;
 }
 
-// There is no unwind data and the engine omits frame pointers, so the frames are the stack slots that hold a return address.
+// No unwind data and no frame pointers, so the frames are the stack slots that hold a return address.
 static int scan_frames(uintptr_t eip, uintptr_t esp, uintptr_t stack_base, size_t scan_bytes, uintptr_t *frames) {
     int depth = 0;
     frames[depth++] = eip;
@@ -482,14 +482,14 @@ static int walk_stack(const Thread *thread, uintptr_t *frames) {
     return scan_frames(context.Eip, context.Esp, thread->stack_base, thread->full_rate ? FULL_RATE_SCAN_BYTES : OTHER_SCAN_BYTES, frames);
 }
 
-// Error-severity NTSTATUS codes and MSVC C++ exceptions; informational ones (thread naming, debug prints) are skipped.
+// Informational exceptions (thread naming, debug prints) are not crashes.
 static BOOL is_reported(DWORD code) {
     return (code & 0xc0000000u) == 0xc0000000u || code == CPP_EXCEPTION_CODE;
 }
 
 #define DUMPED_BYTES 64
 
-// The bytes a register points at, when that is committed readable memory: the objects the faulting code was using.
+// The registers point at the objects the faulting code was using.
 static void log_memory(const char *name, DWORD address) {
     MEMORY_BASIC_INFORMATION region;
     if (!VirtualQuery((void *)(uintptr_t)address, &region, sizeof region) || region.State != MEM_COMMIT || (region.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
@@ -501,8 +501,7 @@ static void log_memory(const char *name, DWORD address) {
     log_line("  [%s] %s", name, text);
 }
 
-// First chance, so the report is written before the game's own crash handling; a fault something later handles is
-// reported too, which is why only the first few are.
+// First chance, to beat the game's crash handling; handled faults are reported too, hence the cap.
 static LONG CALLBACK report_crash(EXCEPTION_POINTERS *pointers) {
     const EXCEPTION_RECORD *record = pointers->ExceptionRecord;
     if (!is_reported(record->ExceptionCode) || InterlockedIncrement(&crash_reports) > MAX_CRASH_REPORTS) return EXCEPTION_CONTINUE_SEARCH;
@@ -580,7 +579,7 @@ static BOOL record_stack(uint32_t key, const uintptr_t *frames, int depth) {
     }
 }
 
-// Thread cycle times count at the invariant TSC rate; GetThreadTimes only advances in 15.6 ms ticks.
+// Cycle times, since GetThreadTimes only advances in 15.6 ms ticks.
 static double cpu_percent(const Thread *thread, const CaptureStats *stats, int mode) {
     return stats->seconds[mode] > 0 ? 100.0 * thread->cycles[mode] / (stats->seconds[mode] * stats->tsc_hz) : 0;
 }
@@ -850,9 +849,9 @@ static BOOL sample(HANDLE timer, CaptureStats *stats, int seconds) {
     return accumulate_counters(mode);
 }
 
-// ab is the switch an A/B capture alternates, or NULL for a plain capture, whose profile splits by the fix switch.
 static BOOL capture_quiet;
 
+// ab alternates in an A/B capture; NULL for a plain capture, whose profile splits by the fix switch.
 static void capture(int seconds, Switch *ab) {
     if (ab && refused_in_dx9("the A/B capture")) return;
     int number = capture_number++;
@@ -891,8 +890,7 @@ static void capture(int seconds, Switch *ab) {
     if (!capture_quiet) MessageBeep(ok ? MB_ICONASTERISK : MB_ICONHAND);
 }
 
-// The debug report drives these: the switches, and the A/B capture without its own beeps (the report beeps once at its
-// start and once at its end).
+// The debug report drives these; its A/B capture is quiet, as the report beeps at its own start and end.
 
 static int report_switch_count(void) {
     return switch_count;
@@ -936,9 +934,7 @@ static void start_report(void) {
     report_start();
 }
 
-// The escape hatch for a picture gone wrong: the snapshot records the frame on screen and the state, then the engine
-// rebuilds its graphics resources. Without a snapshot (the debug report is running, or perf-logs can't be written) the
-// reset still runs. A press the reset would refuse (too soon after the last one) takes no snapshot either.
+// The escape hatch for a broken picture: snapshot the frame and state, then rebuild the graphics resources.
 static void snapshot_and_reset(const char *reason) {
     if (refused_in_dx9("the graphics reset") || !graphics_reset_allowed(reason)) return;
     init_report();
@@ -984,14 +980,13 @@ static DWORD WINAPI notice_thread(LPVOID text) {
     return 0;
 }
 
-// On a thread of its own, so the controller goes on (after the late notice, to install the fixes).
+// On its own thread, so the controller goes on to install the fixes.
 static void show_notice(const wchar_t *text) {
     HANDLE thread = CreateThread(NULL, 0, notice_thread, (LPVOID)text, 0, NULL);
     if (thread) CloseHandle(thread);
 }
 
-// The fixes are built and tested for DX11 only. In DX9, from the start or after a DX11 start fell back, none stays
-// installed and the player is told, so they can switch to DX11 in the game's options.
+// The fixes are DX11 only: in DX9 none stays installed, and the player is told so they can switch.
 static void stop_for_dx9(void) {
     renderer_dx9 = TRUE;
     for (int i = 0; i < switch_count; i++) *switches[i].flag = 0;
@@ -1121,7 +1116,7 @@ static const char *check_engine(const S2Check *checks, int count) {
     return NULL;
 }
 
-// What the hold does as the engine starts its D3D11 renderer; exported for the offline checks, which have no renderer.
+// The hold's start; exported for the offline checks, which have no renderer.
 __declspec(dllexport) void s2prof_renderer_starting(void) {
     hold_ran = TRUE;
     SetEvent(renderer_event);
@@ -1142,7 +1137,7 @@ static void log_fix_summary(ULONGLONG milliseconds) {
              milliseconds);
 }
 
-// For the offline install check: the engine writes s2prof holds, and the fix (write group) each belongs to.
+// For the offline install check: s2prof's engine writes, and the fix each belongs to.
 __declspec(dllexport) int s2prof_live_writes(LiveWrite *out, int capacity) {
     return list_live_writes(out, capacity);
 }
@@ -1222,8 +1217,7 @@ static void load_modules(const wchar_t *dir) {
     FindClose(search);
 }
 
-// Shows the log live. Closing a console ends its process, the game, so the window has no close
-// button and ignores Ctrl+C. It opens while the game starts, before it has a window to take focus from.
+// Closing a console ends the game, so it has no close button and ignores Ctrl+C.
 static DWORD open_console(void) {
     if (!GetPrivateProfileIntW(L"s2prof", L"console", 0, config_path)) return ERROR_SUCCESS;
     // ACCESS_DENIED means the process already has a console, such as when started from one; that one is used.
@@ -1245,7 +1239,7 @@ static BYTE __attribute__((thiscall)) create_device_hook(BYTE *device, DWORD a, 
     return original_create_device(device, a, b, c, d, e, f);
 }
 
-// The device may be created soon after the engine loads, so its patches go in at once, as s2fix or the engine loads.
+// The device may be created soon after the engine loads, so its patches go in at once.
 static void engine_loaded(BYTE *base) {
     engine = base;
     const char *error = S2_CHECK_ENGINE(&module_api, device_checks);
@@ -1378,7 +1372,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     wcscpy(config_path, output_dir);
     wcscpy(wcsrchr(config_path, L'\\'), L"\\s2prof.ini");
     wcscpy(wcsrchr(output_dir, L'\\'), L"\\perf-logs");
-    // The thread first: a load that fails must leave no hook behind. It waits for the engine.
+    // The thread first, so a failed load leaves no hook behind.
     HANDLE thread = CreateThread(NULL, 0, controller, NULL, 0, NULL);
     if (!thread) return FALSE;
     CloseHandle(thread);

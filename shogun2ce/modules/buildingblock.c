@@ -1,29 +1,19 @@
 #include "../patchset.h"
 #include "../checks/buildingblock.h"
 
-// The building draw (0x1803d0c40) runs, for every piece whose damage ratio x 0.7 is not exactly 1 (or whose level holds a
-// zero at +0xe0, which jumps straight in), a loop over every other piece of the building: a pure distance function
-// (0x18027e6a0) plus 5 and a square root (0x1802d64a0), whose results are dropped. So the loop, O(pieces squared) per
-// building per frame, does no work the frame uses. Its entry (0x1803d0e7d, reached both ways) becomes a jmp to the join at
-// 0x1803d0ec9, the engine's own skip path: rbx is written before it is read again, and the volatile registers are the
-// loop's calls' to clobber.
-//
-// That ratio is then computed for nothing, per piece per frame: dependent loads through the piece's level list, each a
-// likely cache miss. Its only reader is the compare feeding the je before the loop. buildingratio jumps from its first
-// load (0x1803d0e0d) to that je, whose flags then always skip the loop; the ratio only writes volatile registers, so
-// nothing after the join reads them. Either switch is safe alone.
+// The building draw runs a pairwise loop per damaged piece whose results nothing reads; a jmp takes the engine's skip
+// path. buildingratio also skips the ratio, whose only reader is that test. Either switch is safe alone.
 
-// 0 runs the loop (0 computes the ratio); exported, and switches, so each can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG skip_enabled = 1;
 __declspec(dllexport) volatile LONG ratio_skip_enabled = 1;
 
 static CodePatch patches[] = {
-    // xor ebx,ebx -> jmp short 0x1803d0ec9.
+    // xor ebx,ebx -> jmp short 0x1803d0ec9; rbx is written again before its next read.
     {0x3d0e7d, 2, {0x33, 0xdb}, {0xeb, 0x4a}},
 };
 
 static CodePatch ratio_patches[] = {
-    // mov rax,[r14+0x30] -> jmp short 0x1803d0e7b; nop; nop.
+    // mov rax,[r14+0x30] -> jmp short 0x1803d0e7b; nop; nop. The ratio only writes volatile registers.
     {0x3d0e0d, 4, {0x49, 0x8b, 0x46, 0x30}, {0xeb, 0x6c, 0x90, 0x90}},
 };
 

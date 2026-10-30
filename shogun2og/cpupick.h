@@ -3,13 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
-// The CPU placement rules, apart from Windows so they can be checked on any layout. They read only what Windows reports
-// for each logical CPU, never a CPU model. Main gets the best-ranked core of the fastest core type's largest cache group
-// (a CCD, or the P-cores); the other threads stay in that group, SMT twins included, when it leaves them enough CPUs, and
-// otherwise go wide. One CCD of 8 SMT cores runs the game as well as every CPU, while too few CPUs freeze frames when
-// the camera moves, and main held to one CPU stalls.
+// CPU placement apart from Windows, so any layout can be checked; it reads what Windows reports per CPU, never a model.
+// Main gets the best core of the fastest, largest cache group; the others stay in that group when it has enough CPUs.
 #define CPU_MAX 64
-// A 6-core SMT group less main's core, expected to behave like the 8-core one measured.
+// A 6-core SMT group less main's core; fewer CPUs freeze frames as the camera moves.
 #define CPU_MIN_OTHERS 10
 
 typedef struct {
@@ -48,8 +45,7 @@ static inline int cpu_count_of(uint64_t mask) {
     return __builtin_popcountll(mask);
 }
 
-// The fastest-type CPUs sharing cpu's last-level cache. On a hybrid CPU the slower cores share the L3 too, or sit on a
-// cache of their own (low-power cores), so the type is filtered first.
+// Type first: on a hybrid CPU the slower cores share the L3 too, or sit on a cache of their own.
 static inline uint64_t cpu_group(const CpuInfo *cpus, int count, int cpu) {
     uint8_t fastest = 0;
     uint64_t mask = 0;
@@ -77,8 +73,7 @@ static inline uint8_t cpu_best_rank(const CpuInfo *cpus, int count, uint64_t mas
     return best;
 }
 
-// number < 0 applies the rules: the largest L3, then the highest-ranked core (SchedulingClass, undocumented, higher is
-// preferred), then the first group. Returns the group's first CPU, or -1 when the numbered group does not exist.
+// number < 0 applies the rules; SchedulingClass is undocumented, higher preferred. -1 when there's no such group.
 static inline int cpu_pick_group(const CpuInfo *cpus, int count, int number, const char **why) {
     int firsts[CPU_MAX] = {0}, groups = cpu_groups(cpus, count, firsts);
     if (number >= 0) {
@@ -101,8 +96,7 @@ static inline int cpu_pick_group(const CpuInfo *cpus, int count, int number, con
     return best;
 }
 
-// The group's highest-ranked core, as its first CPU. Between equal ones CPU 0's core comes last: Windows and drivers
-// favour CPU 0 for system work.
+// Between equal cores CPU 0's comes last: Windows and drivers favour CPU 0 for system work.
 static inline int cpu_main_cpu(const CpuInfo *cpus, int count, uint64_t group) {
     int best = -1;
     for (int c = 0; c < count; c++) {
@@ -114,10 +108,7 @@ static inline int cpu_main_cpu(const CpuInfo *cpus, int count, uint64_t group) {
     return best;
 }
 
-// confine keeps the others in the group; own_core keeps them off main's core; twins 0 thins a confined group to one CPU
-// per core, for measuring. Main is held to its core when the core has two CPUs; on a core of one it may also use the
-// others' CPUs (held to one CPU it stalled), with main_cpu as its preferred CPU. main_cpu -1: main runs with the others.
-// others 0: no restriction.
+// Main on a one-CPU core may use the others' CPUs too, or it stalls. main_cpu -1: with the others; others 0: any.
 static inline CpuPlacement cpu_placement(const CpuInfo *cpus, int count, int group_cpu, int confine, int own_core, int twins) {
     uint64_t all = cpu_all(count), group = cpu_group(cpus, count, group_cpu);
     int main_cpu = cpu_main_cpu(cpus, count, group);
@@ -128,7 +119,6 @@ static inline CpuPlacement cpu_placement(const CpuInfo *cpus, int count, int gro
     return (CpuPlacement){main_cpu, cpu_count_of(main_core) > 1 ? main_core : main_core | others, others};
 }
 
-// "0-15", "0,2,4,6" or "0-3,8".
 static inline const char *cpu_list(uint64_t mask, char *text, size_t size) {
     size_t used = 0;
     text[0] = 0;
@@ -143,7 +133,7 @@ static inline const char *cpu_list(uint64_t mask, char *text, size_t size) {
     return text;
 }
 
-// One line per cache and core type: its CPUs, cores, L3 and each core's rank, so a log shows what the rules read.
+// So a log shows what the rules read.
 static inline void cpu_describe(const CpuInfo *cpus, int count, void (*log_line)(const char *format, ...)) {
     for (int c = 0; c < count; c++) {
         uint64_t set = 0;

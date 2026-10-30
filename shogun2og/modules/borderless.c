@@ -5,24 +5,8 @@
 #include <wchar.h>
 #include <windowsx.h>
 
-// Borderless windowed, set by [window] borderless=1 in s2prof.ini (read at start): the game's windowed mode
-// (gfx_fullscreen false) in a window without a frame that covers its monitor. The game renders at the resolution chosen
-// in its options and DXGI scales the frame to the window. Fullscreen mode is left alone. [window] clip_cursor=1 also
-// keeps the cursor on that monitor while the game has focus: the engine never confines it, so with several monitors edge
-// scrolling would push it onto the next one.
-//
-// - The window is restyled on the main thread, from the engine's PeekMessageW, once the swap chain exists: restyling a
-//   window sends it messages synchronously, and the main thread is blocked in D3D11CreateDevice while the fixes install.
-// - The engine restyles and moves its window again on a mode or resolution change (around 0x114166ef); its imports of
-//   SetWindowLongW, SetWindowPos and MoveWindow keep the frame off and the window on its monitor. A popup style the engine
-//   sets itself is fullscreen, which hands the window back to it.
-// - The engine takes the window's client size as its resolution (the display change at 0x114167de, WM_SIZE 0x11401695,
-//   the settings refresh 0x113fd793), so its GetClientRect of the window reports the size the engine asked for: the size
-//   in its settings, which it created the window for (Windows makes a window larger than the desktop smaller, as at a
-//   downsampling resolution on one monitor), then each MoveWindow's size less the frame of the style it set.
-// - The engine reads the cursor from mouse messages in client coordinates (window procedure 0x1009d2e0) and never scales
-//   them, so they are scaled from the window to that size, the first pixel to the first and the last to the last at any
-//   scale, so edge scrolling still reaches the edges.
+// Borderless windowed: the game's windowed mode in a frameless window covering its monitor, rendering at the chosen
+// resolution scaled by DXGI; clip_cursor keeps edge scrolling from pushing the cursor onto another monitor.
 #define WINDOW_RVA 0x1c9a938
 #define SETTINGS_RVA 0x1c9a924
 #define SETTINGS_WINDOWED_OFFSET 0x1c
@@ -52,7 +36,6 @@ static MoveWindowFn real_move_window;
 static PeekMessageFn real_peek_message;
 static GetClientRectFn real_get_client_rect;
 static BOOL borderless_wanted, clip_wanted, cursor_clipped;
-// The window this module made borderless; NULL while the engine runs it fullscreen.
 static volatile HWND borderless_window;
 static LONG engine_style;
 static SIZE game_resolution;
@@ -89,7 +72,7 @@ static void log_layout(HWND window) {
                   monitor.right - monitor.left, monitor.bottom - monitor.top, monitor.left, monitor.top, game_resolution.cx, game_resolution.cy);
 }
 
-// The engine sized the window for the resolution in its settings before handing it over.
+// From the settings, not the window: Windows shrinks a window larger than the desktop (a downsampling resolution).
 static void take_window(HWND window) {
     if (window == borderless_window) return;
     BYTE *settings = *(BYTE **)(api->engine + SETTINGS_RVA);
@@ -125,7 +108,7 @@ static void update_cursor_clip(HWND window) {
     }
 }
 
-// Mouse messages carry client coordinates, except the wheels' screen coordinates.
+// Maps first to first and last to last pixel, so edge scrolling reaches the edges; wheels carry screen coordinates.
 static void scale_mouse(MSG *message) {
     if (message->hwnd != borderless_window || message->message < WM_MOUSEFIRST || message->message > WM_MOUSELAST ||
         message->message == WM_MOUSEWHEEL || message->message == WM_MOUSEHWHEEL)
@@ -137,6 +120,7 @@ static void scale_mouse(MSG *message) {
     message->lParam = MAKELPARAM(x, y);
 }
 
+// Restyled from main's message loop: restyling sends messages synchronously, and main is in device creation at install.
 static BOOL WINAPI peek_message_hook(MSG *message, HWND window, UINT first, UINT last, UINT remove) {
     if (GetCurrentThreadId() == *api->main_thread) {
         ULONGLONG now = GetTickCount64();
@@ -153,12 +137,14 @@ static BOOL WINAPI peek_message_hook(MSG *message, HWND window, UINT first, UINT
     return found;
 }
 
+// The engine takes the client size as its resolution, so it gets the size it asked for, not the monitor's.
 static BOOL WINAPI get_client_rect_hook(HWND window, RECT *rect) {
     if (window != borderless_window) return real_get_client_rect(window, rect);
     *rect = (RECT){0, 0, game_resolution.cx, game_resolution.cy};
     return TRUE;
 }
 
+// The engine restyles its window at mode changes; its own popup style is fullscreen, which hands the window back.
 static LONG WINAPI set_window_long_hook(HWND window, int index, LONG value) {
     if (window == game_window()) {
         if (index == GWL_STYLE && (value & WS_CAPTION)) {
@@ -206,7 +192,7 @@ static const struct {
                {PEEK_MESSAGE_IAT_RVA, "PeekMessageW", (void *)peek_message_hook, (void **)&real_peek_message},
                {GET_CLIENT_RECT_IAT_RVA, "GetClientRect", (void *)get_client_rect_hook, (void **)&real_get_client_rect}};
 
-// s2prof.ini sits next to the game, two folders up from fixes\borderless.dll.
+// s2prof.ini is two folders up from fixes\borderless.dll.
 static void read_settings(void) {
     wchar_t path[MAX_PATH];
     HMODULE self = NULL;

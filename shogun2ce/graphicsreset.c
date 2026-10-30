@@ -2,19 +2,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
-// The engine marks its device lost (engine +0x6995f) after a failed status check. As each frame starts, its frame
-// render (0x1819ee180, called from the frame step at 0x1819dfebe; before the scene is drawn) recovers a lost device:
-// with the device still working it releases what every resource manager holds (0x181a85a70), clears the mark, creates
-// it all again (0x181a85950) and draws the frame; a device that is gone is created first. Marking the device lost is the
-// engine's own way to ask for that rebuild, so a requested reset marks it inside that call, just before the frame render
-// reads it (marked earlier, the frame step's callbacks and the presents a load makes as it goes would see a lost
-// device), and shows the engine's loading screen while the rebuild runs, as its graphics options do when they apply a
-// change. The screen's own shown byte can't tell whether it is up: the options show it and never hide it. The call is
-// reached through a jump placed within rel32 reach of the engine. Listeners are told at the engine's releases of GPU
-// resources (all of them, 0x181a85a70, or by kind, 0x181a85b10) and at its creation (0x181a85950), which the recovery,
-// the graphics options and a shadow, depth-of-field or distortion change go through. A load's scene teardown releases
-// through its own copy of that walk (0x181a5d7c0), which isn't followed: listeners hear only the load's creation. The
-// release of all leaves no room for a jump before its first RIP-relative load, so it is replaced by the same walk.
+// A reset marks the device lost, the engine's own way to ask its frame render for a rebuild, just as that render reads
+// it: marked earlier, callbacks and a load's presents would see a lost device. Listeners hear its releases and creation.
 #define ENGINE_GLOBAL_RVA 0x3457888
 #define DEVICE_LOST 0x6995f
 #define SCENE_SLOT (0x138 / 8)
@@ -39,11 +28,10 @@
 #define LOADING_HIDE_RVA 0x1a690c0
 #define DEVICE_GLOBAL_RVA 0x3450230
 #define D3D11_DEVICE_VTABLE_RVA 0x23de040
-// The device's status (0 working, 3 removed or gone, 4 another failure), as the engine's frame render reads it.
+// The device's status, as the engine's frame render reads it.
 #define DEVICE_STATUS_SLOT (0x298 / 8)
 #define MAX_LISTENERS 16
-// Rebuilds back to back can leave the Complete Edition's shadows flickering, and a held key or a module asking again
-// would otherwise run them so: requests keep this far from the end of the last rebuild.
+// Back-to-back rebuilds, from a held key or a module asking again, can leave the Complete Edition's shadows flickering.
 #define MIN_GAP_MS 5000
 #define NEAR_BYTES 0x10000
 
@@ -74,7 +62,7 @@ static volatile LONG listener_count;
 static SRWLOCK listen_lock = SRWLOCK_INIT;
 static const char *volatile requested_reason;
 static volatile LONG requested;
-// Main thread only: the running rebuild, and the reason it was asked for (NULL for the engine's own).
+// Main thread only; NULL for the engine's own rebuild.
 static const char *reason;
 static BOOL rebuilding, screen_shown;
 static LARGE_INTEGER started;
@@ -85,8 +73,7 @@ static BYTE *engine_object(void) {
     return *(BYTE **)(host.engine + ENGINE_GLOBAL_RVA);
 }
 
-// The loading screen the engine made at its start, shown or hidden through its own methods; FALSE if it is not the
-// engine's own kind.
+// FALSE if the loading screen is not the engine's own kind.
 static BOOL loading_screen(BOOL show) {
     BYTE *screen = *(BYTE **)(engine_object() + LOADING_SCREEN);
     void **vtable = screen ? *(void ***)screen : NULL;
@@ -103,7 +90,7 @@ static void notify(BOOL before) {
     }
 }
 
-// The engine's walk: the managers last to first, each counted afresh as a release can drop one, then the callbacks.
+// Replaces the engine's walk, which has no room for a jump; the count is re-read, as a release can drop a manager.
 static void release_all_hook(int mask) {
     notify(TRUE);
     BYTE *engine = host.engine;
@@ -129,8 +116,7 @@ static BYTE create_hook(int mask) {
     return result;
 }
 
-// The frame render's own test for recovering now: a scene, in a window that isn't minimised. A request waits otherwise,
-// so the device is never marked lost while nothing would rebuild it.
+// The frame render's own test, so the device is never marked lost while nothing would rebuild it.
 static BOOL recovers_now(BYTE *engine) {
     return ((SceneFn)(*(void ***)engine)[SCENE_SLOT])(engine) && !IsIconic(*(HWND *)(host.engine + WINDOW_RVA));
 }
@@ -179,7 +165,7 @@ static BYTE *allocate_near(void) {
     return NULL;
 }
 
-// jmp [rip+0] to frame_render_hook, then the frame step's call aimed at it.
+// The frame step's call is rel32, so it goes through a jump placed near the engine.
 static const char *reach_frame_render(void) {
     BYTE *jump = allocate_near();
     if (!jump) return "no memory free within reach of the engine";

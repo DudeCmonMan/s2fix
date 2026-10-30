@@ -3,12 +3,8 @@
 #include <stdint.h>
 #include <string.h>
 
-// The execute step's geometry path (0x11424680, from 0x11422160) uploads each imposter mesh's quads into the geometry
-// ring once per pass that draws it: the main pass and every shadow cascade, with the same quads each time. A repeat
-// whose bytes are still in the ring (same holder, no wrap, rebuild or new frame since) reuses that upload's offset
-// instead of allocating, mapping and copying again, so the GPU reads the same bytes from the same buffer. Only the
-// allocating branch for a single-stream imposter mesh (writer 0x1146c800) is replaced; anything else runs the engine's
-// path. The ring allocator (0x113fcdc0) is hooked to see every wrap, rebuild and frame change.
+// Each imposter mesh's quads are uploaded to the geometry ring once per pass that draws them (main and every cascade);
+// a repeat whose bytes are still in the ring reuses that upload's offset instead of copying again.
 #define GEOMETRY_RVA 0x1424680
 #define WRITER_RVA 0x146c800
 #define ALLOCATOR_RVA 0x13fcdc0
@@ -42,9 +38,8 @@ typedef BYTE(__attribute__((thiscall)) *FlagFn)(BYTE *generator);
 typedef void(__attribute__((thiscall)) *SourceFn)(BYTE *mesh, uint32_t unused, BYTE **source);
 
 __declspec(dllexport) volatile Stats stats;
-// 0 uploads every time; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG reuse_enabled = 1;
-// 1 hashes the source on every reuse and counts mismatches with the reused upload; a switch, off by default.
+// 1 hashes the source on every reuse and counts mismatches.
 __declspec(dllexport) volatile LONG verify;
 
 static const BYTE geometry_prologue[] = {0x51, 0x53, 0x55, 0x56, 0x8b, 0x74, 0x24, 0x18};
@@ -55,9 +50,7 @@ static AllocatorFn original_allocator;
 static Upload uploads[1 << SLOT_BITS];
 static Holder holders[MAX_HOLDERS];
 static int holder_count;
-// The tables belong to the main thread (the one that presents). The overhaul's workers run the geometry path too, into
-// ring clones that every command list discards and refills, so an upload is never reused off main. An allocation on any
-// other thread counts as foreign and retires every recorded upload, since its holder's epoch could not be tracked.
+// Main only (workers' ring clones refill per command list); an allocation elsewhere retires every recorded upload.
 static volatile LONG foreign_allocations, first_caller_logged;
 
 static void *method(void *object, int offset) {
@@ -86,7 +79,7 @@ static void *__attribute__((thiscall)) allocator_hook(BYTE *holder, void *result
     // The allocator rebuilds the buffer, possibly at the same address, when it has none or a resize is pending.
     BOOL rebuilds = !capacity || (capacity != *(uint32_t *)(holder + 0x18) && *(holder + 0x54));
     void *returned = original_allocator(holder, result, renderer, bytes, size, start, stride, map);
-    // A restart always places the allocation at 0; a position compare alone misses one larger than the space it skipped.
+    // A restart places the allocation at 0; a position compare alone misses one larger than the space it skipped.
     if (rebuilds || *start == 0 || *(uint32_t *)(holder + 0x1c) <= position || *(uint32_t *)(holder + 0x5c) != stamp || *(BYTE **)(holder + 0x10) != buffer)
         holder_of(holder)->epoch++;
     return returned;
@@ -102,7 +95,7 @@ static uint64_t hash_bytes(const BYTE *data, uint32_t bytes) {
     return hash;
 }
 
-// The engine's steps for one imposter stream on the allocating branch (0x114245a0), with the repeat taken from the table.
+// Mirrors the geometry path's allocating branch (0x114245a0) for one imposter stream; anything else goes to it.
 static BYTE reuse_or_upload(void *self, void *renderer, BYTE *generator, BYTE *streams, uint32_t fill) {
     if ((BYTE)fill != 1) return original_geometry(self, renderer, generator, streams, fill);
     uint32_t vertices = ((CountFn)method(generator, 0x38))(generator);

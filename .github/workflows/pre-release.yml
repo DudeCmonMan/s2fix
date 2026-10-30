@@ -1,7 +1,6 @@
 name: pre-release
 
-# A tag with "pre-release" in its name (v0.3.0-pre-release.1) builds both games and creates a draft pre-release with both
-# zips. It is published as a pre-release for testing, never as the latest release.
+# A "pre-release" tag drafts a pre-release with both zips for testing, never marked as the latest release.
 on:
   push:
     tags: ['*pre-release*']

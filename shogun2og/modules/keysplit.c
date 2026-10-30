@@ -5,13 +5,8 @@
 #include <stdlib.h>
 #include <xmmintrin.h>
 
-// The Variant node's compute_keys (0x114e7d90) with its per-item work on helper threads while main fills the instance
-// textures (0x114e78e0), which both of compute_keys' callers (the engine's prepare 0x114c4780, the overhaul's timed
-// prepare) do right after it; their own fill call is then skipped. The poses are flushed and both lists merged first, as
-// compute_keys does; the per-item lookup (0x114c74f0) only reads the node's pose table and its textures' row counts, and
-// the fill reads only the pose list and the textures' sizes, never the item fields the keys write. compute_keys returns
-// once every key is written. The helpers finish inside main's fill. keyverify recomputes the keys with the engine's own
-// function and counts items that differ.
+// The Variant node's key pass runs its per-item work on helpers while main fills the instance textures, which both its
+// callers do next (their own fill is then skipped); the lookup and the fill read nothing the keys write.
 #define COMPUTE_KEYS_RVA 0x14e7d90
 #define FILL_RVA 0x14e78e0
 #define KEY_LOOKUP_RVA 0x14c74f0
@@ -154,7 +149,7 @@ static void __attribute__((thiscall)) keys_hook(BYTE *node) {
 }
 
 static void __attribute__((thiscall)) fill_hook(BYTE *node) {
-    // Only the fill right after compute_keys is the one main already did.
+    // Only the fill right after the key pass is the one main already did.
     BOOL done = !filling && node == filled_node && GetCurrentThreadId() == *api->main_thread;
     if (!filling) filled_node = NULL;
     if (done) {
@@ -190,7 +185,7 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
         if (!thread) return "CreateThread failed";
         CloseHandle(thread);
     }
-    // The fill first: compute_keys hooked without it would fill twice.
+    // The fill first: the key pass hooked without it would fill twice.
     const char *error = api->hook(api->engine + FILL_RVA, fill_prologue, sizeof fill_prologue, (const void *)fill_hook, (void **)&original_fill);
     if (!error) error = api->hook(api->engine + COMPUTE_KEYS_RVA, keys_prologue, sizeof keys_prologue, (const void *)keys_hook, (void **)&original_keys);
     if (error) return error;

@@ -1,5 +1,4 @@
-// The system d3d11.dll's exports with their ordinals (Windows 10.0.22621); the proxy forwards every one (OWN would mark its own);
-// build.sh generates d3d11.def from this list.
+// The system d3d11.dll's exports and ordinals; OWN would mark one the proxy implements. build.sh makes d3d11.def from it.
 #define D3D11_EXPORTS(STUB, OWN) \
     STUB(D3D11CreateDeviceForD3D12, 1) \
     STUB(D3DKMTCloseAdapter, 2) \

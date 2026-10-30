@@ -1,15 +1,8 @@
 #include "graphicsreset.h"
 #include <stdio.h>
 
-// The engine flags its device for a reset (engine +0x69872) after a window resize or a failed present. At the start of
-// the next frame its recovery (0x113f86d0, thiscall engine; run before the scene is drawn) releases what every resource
-// manager holds, clears the flag and creates it all again ("Warscape resource creation"); a device that is gone is created
-// first. Setting the flag is the engine's own way to ask for that rebuild, so a requested reset sets it as the next frame
-// starts, just before the recovery reads it (set earlier, it would also stop the presents a load makes as it goes), and
-// shows the engine's loading screen while the rebuild runs, as its graphics options do when they apply a change. The
-// screen's own shown byte can't tell whether it is up: the options show it and never hide it. Listeners are told at the
-// engine's one release (0x1140fcc0) and one creation (0x1140fbc0) of those resources, which every rebuild goes through:
-// the recovery, the graphics options, an anti-aliasing or depth-of-field change, a load.
+// A reset sets the engine's reset flag, its own way to ask for a rebuild, just as its recovery reads it: set earlier, it
+// would stop a load's presents. Listeners hear the one release and creation every rebuild goes through.
 #define ENGINE_GLOBAL_RVA 0x1c9a920
 #define RESET_FLAG 0x69872
 #define LOADING_SCREEN 0x69848
@@ -22,11 +15,10 @@
 #define LOADING_HIDE_RVA 0x13ecde0
 #define DEVICE_GLOBAL_RVA 0x1c9a93c
 #define D3D11_DEVICE_VTABLE_RVA 0x17666f8
-// The device's status (0 working, 3 removed or gone, 4 another failure), as the engine's present path reads it.
+// The device's status, as the engine's present path reads it.
 #define DEVICE_STATUS_SLOT (0x104 / 4)
 #define MAX_LISTENERS 16
-// Rebuilds back to back can leave the Complete Edition's shadows flickering, and a held key or a module asking again
-// would otherwise run them so: requests keep this far from the end of the last rebuild.
+// Back-to-back rebuilds, from a held key or a module asking again, can leave the Complete Edition's shadows flickering.
 #define MIN_GAP_MS 5000
 
 typedef BYTE(__attribute__((thiscall)) *RecoveryFn)(BYTE *engine_object);
@@ -50,7 +42,7 @@ static volatile LONG listener_count;
 static SRWLOCK listen_lock = SRWLOCK_INIT;
 static const char *volatile requested_reason;
 static volatile LONG requested;
-// Main thread only: the running rebuild, and the reason it was asked for (NULL for the engine's own).
+// Main thread only; NULL for the engine's own rebuild.
 static const char *reason;
 static BOOL rebuilding, screen_shown;
 static LARGE_INTEGER started;
@@ -61,8 +53,7 @@ static BYTE *engine_object(void) {
     return *(BYTE **)(host.engine + ENGINE_GLOBAL_RVA);
 }
 
-// The loading screen the engine made at its start, shown or hidden through its own methods; FALSE if it is not the
-// engine's own kind.
+// FALSE if the loading screen is not the engine's own kind.
 static BOOL loading_screen(BOOL show) {
     BYTE *screen = *(BYTE **)(engine_object() + LOADING_SCREEN);
     void **vtable = screen ? *(void ***)screen : NULL;

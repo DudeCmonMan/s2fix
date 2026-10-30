@@ -4,14 +4,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-// Campaign map. The faction-record lookup (0x107f90e0, thiscall table, key) scans an array of 2,020-byte records (count
-// at table +0x8, array at +0xc, id at record +0x4) for the first record whose id is the key, so every step is a cache
-// miss. Every frame each character model's update (0x10898ea0) asks whether the player can see it, through every
-// faction that is friendly to the player (0x105caee0), and the friendly test (0x105ca920) looks the same record up three
-// times: on an idle map that was 59% of the main thread. This remembers where each lookup found its record. A repeat
-// returns that record only while the table still has the same array and count and the record still has the key;
-// otherwise the engine's scan runs again. Keys are unique within a table, so the record found is the first match; the
-// switch camprelationsverify runs the engine's scan beside every lookup and counts any difference. Follows Apply Fixes.
+// Campaign map: the faction-record lookup scans big records several times per character per frame. This remembers each
+// record found, reused while its table and key are unchanged (keys are unique per table, so it is the first match).
 #define SEARCH_RVA 0x7f90e0
 #define RECORD_BYTES 0x7e4
 #define TABLE_COUNT 0x8
@@ -30,8 +24,7 @@ typedef struct {
     uint32_t key, count, index;
 } Entry;
 
-// Plain counters: a locked 64-bit add on every lookup would cost more than it measures; another thread's lookup can
-// lose a count.
+// Plain counters: a locked add per lookup would cost more than it measures; a count may be lost.
 typedef struct {
     LONG64 lookups, hits, misses, scanned, not_found, mismatches;
 } Stats;
@@ -43,9 +36,7 @@ __declspec(dllexport) volatile Stats relation_stats;
 static const BYTE search_prologue[] = {0x51, 0x53, 0x55, 0x8b, 0xe9, 0x56, 0x33, 0xf6, 0x57};
 static const S2Api *api;
 static SearchFn original_search;
-// Each thread keeps its own table, so no lookup ever waits on another thread. Not __thread: with this toolchain that is
-// emulated TLS (a locked winpthreads lookup and two last-error calls per access), 1.5 ms a frame at 20 million lookups
-// a second. The TEB's own slot is one load and leaves the last error alone.
+// A table per thread, in a TEB slot: __thread is emulated TLS here, which locks and clobbers the last error.
 static DWORD cache_slot = TLS_OUT_OF_INDEXES;
 
 static Entry *thread_cache(void) {

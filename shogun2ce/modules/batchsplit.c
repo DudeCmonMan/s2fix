@@ -7,11 +7,8 @@
 #include <string.h>
 #include <xmmintrin.h>
 
-// Splits the render-item task's large batches (scene vtable slot +0x100, sub_181b13fa0) into ordered chunks run on helper
-// threads. The batch's setup runs once, then each chunk runs the batch's per-object loop over its own range. Chunk 0 appends
-// straight into the scene's lists; later chunks append into private buffers that are copied into the lists in chunk order,
-// so every list ends up with the same items in the same order as the serial loop. That copy is itself split: each
-// chunk's place in each list is fixed first, then all workers copy chunks into place.
+// Splits the render-item task's large serial batches into ordered chunks on helper threads; later chunks' appends are
+// copied into the lists in chunk order (the copy split too), so every list gets the same items in the same order.
 #define SCENE_BATCH_SLOT_RVA 0x23e4878
 #define BATCH_RVA 0x1b13fa0
 #define PER_OBJECT_RVA 0x1b11920
@@ -29,8 +26,7 @@
 #define MAX_CHUNKS ((HELPERS + 1) * CHUNKS_PER_WORKER)
 #define MAX_LISTS 8
 #define HELPER_SPIN_ROUNDS 20000
-// Set by the contention fix: a short spin covers the gaps between one frame's jobs, then the helpers sleep instead
-// of spinning into the draw phase. The budget can be patched live.
+// Set by the contention fix: spin briefly between a frame's jobs, then sleep instead of spinning into the draw phase.
 __declspec(dllexport) volatile LONG short_spin_enabled;
 __declspec(dllexport) volatile LONG short_spin_us = 50;
 
@@ -80,7 +76,6 @@ typedef struct {
 
 __declspec(dllexport) volatile SplitStats split_stats;
 __declspec(dllexport) volatile LONG split_enabled = 1;
-// Exported so they can be tuned while the game runs.
 __declspec(dllexport) volatile LONG split_min_objects = 16, chunk_min_objects = 4;
 
 static BYTE *engine;
@@ -95,8 +90,7 @@ static EngineFreeFn engine_free;
 static DWORD capture_slot;
 static ChunkOutput outputs[MAX_CHUNKS];
 static Job job;
-// High 32 bits: job generation; low 32 bits: next chunk to claim. Claims compare-and-swap the whole word, so a helper
-// still finishing an old job can never take a chunk index from the next one.
+// High 32 bits: job generation; low 32 bits: next chunk to claim. Swapped as one, so a stale claim fails.
 static volatile LONG64 claim_word;
 static volatile LONG busy;
 
@@ -124,8 +118,7 @@ static uint64_t append_hook(BYTE *list, const BYTE *item, uint64_t parallel) {
     return 0;
 }
 
-// The batch's loop. Flags carry "state changed since the last emitted item" bits into each item (+0x8c), so a later
-// chunk's first item gets different flags than in the serial loop; only batches whose items' flags are never read are split.
+// A later chunk's first item gets other change flags (+0x8c) than serially; only batches whose flags go unread split.
 static void run_objects(DWORD first, DWORD end) {
     DWORD flags = job.initial_flags, last_group = UINT32_MAX, last_material = UINT32_MAX;
     const DWORD *groups = (const DWORD *)job.a8;
@@ -175,8 +168,7 @@ static void claim_chunks(LONG64 generation) {
     }
 }
 
-// A helper can still hold a claim word it read before the last job ended. Moving to a new generation before the job is
-// rewritten makes that stale compare-and-swap fail instead of claiming a chunk of the half-written job.
+// A new generation before the job is rewritten makes a helper's stale claim fail instead of taking a half-written job.
 static void retire_generation(void) {
     InterlockedExchange64(&claim_word, ((claim_word >> 32) + 1) << 32 | INT32_MAX);
 }
@@ -210,8 +202,7 @@ static DWORD WINAPI helper(LPVOID unused) {
     return 0;
 }
 
-// Same growth and storage as the engine's own push: its allocator, its heap, and a {capacity, count, items} header at list + 8.
-// Returns where the reserved items start; they are filled in by copy_chunk.
+// Grows as the engine's own push does, with its allocator and heap, since the engine grows and frees the list later.
 static uint32_t reserve_items(BYTE *list, uint32_t count) {
     ItemList *header = (ItemList *)(list + 8);
     if (header->count + count > header->capacity) {
@@ -227,13 +218,12 @@ static uint32_t reserve_items(BYTE *list, uint32_t count) {
     return offset;
 }
 
-// The record step reads items' change flags only without instancing (sub_181b15590 at 0x181b15758) or with
-// variant_rigid_sort off (0x181b159fe); otherwise it walks the items and derives its own.
+// The record step reads items' change flags only without instancing or with variant_rigid_sort off.
 static BOOL item_flags_unread(BYTE *scene) {
     return scene[0x2e0] && !scene[0x2e2] && *(DWORD *)(scene + 0x2d4) && engine[VARIANT_RIGID_SORT_RVA];
 }
 
-// The batch's instancing setup, done once per batch exactly as the batch function does before its loop.
+// Mirrors the batch's instancing setup, run once as the batch does.
 static void prepare_batch(BYTE *scene, void *view) {
     scene[0x2e1] = 1;
     void *views[2] = {view, view};
@@ -287,8 +277,7 @@ static void batch_hook(BYTE *scene, const DWORD *handles, DWORD count, void *vie
     busy = 0;
 }
 
-// A vtable slot holds a relocated pointer to function_rva; patch compares it with the file's bytes, at the preferred base,
-// and keeps the write so a refused install is undone.
+// patch compares the slot with the file's bytes (preferred base) and records the write, so a refused install is undone.
 static const char *patch_slot(const S2Api *api, void **slot, DWORD function_rva, void *replacement) {
     uint64_t file_value = ENGINE_PREFERRED_BASE + function_rva;
     return api->patch((BYTE *)slot, (const BYTE *)&file_value, (const BYTE *)&replacement, sizeof replacement);

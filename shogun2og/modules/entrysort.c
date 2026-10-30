@@ -3,10 +3,8 @@
 #include "../entrysort.h"
 #include "../checks/entrysort.h"
 
-// The engine's per-entry std::sort (MSVC _Sort_unchecked, cdecl) over object pointers, called twice per entity display
-// update. Its comparator chases pointers and recomputes both squared camera distances on every comparison; entrysort.h
-// computes each object's keys once. Every recursive call of the original fully sorts its range, so replacing any call is
-// equivalent.
+// The engine's per-entry sort recomputes both distances on every comparison; entrysort.h computes each object's keys
+// once. Every recursive call fully sorts its range, so replacing any call is equivalent.
 #define ENTRY_SORT_RVA 0x23abe0
 
 typedef struct {
@@ -14,7 +12,6 @@ typedef struct {
 } EntrySortStats;
 
 __declspec(dllexport) volatile EntrySortStats entry_sort_stats;
-// 0 runs the engine's sort; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG sort_enabled = 1;
 
 static const BYTE entry_sort_prologue[] = {0x83, 0xec, 0x08, 0x53, 0x55};

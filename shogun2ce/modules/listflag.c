@@ -1,12 +1,8 @@
 #include "../s2module.h"
 #include "../checks/listflag.h"
 
-// The render-item list's parallel append (sub_181b3d750, parallel flag set) adds the item to the calling thread's sublist
-// and then stores 1 into the list's "needs merge" flag at + 0x30 on every call. TBB workers append to the same list from
-// one parallel loop, so that unconditional store kept the list header's cache line moving between cores, and every
-// append's read of the header at + 0x14 waited for it. This runs the same fast path but only stores the flag when it is
-// clear; the flag ends up set either way and is only cleared by the single-threaded merge. The resize path and
-// non-parallel appends still run the engine's code.
+// The render-item list's parallel append stores the needs-merge flag on every call, bouncing the list header between
+// cores; this runs the same fast path but stores it only when clear (only the single-threaded merge clears it).
 #define LIST_APPEND_RVA 0x1b3d750
 #define THREAD_REGISTRY_RVA 0x190e2b0
 #define SUBLIST_APPEND_RVA 0x1b3f140
@@ -16,7 +12,6 @@ typedef BYTE *(*ThreadRegistryFn)(void);
 typedef DWORD (*ThreadQueryFn)(BYTE *registry);
 typedef void (*SublistAppendFn)(BYTE *sublist, const BYTE *item);
 
-// 0 runs the engine's append for every call; exported so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG enabled = 1;
 
 static const BYTE list_append_prologue[] = {0x48, 0x89, 0x54, 0x24, 0x10, 0x55, 0x41, 0x57, 0x48, 0x83, 0xec, 0x58, 0x48, 0x8b, 0xea};

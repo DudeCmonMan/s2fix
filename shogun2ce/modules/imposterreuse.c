@@ -3,11 +3,8 @@
 #include <stdint.h>
 #include <intrin.h>
 
-// Each shadow cascade and the main pass upload the same imposter quads into the geometry ring (geometry path
-// sub_1819fa680, writer sub_181b76be0): ~208 uploads and 7.6 MB a frame, three quarters of them repeats of an upload
-// earlier in the frame. A repeat whose bytes are still in the ring (same holder, no wrap since) reuses that offset
-// instead of allocating, mapping and copying again, so the GPU reads the same bytes from the same buffer. Skipping the
-// repeats keeps the ring from wrapping mid-frame, so ~150 of the ~156 repeats are reused.
+// Each imposter mesh's quads are uploaded to the geometry ring once per pass that draws them (main and every cascade);
+// a repeat whose bytes are still in the ring reuses that upload's offset instead of copying again.
 #define GEOMETRY_RVA 0x19fa680
 #define WRITER_RVA 0x1b76be0
 #define ALLOCATOR_RVA 0x19eb920
@@ -38,11 +35,10 @@ typedef BYTE *(*StreamWriterFn)(BYTE *, uint32_t);
 typedef BYTE (*FlagFn)(BYTE *);
 
 __declspec(dllexport) volatile Stats stats;
-// 0 uploads every time; exported so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG reuse_enabled = 1;
-// 1 hashes the source on every reuse and counts mismatches with the reused upload.
+// 1 hashes the source on every reuse and counts mismatches.
 __declspec(dllexport) volatile LONG verify;
-// 1 reuses only on even frames and times both kinds, for a same-session comparison.
+// 1 reuses only on even frames, timing both kinds.
 __declspec(dllexport) volatile LONG alternate_frames;
 
 static const BYTE geometry_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18};
@@ -55,8 +51,7 @@ static volatile uint64_t *frame_stamp;
 static Upload uploads[1 << SLOT_BITS];
 static Holder holders[MAX_HOLDERS];
 static int holder_count;
-// The tables are main-thread only. Execute is the only caller and runs on main until the overhaul's workers start, which
-// happens after its serial warm-up, so the first caller is main.
+// Main only: the first caller is main, as the overhaul's workers start after its serial warm-up.
 static volatile LONG main_thread;
 
 static BOOL on_main_thread(void) {
@@ -86,7 +81,7 @@ static uint64_t allocator_hook(BYTE *holder, void *a2, void *a3, uint64_t a4, ui
     // The allocator rebuilds the buffer, possibly at the same address, when it has none or a resize is pending.
     BOOL rebuilds = !size || (size != *(uint32_t *)(holder + 0x24) && *(BYTE *)(holder + 0x70));
     uint64_t result = original_allocator(holder, a2, a3, a4, a5, (uint64_t)start, a7, a8);
-    // A restart always places the allocation at 0; a position compare alone misses one larger than the space it skipped.
+    // A restart places the allocation at 0; a position compare alone misses one larger than the space it skipped.
     if (rebuilds || *start == 0 || *(uint32_t *)(holder + 0x28) <= position || *(uint32_t *)(holder + 0x78) != stamp ||
         *(BYTE **)(holder + 0x18) != buffer)
         holder_of(holder)->epoch++;
@@ -99,7 +94,7 @@ static uint64_t hash_bytes(const BYTE *data, uint32_t bytes) {
     return hash;
 }
 
-// Same steps as the engine's geometry path for one imposter stream on the allocating branch; anything else goes to it.
+// Mirrors the geometry path's allocating branch for one imposter stream; anything else goes to it.
 static uint64_t reuse_or_upload(void *a1, BYTE *renderer, BYTE *generator, BYTE *streams, uint64_t fill, uint64_t a6, uint64_t a7, uint64_t a8) {
     if ((BYTE)fill != 1) return original_geometry(a1, renderer, generator, streams, fill, a6, a7, a8);
     uint32_t vertices = ((CountFn)method(generator, 0x78))(generator);

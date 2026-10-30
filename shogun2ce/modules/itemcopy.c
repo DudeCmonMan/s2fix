@@ -10,7 +10,7 @@ static const BYTE item_copy_prologue[] = {0x48, 0x8b, 0x02, 0x4c, 0x8b, 0xc1, 0x
 static void *(*original_item_copy)(void *destination, const void *source);
 static volatile LONG *fix_enabled;
 
-// The engine's copy skips only padding and unused bitfield bits, which nothing reads, so copying every byte is equivalent.
+// The engine's copy skips only padding and unused bitfield bits nothing reads, so copying every byte is equivalent.
 static void *item_copy(void *destination, const void *source) {
     if (!*fix_enabled) return original_item_copy(destination, source);
     return memmove(destination, source, RENDER_ITEM_SIZE);

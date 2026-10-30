@@ -14,13 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-// The render overhaul: a view's execute pass split into contiguous ranges of its recorded groups. Main draws the first
-// range on the immediate context; each worker runs the engine's own execute loop over its range into a deferred context,
-// and main replays the command lists in range order, so the GPU sees the original draw order. Each range is fed through
-// a private DRAW_CONTEXT whose recorders hand out only that range's groups; a worker gets private copies of each
-// DRAW_ITEM's chunker and streams, and its own clones of the rings they allocate from. With overlap, main does not wait:
-// it records on into its own deferred context while workers draw, and the lists are executed in their original order. It
-// also counts the draws and instances each mode issues, because a version that drops draws would look faster.
+// Main alone records every draw of a view. This splits a view's groups into contiguous ranges that workers record
+// into deferred contexts, with private copies of the per-draw state, replayed in order so the GPU sees the same draws.
 #define EXECUTE_RVA 0x19f2940
 #define BIND_PASS_STATE_RVA 0x1ac58d0
 #define UPLOAD_CONSTANT_BUFFERS_RVA 0x1abecc0
@@ -32,7 +27,7 @@
 #define KICK_STREAM_RVA 0x19de350
 #define STREAM_IN_RVA 0x19de360
 #define RENDERER_VTABLE_RVA 0x23dda20
-// Copied whole so a worker's renderer can carry its own vtable; the RENDERER vtable has 57 slots.
+// Room for the renderer's 57-slot vtable, copied whole so a worker's renderer carries its own.
 #define RENDERER_VTABLE_SLOTS 64
 #define STAGES 6
 #define PROGRAM_SIZE 0xb0
@@ -51,13 +46,12 @@
 #define RENDERER_OFFSET 0x1f0
 #define RENDERER_SIZE 0x28b8
 #define RENDERER_TARGETS_START 0x22a4
-// The target record and the saved targets and topology (save/restore pairs can span an execute) stay; the stencil ref
-// after them is state.
+// The target record, saved targets and topology survive a cold reset (save/restore pairs can span an execute).
 #define RENDERER_TARGETS_END 0x23c4
 #define DRAW_ITEM_SIZE 0x48
 #define CHUNKER_VTABLE_RVA 0x23aa9b8
 #define CHUNKER_SIZE 0x28
-// The rigid group-instance meshes' chunkers derive from INSTANCE_CHUNKER and add their mesh (+0x28) and a count.
+// Group-instance mesh chunkers add their mesh (+0x28) and a count to the base chunker.
 #define DERIVED_CHUNKER_SIZE 0x38
 #define STREAMS_SIZE 0x30
 #define INDEX_STREAM_SIZE 0x18
@@ -68,8 +62,7 @@
 #define VERTEX_BUFFER_VTABLE_SLOTS 16
 // Updating a video-memory buffer the GPU is still drawing from makes the copy wait; three in turn avoid that.
 #define DEVICE_LOCAL_COPIES 3
-// Every list's first map of a clone renames its whole buffer in the driver: full-size clones (5 MB instance, 3.85 MB
-// geometry) on every list put the driver over a budget at which main's own constant buffer maps wait.
+// Each list's first map renames a clone's whole buffer in the driver; full-size clones made main's own CB maps wait.
 #define RING_CLONE_BYTES (256 * 1024)
 #define CONTEXT_SIZE 0x90
 #define MAX_WORKERS 8
@@ -82,8 +75,7 @@
 #define WARMUP_FRAMES 60
 #define WORKER_SPIN_ROUNDS 20000
 #define PARITY_TOLERANCE 0.02
-// Every change flag a Variant writer acts on except 0x01 (bone palette, instancing off): a range's first group writes
-// all of its own parameters instead of relying on the previous range's groups.
+// Every Variant change flag but the bone palette (0x01): a range's first group must not rely on earlier ranges.
 #define FORCED_FLAGS 0x1b6
 #define PREPARE_RVA 0x1b20520
 #define COMPUTE_KEYS_RVA 0x1b4e6e0
@@ -132,17 +124,14 @@
 #define BINDING_INFOS 4096
 #define LIBRARY_GETTER_RVA 0x19f80d0
 #define LIBRARY_OFFSET 0x26c8
-// SHADERS, inline in SCENE ([engine+0x30]), up to SCENE's next member: its destructor (0x181a477d0) frees +0xa9f78 after
-// the library's own.
+// The shader library is inline in the scene, up to the scene's next member at +0xa9f78.
 #define LIBRARY_SIZE (0xa9f78 - LIBRARY_OFFSET)
 #define LIBRARY_BUFFERS 512
 #define MAX_LIBRARY_RECORDS 8192
 #define MAX_LEAK_CALLERS 16
 #define MAX_LIBRARY_SLOTS 4096
 #define EFFECTS_RECORD_RVA 0x1b0e980
-// The two Variant weighted effects' vtbl+0xb8 writers read the library through the SCENE pointer the effect keeps
-// (+0xc8), at SCENE-relative offsets, and 0x181b47e50 through the Variant node's (+0xd8); they get a copy of the object
-// that points as far before the thread's library.
+// Writers that reach the library through a kept pointer (effect +0xc8, node +0xd8) get a copy aimed at the thread's.
 #define VARIANT_CACHED_WRITER_RVA 0x1b4a040
 #define VARIANT_B_CACHED_WRITER_RVA 0x1b49eb0
 #define CACHED_EFFECT_BYTES 0x108
@@ -161,7 +150,7 @@
 #define INSTANCE_GROUP_SIZE 0x410
 #define GROUP_GATHER_RVA 0x1b762d0
 #define GROUP_INSTANCE_MESH_VTABLE_RVA 0x23ecbc8
-// RIGID_GROUP_INSTANCE_MESH up to the last field its gatherer reads: groups +0x1cc/+0x1d0, chunker +0x1e8, pass bit +0x1f4.
+// A group-instance mesh up to the last field its gatherer reads, the pass bit at +0x1f4.
 #define GROUP_MESH_VIEW_SIZE 0x1f8
 #define VARIANT_WEIGHTED_VTABLE_RVA 0x23e3d28
 #define VARIANT_WEIGHTED_B_VTABLE_RVA 0x23e3ef8
@@ -169,7 +158,7 @@
 #define GROUP_POOLS 3
 #define MAX_GROUP_SAMPLES 6144
 #define GROUP_TABLE_SIZE 8192
-// Frames between sampling a pool's groups and reading them back.
+// Frames for a pool's queries to finish before they are read.
 #define GROUP_DELAY 4
 
 typedef BYTE (*ExecuteFn)(BYTE *context, BYTE *renderer, BYTE *view);
@@ -228,17 +217,16 @@ typedef struct {
 
 enum { JOB_BATCH, JOB_SINGLE, JOB_PACKET };
 
-// A batch recorder's INSTANCE_GROUP or a single recorder, decoded when the range reaches it, or a Packet copied from one.
+// object: a batch recorder's group, a single recorder, or a Packet copied from one.
 typedef struct {
     BYTE *object;
     uint32_t bucket, kind, weight;
-    // The engine recorder the job came from.
     BYTE *recorder;
-    // A group-instance job's instance count (mesh+0x1f0) and pass bit (+0x1f4) when its view was snapshotted.
+    // A group-instance mesh's count and pass bit at the snapshot: the next view's record rewrites them.
     uint32_t group_count, group_bit;
 } Job;
 
-// The item comes first, as in an INSTANCE_GROUP.
+// The item comes first, as in the engine's instance group.
 typedef struct {
     BYTE *item;
     uint32_t count, flags;
@@ -257,8 +245,7 @@ typedef struct {
     BYTE *original, *copy;
 } Clone;
 
-// Follows a ring clone's VERTEX_BUFFER copy. In the staging modes its map points into staging memory, and one upload
-// per command list moves what was written to the buffer the draws read.
+// Placed right after a clone's vertex buffer copy. Staging modes map into staging and upload once per list.
 typedef struct {
     void *vtable[VERTEX_BUFFER_VTABLE_SLOTS];
     BYTE *staging;
@@ -278,19 +265,18 @@ typedef struct {
     uint32_t range;
 } ProgramClone;
 
-// A worker's own copy of a texture slot it set in its current range (texturecopies); generation 0 is free.
+// A worker's copy of a texture slot it set in its range; generation 0 is free.
 typedef struct {
     BYTE *slot;
     uint32_t generation;
     __attribute__((aligned(16))) BYTE copy[SHADER_TEXTURE_SIZE];
 } TextureCopy;
 
-// A thread's own values of a constant buffer it wrote in its current range (valuecopies): the device buffer's shadow
-// (+0x40, +0x48 bytes) as this thread left it, and the version (binding+0x38) at which the shared shadow last held them.
+// A thread's values of a CB it wrote in its range; version is the binding's when the shared shadow last held them.
 typedef struct {
     BYTE *buffer, *binding, *data;
     uint32_t generation, version;
-    // A library buffer's copy (paramcontexts) is written back only if the range changed it.
+    // A library buffer's copy is written back only if the range changed it.
     uint32_t changed;
 } ValueCopy;
 
@@ -304,8 +290,7 @@ typedef struct {
     size_t arena_used;
     uint64_t calls, unlocked_calls, restores, seeds, copies_out, unwrapped_touches, full;
     LONGLONG wait_ticks;
-    // paramcontexts: the thread's copy of the shader library, whose parameters point into data, its own values of every
-    // library buffer (library_copies[b] holds buffer b's); in_context while a writer runs in it.
+    // The thread's shader library copy, whose parameters point into data; library_copies[b] holds buffer b's values.
     BYTE *library, *data;
     ValueCopy *library_copies;
     uint32_t library_epoch;
@@ -321,7 +306,7 @@ typedef struct {
     uint32_t view_key, range, position, flags, instances, forced;
 } GroupSample;
 
-// One sampled frame's groups (groupstats): a pipeline statistics query around each group's draws.
+// A sampled frame's pipeline statistics query per group.
 typedef struct {
     GroupSample *samples;
     volatile LONG used;
@@ -330,7 +315,7 @@ typedef struct {
     BOOL pending;
 } GroupPool;
 
-// Per draw item, view and mode; [0] counts the samples drawn in main's range, [1] those drawn on a worker.
+// [0]: drawn in main's range, [1]: on a worker.
 typedef struct {
     BYTE *item, *effect_vtable;
     uint32_t view_key, mode, flags;
@@ -361,8 +346,7 @@ typedef struct {
 
 typedef struct {
     ID3D11Query *disjoint, *start[MAX_TIMED_VIEWS], *middle[MAX_TIMED_VIEWS], *end[MAX_TIMED_VIEWS];
-    // gpudetail: before each worker list on the immediate context, at its first and last command, after the last list,
-    // and pipeline statistics for main's part (the whole view when unsplit) and the lists' part.
+    // Optional detail: timestamps around and inside each worker list, statistics for main's part and the lists'.
     ID3D11Query *list_begin[MAX_TIMED_VIEWS][MAX_WORKERS + 1], *inside_begin[MAX_TIMED_VIEWS][MAX_WORKERS + 1];
     ID3D11Query *inside_end[MAX_TIMED_VIEWS][MAX_WORKERS + 1], *lists_end[MAX_TIMED_VIEWS];
     ID3D11Query *main_statistics[MAX_TIMED_VIEWS], *list_statistics[MAX_TIMED_VIEWS];
@@ -385,7 +369,7 @@ typedef struct {
     const Job *jobs;
     uint32_t next_job, end_job, forced_job, current_index;
     const Job *current;
-    // The bucket's first job in the range, and the range's first job.
+    // first_job: the current bucket's first job in the range.
     uint32_t first_job, range_first;
     uint32_t range_index, view_key;
     ID3D11DeviceContext *context;
@@ -412,7 +396,7 @@ typedef struct {
     BYTE result;
 } Range;
 
-// A split view's groups and ranges, and the main-thread state its workers start from; with overlap several are in flight.
+// With overlap several split views are in flight, each in its own slot.
 typedef struct {
     Job *jobs;
     uint32_t job_count, job_capacity;
@@ -425,7 +409,6 @@ typedef struct {
     BYTE *view;
     uint32_t view_type;
     TargetState targets;
-    // The frame and view whose gpudetail queries the lists write, or NULL.
     GpuFrame *timed_frame;
     int timed_view;
     GroupPool *group_pool;
@@ -438,13 +421,13 @@ typedef struct {
     Range *range;
 } RangeTask;
 
-// In execute order on the immediate context: a split view's command lists, or one of main's segments between them.
+// Submissions run in execute order: a split view's lists, or one of main's segments between them.
 typedef struct {
     ViewSlot *slot;
     ID3D11CommandList *list;
 } Submission;
 
-// s2fix's wrapped context (wrap_context=1): every method forwards to current.
+// Mirrors s2fix's wrapped context (wrap_context=1), which forwards every method to current.
 typedef struct {
     void *const *vtable;
     ID3D11DeviceContext *current, *immediate;
@@ -479,13 +462,12 @@ struct Worker {
     uint32_t view_type;
     uint64_t shared_holders;
     uint64_t d3d_calls[2][CONTEXT_METHODS];
-    // The range's TextureCopy generation, 0 between ranges.
+    // texture_generation is 0 between ranges.
     uint32_t texture_generation, texture_generations, texture_copy_count;
     uint64_t texture_sets;
     TextureCopy texture_copies[TEXTURE_COPIES];
     ValueState values;
     __attribute__((aligned(16))) BYTE group_mesh[GROUP_MESH_VIEW_SIZE];
-    // The mesh group_mesh is a view of for the current job, or NULL.
     BYTE *group_mesh_of;
     BOOL boosted;
 };
@@ -498,14 +480,13 @@ typedef struct {
     const Job *job;
 } MainGroup;
 
-// One push_record a parallel record made instead of writing the engine's recorders: queue is the view's queue index, so
-// two threads' packets of one view merge back into record order.
+// A record kept instead of pushed; queue lets two threads' packets of one view merge back into record order.
 typedef struct {
     BYTE *effect;
     uint32_t index, flags, queue;
 } RecordPacket;
 
-// What the vegetation node's record would have stored in a group-instance mesh for the view.
+// What the vegetation record would have stored into a shared group-instance mesh.
 typedef struct {
     BYTE *mesh;
     uint32_t count, bit;
@@ -514,7 +495,7 @@ typedef struct {
 typedef struct {
     RecordPacket *packets;
     uint32_t count, capacity, queue;
-    // Also hand the record to the engine (packetverify).
+    // Also pass records on to the engine, for verification.
     BOOL forward;
     // A recorder kind build_packet_jobs does not rebuild: the view is replayed into the engine instead.
     BOOL unknown_recorder;
@@ -523,9 +504,7 @@ typedef struct {
     uint32_t group_count, group_capacity;
 } PacketBuffer;
 
-// A shadow cascade recorded on a worker while main draws cascade 0: a copy of the view whose cascade index (+0x94) is this
-// cascade's, so its pass bit (+0x40 + +0x94) and camera are too. Queues not known to be safe off main record at the
-// cascade's own turn, on main.
+// A cascade recorded on a worker from a view copy holding its index (+0x94); unsafe queues record later on main.
 typedef struct {
     __attribute__((aligned(16))) BYTE view[SHADOW_VIEW_SIZE];
     PacketBuffer worker_packets, main_packets;
@@ -536,7 +515,6 @@ typedef struct {
     BOOL kicked, verify;
 } CascadeRecord;
 
-// The engine's recorders rebuilt from a view's packets (build_packet_jobs).
 typedef struct {
     BYTE *recorder, *item;
     uint32_t bucket, batch, capacity, used, index_count, index_start, first_group, last_group, next;
@@ -557,7 +535,7 @@ typedef struct {
     LONGLONG ahead, ahead_wait;
 } Timers;
 
-// Where a view's last split ended its ranges (fractions of the view's weight) and how long each took.
+// The last split's range ends (fractions of the view's weight) and times, for autobalance.
 typedef struct {
     int count;
     double ends[MAX_WORKERS + 1];
@@ -574,7 +552,7 @@ typedef struct {
     uint32_t first_row;
 } TextureFill;
 
-// Main-thread time inside execute per view type (and shadow cascade), split or not: what is left to split.
+// Main's execute time per view, split or not: what is left to split.
 typedef struct {
     uint64_t calls, groups;
     LONGLONG ticks;
@@ -582,135 +560,87 @@ typedef struct {
 
 // On from the start; Ctrl+Shift+F7 toggles it.
 __declspec(dllexport) volatile LONG overhaul_enabled = 1;
-// Settings read live, so they can be changed while the game runs: workers beside main (0 runs the range path serially
-// on main), the view types to split (bit per VIEW_TYPE), and the fewest groups worth splitting. By default the shadow
-// cascades, both GBUFFER views, decals and both effects views split, on 3 workers.
+// Read live. 0 workers runs the range path serially on main; overhaul_views has a bit per view type to split.
 __declspec(dllexport) volatile LONG overhaul_workers = 3;
-// Set by the contention fix: main waits on the workers, so they run above normal priority and wake straight onto a CPU
-// instead of queueing behind spinning pool threads. Boosted, they spin only briefly before sleeping, so their idle spin
-// doesn't push other threads off.
+// Set by the contention fix: boosted workers wake straight onto a CPU for main, and spin only briefly before sleeping.
 __declspec(dllexport) volatile LONG overhaul_worker_priority;
 __declspec(dllexport) volatile LONG overhaul_spin_us = 50;
 __declspec(dllexport) volatile uint64_t overhaul_views = 1ull << 0x1 | 1ull << 0xe | 1ull << 0xf | 1ull << 0x16 | 1ull << 0x17 | 1ull << 0x19;
 __declspec(dllexport) volatile LONG overhaul_min_jobs = 32;
-// Bit per shadow cascade index that may split; percent of a worker's share of the groups that main takes (main also
-// snapshots and replays, so a smaller share shortens the view).
+// Bit per shadow cascade that may split; main's share is a percent of a worker's, as main also snapshots and replays.
 __declspec(dllexport) volatile LONG overhaul_cascades = 7;
 __declspec(dllexport) volatile LONG overhaul_main_share = 60;
-// 1 makes main draw its own range only after the workers finish, so main and workers never draw at the same time.
+// 1: main draws its range only after the workers finish.
 __declspec(dllexport) volatile LONG overhaul_serial_ranges;
 // 0: workers bind private program copies; 1: they bind the shared programs and one thread commits at a time.
 __declspec(dllexport) volatile LONG overhaul_commit_mode;
-// Instance and geometry data a worker writes: 0 maps the ring clone per chunk inside the command list; 1 writes into
-// staging memory and maps the clone once per list, in an upload list replayed first; 2 does the same with one
-// UpdateSubresource into a buffer in video memory.
+// Ring data: 0 maps the clone per chunk; 1 stages and maps once a list; 2 stages and updates a video-memory buffer.
 __declspec(dllexport) volatile LONG overhaul_instance_upload;
-// 1 replays with RestoreContextState TRUE, the runtime saving and restoring the immediate context around every list;
-// 0 replays with FALSE, then makes main's renderer cold and rebinds the targets, viewport and scissor.
+// 1 replays with RestoreContextState TRUE; 0 with FALSE, then main's renderer goes cold and its targets are rebound.
 __declspec(dllexport) volatile LONG overhaul_restore_state;
-// 1 copies each split view's groups at the snapshot, so its ranges stop reading the recorders that execute's caller resets
-// for the next view: views that outlive their execute need it.
+// 1 copies each split view's groups: execute's caller resets the recorders before an outliving view's ranges end.
 __declspec(dllexport) volatile LONG overhaul_packets;
-// 1 runs prepare's instance-texture fill and list C's first sort of the frame on two idle workers, beside main's keys and
-// list A and the engine's list B task. The record-time re-sorts of the then sorted list are what tiegroup's sortonce skips.
+// 1 runs prepare's instance-texture fill and list C's first sort on two idle workers, beside main's keys and list A.
 __declspec(dllexport) volatile LONG overhaul_prepare_split = 1;
-// 1 has workers and main's deferred segments upload into their own copies of the engine's constant buffers. With overlap,
-// mapping the engine's own buffers on deferred contexts left main's later maps of them waiting in the driver.
+// 1 uploads deferred lists into CB copies: mapping the engine's own buffers there made main's later maps wait.
 __declspec(dllexport) volatile LONG overhaul_cb_copies = 1;
-// 1 lets main go on to the next view while workers draw a split one: main records into its own deferred context through
-// s2fix's wrapped context (wrap_context=1 in s2prof.ini), and the lists are executed in order as they finish and at each drain.
-// It takes effect from the next frame, and implies packets.
+// 1 lets main record the next view while workers draw (needs wrap_context=1); from the next frame, implies packets.
 __declspec(dllexport) volatile LONG overhaul_overlap;
-// 1 sets each split view's range boundaries from its previous frame's range times, so main and the workers finish
-// together, instead of giving main overhaul_main_share.
+// 1 sets each split view's range ends from last frame's range times, instead of overhaul_main_share.
 __declspec(dllexport) volatile LONG overhaul_autobalance = 1;
-// 1 runs the battle's Variant node prepare (instance textures, keys, merges, the three sorts) on workers as soon as the
-// scene update has joined its producers, beside the UI update, instead of on main at the first view group.
+// 1 runs the battle's Variant node prepare on workers once the scene update joins its producers, beside the UI.
 __declspec(dllexport) volatile LONG overhaul_early_prepare = 1;
-// 1 spreads the early prepare's instance-texture fill over worker 1 and two helpers, a texture each: the fill was its
-// longest task.
+// 1 spreads the early prepare's instance-texture fill, its longest task, over worker 1 and two helpers.
 __declspec(dllexport) volatile LONG overhaul_split_fill = 1;
-// 1 lets main, while workers draw a split view, record the next view of the group when it records through the queue
-// walk and is of a type in overhaul_record_ahead_views. Record reads only frame constants, and with the view's groups
-// copied the engine's buckets are free; that view's own record is then skipped.
+// 1 lets main record the next view while workers draw: record reads only frame constants and the buckets are free.
 __declspec(dllexport) volatile LONG overhaul_record_ahead = 1;
-// 1 records each recorded-ahead view again at its own turn and compares the two (record-ahead keeps the second).
+// 1 records each recorded-ahead view again at its turn and compares; the second record is kept.
 __declspec(dllexport) volatile LONG overhaul_record_verify;
-// The 3D views of the default group, by type, but the shadow view (see records_ahead).
+// The default group's 3D views except the shadow view (see records_ahead).
 __declspec(dllexport) volatile uint64_t overhaul_record_ahead_views = 1ull << 0x0 | 1ull << 0xe | 1ull << 0xf | 1ull << 0x10 | 1ull << 0x11 |
                                                                        1ull << 0x16 | 1ull << 0x17 | 1ull << 0x18 | 1ull << 0x19 | 1ull << 0x1a |
                                                                        1ull << 0x1b | 1ull << 0x1c | 1ull << 0x1d | 1ull << 0x1e;
-// 1 adds detail to the GPU timing of the views this module may split, reported per view: the wait before the first
-// worker list, each list's time before its first command, inside it and after its last, and pipeline statistics. A switch.
+// 1 adds per-list GPU timing and pipeline statistics to the split views' GPU report.
 __declspec(dllexport) volatile LONG overhaul_gpu_detail;
-// 1 executes overhaul_probe_count empty command lists after each split view's own lists (overhaul_probe_bind 1: each binds
-// the view's targets, as a worker's list does), so what a list costs the GPU apart from its draws shows. A switch.
+// 1 executes empty lists after each split view's own (overhaul_probe_bind: each binds its targets) to show their cost.
 __declspec(dllexport) volatile LONG overhaul_probe_lists;
 __declspec(dllexport) volatile LONG overhaul_probe_count = 4;
 __declspec(dllexport) volatile LONG overhaul_probe_bind;
-// The change flags a forced job writes all of, instead of trusting what earlier groups left in the parameter library.
-// Without the switches below only a worker range's first job is forced.
+// Flags a forced job writes all of; without the switches below only a worker range's first job is forced.
 __declspec(dllexport) volatile LONG overhaul_forced_flags = FORCED_FLAGS;
-// 1 forces the first job of each engine recorder a range reaches, main's range included: a recorder whose first group in
-// the range opened without flags relies on parameters a group before the range set. A switch.
+// 1 forces each recorder's first job in a range: one opened without flags relies on parameters set before it.
 __declspec(dllexport) volatile LONG overhaul_force_recorders;
-// 1 forces every job. A switch.
 __declspec(dllexport) volatile LONG overhaul_force_all;
-// 1 adds the bone palette (0x01) to a forced Variant group whose node draws without instancing. A switch.
+// 1 adds the bone palette (0x01) to a forced non-instanced Variant group.
 __declspec(dllexport) volatile LONG overhaul_force_bones;
-// 1 refreshes a worker's program copy from the program each time the worker binds it. A switch.
+// 1 refreshes a worker's program copy at every bind, not just a range's first.
 __declspec(dllexport) volatile LONG overhaul_program_refresh;
-// 1 has a worker set a split view's texture slots in copies of its own, which its commits bind. Every thread's draws set
-// the same library slots (a unit's material textures and the t_animation_map its bones come from, a particle's, an
-// imposter's), and a commit bound whatever any thread had set last: units flashing through textures and shapes. Main
-// keeps the engine's slots, which the workers then never write. A switch, on by default.
+// 1 has workers set texture slots in their own copies: every thread sets the same library slots, read at commit.
 __declspec(dllexport) volatile LONG overhaul_texture_copies = 1;
-// 1 does the same for the constant buffers draws write their values into (a unit's team colours and blood amounts, a
-// particle's flipbook frame, UVs and colour), which the engine's writers store into inline, so nothing can redirect the
-// store. Each thread keeps its own copy of every buffer its writers changed in its range: around each writer call (effect
-// vtbl+0x48, +0x50, +0x58, +0xb8), under a lock, it puts back its values the other threads overwrote, the writer runs as
-// it would alone (its compare-first and change-flag skips see this thread's values), and what it wrote is copied out;
-// the uploads then read the thread's copy without the lock. A switch, on by default; the lock covers the writers only,
-// since one thread committing at a time was far slower.
+// 1 gives each thread its own values of CBs its writers store into inline, swapped in around each writer under a lock.
 __declspec(dllexport) volatile LONG overhaul_value_copies = 1;
-// 1 gives each thread drawing a split view its own copy of the shader library (SHADERS), whose parameters point into the
-// thread's own values: the getter every unit and particle writer reaches the library through (0x1819f80d0) answers a
-// thread's writers with its copy, so they run without valuecopies' lock and their compare-first skips see the thread's
-// own values. Needs valuecopies, whose lock stays for a writer that reaches a parameter some other way. A switch, on by
-// default.
+// 1 hands each drawing thread its own shader library copy, so its writers skip the value lock; needs value copies.
 __declspec(dllexport) volatile LONG overhaul_param_contexts = 1;
-// 1 moves list A's items in the early prepare with every early-prepare worker that is free: its sort is the early
-// prepare's longest task. A switch, off: the move is memory-bound, so it gains little, and the helpers spin beside main's
-// UI update.
+// 1 has free early-prepare workers help move list A's items; off: memory-bound, and the helpers spin beside main.
 __declspec(dllexport) volatile LONG overhaul_parallel_sort;
-// 1 records the effects views on two spare workers as the scene's views begin, into packets that each view's own record
-// replays. A view gathers only its own emitters (the two share none), from the frame's camera. A switch, on by default.
+// 1 records the two effects views early on spare workers (they share no emitters); each view's record replays them.
 __declspec(dllexport) volatile LONG overhaul_early_effects = 1;
-// 1 records each early-recorded effects view again at its turn and compares the two; the engine's record is drawn. A switch.
+// 1 records each early-recorded effects view again at its turn and compares; the engine's record is drawn.
 __declspec(dllexport) volatile LONG overhaul_effects_verify;
-// 1 records ahead on a worker of its own (the one after overhaul_workers), started as soon as the view's groups are
-// copied, so the next view's record leaves main instead of filling its wait. A switch, off: main then waits for it, as a
-// record is about as long as main's part of a view.
+// 1 records ahead on a worker of its own; off: main then waits for it, as a record lasts about as long as main's part.
 __declspec(dllexport) volatile LONG overhaul_record_worker;
-// 1 records shadow cascades 1 and up on workers of their own (after overhaul_workers) while main draws cascade 0, into
-// per-view packets instead of the engine's recorders; each cascade's execute builds its groups from them. A switch.
+// 1 records shadow cascades 1 and up into packets on their own workers while main draws cascade 0.
 __declspec(dllexport) volatile LONG overhaul_parallel_cascades;
-// 1 has each cascade recorded in parallel also recorded by the engine at its turn, and the groups the packets give compared
-// with the engine's (the engine's are drawn). A switch.
+// 1 also has the engine record each parallel cascade and compares the groups; the engine's are drawn.
 __declspec(dllexport) volatile LONG overhaul_packet_verify;
-// 1 lets the shadow view record its next cascade ahead (needs groupgather's per-view snapshot). A switch, on by default.
+// 1 lets the shadow view record its next cascade ahead (needs overhaul_group_gather).
 __declspec(dllexport) volatile LONG overhaul_record_cascades = 1;
-// 1 has every thread that draws a split view's group-instance meshes see them through a view of its own (bind_group_view).
-// A RIGID_GROUP_INSTANCE_MESH keeps a pointer to the item's chunker (+0x1e8) and its gatherer reads the chunk from there,
-// so a worker drawing from its copy gathered the group the shared chunker was at, shading thousands of times the pixels.
-// A switch, on by default.
+// 1 gives each drawing thread its own view of group-instance meshes, whose gatherer reads through the shared chunker.
 __declspec(dllexport) volatile LONG overhaul_group_gather = 1;
-// 1 samples every overhaul_group_every-th frame: pixels, vertices and primitives per group of each split view's ranges,
-// reported by draw item. A switch.
+// 1 samples per-group pipeline statistics of split views every overhaul_group_every-th frame.
 __declspec(dllexport) volatile LONG overhaul_group_stats;
 __declspec(dllexport) volatile LONG overhaul_group_every = 8;
-// View types an overlap may run through; any other view drains it first. The 3D views from the shadow cascades to
-// EFFECTS_ADDITIVE, without DOF, the upscalers, the HDR chain and the UI.
+// View types an overlap may run through; any other drains it first.
 __declspec(dllexport) volatile uint64_t overhaul_overlap_views = 1ull << 0x0 | 1ull << 0x1 | 1ull << 0x5 | 1ull << 0xe | 1ull << 0xf | 1ull << 0x11 |
                                                                   1ull << 0x16 | 1ull << 0x17 | 1ull << 0x18 | 1ull << 0x19 | 1ull << 0x1a | 1ull << 0x1b |
                                                                   1ull << 0x1c | 1ull << 0x1d | 1ull << 0x1e | 1ull << 0x28 | 1ull << 0x2b | 1ull << 0x2c |
@@ -754,37 +684,34 @@ static TextureSetFn original_texture_set;
 static BuildSrvListFn original_build_srv_list;
 static BOOL texture_copies_full_logged;
 static TouchFn original_touch;
-// Set by main for the whole of a split view whose values are kept per thread.
+// Set by main for the whole of a split view.
 static volatile LONG values_active;
 static ValueState main_values;
 static SRWLOCK value_lock = SRWLOCK_INIT;
 static const uint32_t writer_slots[WRITER_SLOTS] = {0x48, 0x50, 0x58, 0xb8};
-// Effect vtables whose writer slots point at the wrappers, with the functions they pointed at.
 typedef struct {
     void **vtable;
     WriterFn original[WRITER_SLOTS];
-    // A slot is locked once it has been seen writing, and restores the buffers it has written before.
+    // Once seen writing, the slot locks and restores the buffers it wrote before.
     volatile LONG writes[WRITER_SLOTS];
     BYTE *learned[WRITER_SLOTS][LEARNED_BUFFERS];
-    // paramcontexts: a slot seen writing a buffer the library copies do not hold runs under the lock from then on.
+    // A slot seen writing a buffer outside the library copies runs locked from then on.
     volatile LONG context_locked[WRITER_SLOTS];
 } WrappedClass;
 static WrappedClass wrapped_classes[WRAPPED_CLASSES];
 static LONG wrapped_class_count;
 static BOOL wrapped_classes_full_logged, value_copies_full_logged, learned_full_logged, binding_infos_full_logged;
-// Every constant buffer a wrapped writer has touched: the bytes the first write left, and whether a write has left others.
+// reference holds the first write's bytes; varies once a write left others.
 typedef struct {
     BYTE *binding, *reference;
     volatile LONG varies;
 } BindingInfo;
 static BindingInfo binding_infos[BINDING_INFOS];
 static LONG binding_info_count;
-// The SCENE the learned buffers and binding infos belong to.
 static BYTE *writers_scene;
 static LibraryGetterFn original_library_getter;
 static NodeTextureFn original_node_texture;
-// A SHADER_PARAMETER of the library (binding +0x18, version +0x20, value pointer +0x28): its offset, its buffer, where its
-// value starts and how far the next one in the buffer is, and the two pointers it had when found.
+// A library parameter (binding +0x18, version +0x20, value +0x28) and the two pointers it had when found.
 typedef struct {
     uint32_t offset, buffer, value_offset, value_bytes;
     BYTE *binding, *value;
@@ -801,20 +728,19 @@ static struct {
     LibraryBuffer buffers[LIBRARY_BUFFERS];
     uint32_t index[2 * LIBRARY_BUFFERS];
     uint64_t checked_stamp;
-    // Per qword of the library: 1 where a copy is expected to differ (versions, values, texture slots), 2 at a texture slot.
+    // Per library qword: 1 where a copy may differ (versions, values, slots), 2 at a texture slot.
     uint8_t *volatile_qwords;
-    // The texture slots seen set, and their contents at the fork, which each range's copy starts from.
+    // Texture slots seen set; each range's copy starts from their contents at the fork.
     uint32_t slot_offsets[MAX_LIBRARY_SLOTS];
     volatile LONG slot_count;
     uint32_t snapshot_slots;
     BYTE *slot_snapshot;
     BOOL failed;
 } contexts;
-// Set by main for a split view whose drawing threads write in their library copies.
+// Set by main for a split view drawn with library copies.
 static volatile LONG contexts_split;
 static void *leak_callers[MAX_LEAK_CALLERS], *escape_callers[MAX_LEAK_CALLERS];
 static volatile LONG leak_caller_count, escape_caller_count, escaped_touches;
-// Where touches came from that no wrapped writer made, on a drawing thread of a split view.
 static void *unwrapped_callers[MAX_UNWRAPPED_CALLERS];
 static volatile LONG unwrapped_caller_count;
 static GatherFn original_group_gather;
@@ -835,12 +761,10 @@ static uint64_t probe_lists_run[2];
 static MainGroup main_group;
 static volatile LONG packets_active;
 static CascadeRecord cascade_records[STATS_CASCADES];
-// The cascade whose packets its execute draws, set at its record and taken at its execute.
+// Set at a cascade's record, taken at its execute.
 static CascadeRecord *packet_view;
 static PushRecordFn original_push_record;
 static RecordWholeFn original_record_whole;
-// Per mode: cascades recorded on workers, worker record time, main's wait for them and its own queues, packets, and the
-// packetverify comparison.
 static uint64_t parallel_cascade_count[2], packet_count[2], replayed_views[2], verified_views, differing_views;
 static LONGLONG parallel_worker_ticks[2], parallel_wait_ticks[2], parallel_main_ticks[2];
 static GroupPool group_pools[GROUP_POOLS];
@@ -855,12 +779,12 @@ static volatile uint64_t *frame_stamp;
 static uint64_t last_stamp;
 __attribute__((used)) DWORD tls_index;
 static WorkCounts work[2], view_work[2][VIEW_TYPES + 1];
-// The view main's draws belong to; VIEW_TYPES outside execute.
+// VIEW_TYPES outside execute.
 static uint32_t main_view_type = VIEW_TYPES, main_view_cascade;
 static void *original_draws[DRAW_SLOTS];
 static Worker *workers[MAX_WORKERS];
 static int worker_count;
-// The workers' contexts were let go at a rebuild; the next split makes them again.
+// Set at a graphics rebuild; the next split makes the workers' contexts again.
 static BOOL contexts_released;
 static const char *worker_error;
 static ID3D11Device *device;
@@ -885,17 +809,16 @@ static uint32_t zero_sort_capacity;
 static uint64_t enabled_frames;
 static Timers timers[2];
 static Balance balances[VIEW_TYPES][STATS_CASCADES];
-// The balance of the view main is executing; NULL outside execute.
+// NULL outside execute.
 static Balance *current_balance;
 static RecordQueuesFn original_record_queues;
 static ResetBucketsFn original_reset_buckets;
 static RenderViewsFn original_render_views;
 static BeginBucketFn original_begin_bucket;
 static BattleViewUpdateFn original_battle_view_update;
-// The view group being rendered, for the view after the current one.
+// Kept to find the view after the current one.
 static BYTE *render_context;
-// A view recorded during the previous view's draws, by main in its wait or by the record worker: the reset after that view
-// and this view's own record are skipped. worker is set while the record worker may still be filling the buckets.
+// A view recorded ahead: its record and the reset before it are skipped; worker is set while it may still be filling.
 static struct {
     BYTE *view;
     uint32_t cascade;
@@ -905,8 +828,7 @@ static struct {
 static volatile LONG64 record_worker_ticks[2];
 static BYTE *verify_records[2];
 static size_t verify_capacity[2];
-// The battle's Variant node is the first prepared in each scene update; it is prepared early only while the battle
-// updated and prepared it in the scene update before, so the node is known to be alive.
+// Prepared early only if the battle also prepared it in the last scene update, so the node is known to be alive.
 static BYTE *battle_node;
 static uint32_t battle_node_stamp, battle_update_stamp;
 static struct {
@@ -921,7 +843,7 @@ static TextureFill texture_fills[MAX_TEXTURE_FILLS];
 static uint32_t texture_fill_count;
 static volatile LONG next_texture_fill;
 static __thread BOOL collecting_fills;
-// The flag of the switch an A/B run flips; the per-mode counters split by it.
+// The switch an A/B run flips; the per-mode counters split by it.
 __attribute__((used)) volatile LONG *ab_flag = &overhaul_enabled;
 static const char *ab_name = "overhaul";
 static ViewStats view_stats[2][VIEW_TYPES][STATS_CASCADES];
@@ -931,7 +853,6 @@ static Kicks main_kicks;
 static volatile DWORD split_thread;
 static PrepareFn original_prepare;
 static EffectsRecordFn original_effects_record;
-// The effects views recorded early this frame, in packets, by the workers in their records.
 static CascadeRecord *effects_records[EARLY_EFFECTS];
 static int effects_pending;
 static uint32_t effects_mxcsr;
@@ -941,8 +862,7 @@ typedef struct {
     uint64_t key, index;
 } SortKey;
 enum { SORT_WAITING, SORT_GATHER, SORT_COPY, SORT_DONE };
-// List A's sort in the early prepare (parallelsort): the order from one radix sort over the keys, the items moved in chunks
-// by whichever early-prepare workers are free, out of place into scratch, then back.
+// List A's early-prepare sort: one radix sort orders the keys, then free workers move the items in chunks via scratch.
 static struct {
     BYTE *items, *scratch;
     SortKey *keys, *swap, *order;
@@ -972,7 +892,6 @@ static LONGLONG now_ticks(void);
 static BYTE *job_item(const Job *job);
 static void log_contexts(double busy_frames);
 
-// The value state of a thread drawing a range of a split view, or NULL.
 static ValueState *drawing_values(void) {
     if (!values_active) return NULL;
     Worker *worker = current_worker();
@@ -1017,8 +936,7 @@ static int add_library_buffer(BYTE *buffer, BYTE *binding, BYTE *shadow, uint32_
     return b;
 }
 
-// A parameter is recognised by its binding (+0x18) leading to a buffer whose shadow its value pointer (+0x28) points into
-// (about 1,200 in 190 buffers). The library holds other pointers too, so each is read through ReadProcessMemory.
+// Parameters are found by shape; the library holds other pointers too, so each is read through ReadProcessMemory.
 static BOOL build_library(void) {
     contexts.shared = *(BYTE **)(*(BYTE **)(engine + ENGINE_RVA) + 0x30) + LIBRARY_OFFSET;
     if (!contexts.records && !(contexts.records = malloc(MAX_LIBRARY_RECORDS * sizeof *contexts.records))) {
@@ -1035,7 +953,7 @@ static BOOL build_library(void) {
             !read_memory(buffer + 0x40, &shadow, sizeof shadow) || !read_memory(buffer + 0x48, &bytes, sizeof bytes) || !shadow || !bytes ||
             bytes > 65536 || value < shadow || value >= shadow + bytes)
             continue;
-        // Memory that only looks like a parameter: one seen at a battle load had a shadow of 1.
+        // Memory that only looks like a parameter.
         if (!heap_pointer(shadow)) {
             lookalikes++;
             continue;
@@ -1092,8 +1010,7 @@ static BOOL library_holds(void) {
     return TRUE;
 }
 
-// On main at a split view's fork: the library checked once a frame and rebuilt if its parameters moved, and the values
-// every range of the view starts from.
+// At a split view's fork, on main: the library is checked once a frame and rebuilt if its parameters moved.
 static BOOL prepare_contexts(void) {
     if (contexts.failed) return FALSE;
     if (!contexts.record_count || (*frame_stamp != contexts.checked_stamp && !library_holds())) {
@@ -1200,7 +1117,6 @@ static ValueCopy *value_copy(ValueState *state, BYTE *buffer, BOOL create) {
     }
 }
 
-// The values a thread draws with, for an upload: its own where it wrote the buffer in this range.
 static const void *value_source(BYTE *buffer) {
     ValueState *state = drawing_values();
     ValueCopy *copy = state ? value_copy(state, buffer, FALSE) : NULL;
@@ -1231,7 +1147,6 @@ static const LibraryRecord *find_value_record(uint32_t buffer, uint32_t value_of
     return NULL;
 }
 
-// The thread's equivalent of a library or SCENE pointer an object keeps, or NULL.
 static BYTE *copy_base(const ValueState *state, BYTE *kept) {
     return kept == contexts.shared || kept == contexts.shared - LIBRARY_OFFSET ? state->library + (kept - contexts.shared) : NULL;
 }
@@ -1243,9 +1158,7 @@ static BOOL in_library_copy(const BYTE *address) {
     return FALSE;
 }
 
-// A touch by a writer running in the thread's library copy. A parameter outside the copy was reached without the getter
-// (the Variant node keeps a pointer to the library for 0x181b47e50): its store went to the shared values, which the thread's
-// copy takes it from.
+// A touch outside the copy was reached without the getter: the store went to the shared values; the copy takes it.
 static void context_touch(ValueState *state, BYTE *parameter, BYTE *binding, void *caller) {
     BYTE *buffer = *(BYTE **)(binding + 0x30);
     int b = buffer ? library_buffer_index(buffer) : -1;
@@ -1285,8 +1198,7 @@ static void context_touch(ValueState *state, BYTE *parameter, BYTE *binding, voi
     }
 }
 
-// The parameter touch (0x181aeed70) follows every parameter write: it bumps the parameter's version (+0x20) and its
-// buffer's (binding +0x38). The engine's increments are not atomic, and a lost one is a missed upload.
+// The engine's version bumps after a parameter write are not atomic, and a lost one is a missed upload.
 static void touch_hook(BYTE *parameter) {
     BYTE *binding = *(BYTE **)(parameter + 0x18);
     if (!values_active) {
@@ -1366,7 +1278,6 @@ static BindingInfo *binding_info(BYTE *binding, BOOL create) {
     }
 }
 
-// The buffers the writer just wrote become the thread's copies, and what the slot is known to write.
 static void copy_out_values(ValueState *state, WrappedClass *wrapped, int slot) {
     for (uint32_t i = 0; i < state->touched_count; i++) {
         BYTE *binding = state->touched[i], *buffer = *(BYTE **)(binding + 0x30);
@@ -1427,9 +1338,7 @@ static uint64_t call_writer(int slot, uint64_t effect, uint64_t b, uint64_t c, u
     }
     if (state->contexts) wrapped->writes[slot] = 1;
     state->touched_count = 0;
-    // Most writer calls change nothing: a shadow view's materials write nothing, its units only the same 1024.0 each chunk.
-    // A slot runs unlocked while every buffer it touches only ever holds the bytes of its first write, the same for every
-    // thread; one that varies locks the slot from then on (that first varying write is copied out as it stands).
+    // Most writer calls change nothing: a slot stays unlocked while its buffers only hold the bytes of its first write.
     if (!wrapped->writes[slot]) {
         state->depth = 1;
         uint64_t result = original(effect, b, c, d, e, f);
@@ -1455,9 +1364,7 @@ static uint64_t call_writer(int slot, uint64_t effect, uint64_t b, uint64_t c, u
         return result;
     }
     lock_values(state);
-    // Each buffer the slot writes holds this thread's values when its writer runs: put back where another thread changed
-    // it, or, the first time in the range, taken as it stands (a compare-first writer that then skips a value equal to it
-    // has left the thread the right one).
+    // Each buffer gets this thread's values back, or at its first write in the range is taken as it stands.
     BYTE **learned = wrapped->learned[slot];
     for (int k = 0; k < LEARNED_BUFFERS && learned[k]; k++) {
         BYTE *buffer = *(BYTE **)(learned[k] + 0x30);
@@ -1496,7 +1403,7 @@ WRITER_WRAPPER(2)
 WRITER_WRAPPER(3)
 static void *const writer_wrappers[WRITER_SLOTS] = {(void *)writer_wrapper_0, (void *)writer_wrapper_1, (void *)writer_wrapper_2, (void *)writer_wrapper_3};
 
-// The buffers the writers were seen writing and the unlocked slots' reference copies; returns how many buffers.
+// Returns how many learned buffers were dropped.
 static int forget_writers(void) {
     int learned = 0;
     for (int i = 0; i < WRAPPED_CLASSES; i++) {
@@ -1510,8 +1417,7 @@ static int forget_writers(void) {
     return learned;
 }
 
-// A load replaces SCENE (0x1819f2080 deletes it and allocates another), and with it the buffers the writers were seen
-// writing; one allocated where the old one was holds the same buffers at the same addresses.
+// A load replaces the scene and its buffers; a scene at the old address holds the same buffers at the same addresses.
 static void forget_replaced_scene(void) {
     BYTE *scene = *(BYTE **)(*(BYTE **)(engine + ENGINE_RVA) + 0x30);
     if (scene == writers_scene) return;
@@ -1522,8 +1428,7 @@ static void forget_replaced_scene(void) {
     writers_scene = scene;
 }
 
-// On main, before a split view's workers start: the writer slots of each effect class it draws point at the wrappers from
-// then on (they pass straight through outside a split view's ranges).
+// On main, before a split's workers start; the wrappers pass straight through outside a split view's ranges.
 static void wrap_writers(const ViewSlot *slot) {
     forget_replaced_scene();
     void **last = NULL;
@@ -1554,8 +1459,7 @@ static void wrap_writers(const ViewSlot *slot) {
     }
 }
 
-// At the join: the engine's shadows get the values the view's last writer of each left, ranges in draw order, as if one
-// thread had drawn the view.
+// At the join: the engine's shadows get each buffer's last values in draw order, as if one thread drew the view.
 static void write_back_values(const ValueState *state) {
     for (uint32_t i = 0; i < state->active_count; i++) {
         const ValueCopy *copy = &state->copies[state->active[i]];
@@ -1584,7 +1488,7 @@ static void node_texture_hook(BYTE *node, uint64_t instance_texture) {
     original_node_texture(view, instance_texture);
 }
 
-// The library getter (0x1819f80d0): a writer running in a thread's library copy gets the copy.
+// A thread drawing with a library copy gets the copy.
 static BYTE *library_getter_hook(BYTE *holder) {
     BYTE *library = *(BYTE **)(holder + 0x30) + LIBRARY_OFFSET;
     if (!contexts_split) return library;
@@ -1655,8 +1559,7 @@ static BYTE *get_renderer_hook(BYTE *render_device) {
     return worker ? worker->renderer : render_device + RENDERER_OFFSET;
 }
 
-// Streaming a texture in replaces its device texture, releasing the view other threads may be binding, so while a view
-// is split nobody streams: main's and the workers' kicks run after the join, and the texture streams one view later.
+// Streaming a texture in releases the view other threads may bind, so kicks wait for the join while a view is split.
 static BYTE kick_stream_hook(BYTE *texture, BYTE *renderer) {
     Worker *worker = current_worker();
     if (!worker && GetCurrentThreadId() != split_thread) return stream_in(*(BYTE **)(texture + 0x20), renderer);
@@ -1671,8 +1574,7 @@ static void run_kicks(Kicks *kicks, BYTE *renderer) {
     kicks->count = 0;
 }
 
-// With shared programs (commit mode 1) the commits' output arrays are shared, and the D3D runtime reads the list it is
-// given twice; one thread commits at a time while a view is split.
+// With shared programs (commit mode 1) the runtime reads the shared output arrays twice: one thread commits at a time.
 static void lock_commits(void) {
     if (!TryAcquireSRWLockExclusive(&commit_lock)) {
         LONGLONG waiting = now_ticks();
@@ -1689,9 +1591,7 @@ static uint64_t bind_pass_state_hook(BYTE *pass, BYTE *renderer) {
     return result;
 }
 
-// The worker's copy of a slot in its current range, made from the engine's slot on its first set there; NULL when the
-// range has none (the commit then reads the engine's slot, as a range's draws set every slot they rely on: its first
-// group is forced) or the table is half full.
+// NULL when the range set no copy (its forced first group set every slot it needs) or the table is half full.
 static TextureCopy *texture_copy(Worker *worker, BYTE *slot, BOOL create) {
     uint32_t mask = TEXTURE_COPIES - 1;
     for (uint32_t i = (uint32_t)((uintptr_t)slot >> 4) * 0x9e3779b9u & mask;; i = (i + 1) & mask) {
@@ -1716,7 +1616,6 @@ static TextureCopy *texture_copy(Worker *worker, BYTE *slot, BOOL create) {
     }
 }
 
-// The texture-slot set (0x181ab6470), the one writer of texture slots (340 call sites): a worker's lands in its copy.
 static void note_library_slot(const BYTE *slot) {
     uint32_t qword = (uint32_t)(slot - contexts.shared) / 8;
     if (contexts.volatile_qwords[qword] == 2) return;
@@ -1726,10 +1625,10 @@ static void note_library_slot(const BYTE *slot) {
     if (index < MAX_LIBRARY_SLOTS) contexts.slot_offsets[index] = qword * 8;
 }
 
+// The only writer of texture slots, so a worker's sets can land in its own copies.
 static BYTE *texture_set_hook(BYTE *slot, BYTE *texture) {
     BYTE *passed = slot;
-    // The commits read the engine's slots: a set in a thread's library copy is one of the engine's, and the copy's slot
-    // follows it for what the thread reads back.
+    // Commits read the engine's slots: a set in a library copy goes there, and the copy follows for the thread's reads.
     ValueState *state = contexts_split ? drawing_values() : NULL;
     BOOL in_copy = state && state->library && slot >= state->library && slot + SHADER_TEXTURE_SIZE <= state->library + LIBRARY_SIZE;
     if (in_copy) slot = contexts.shared + (slot - state->library);
@@ -1743,8 +1642,7 @@ static BYTE *texture_set_hook(BYTE *slot, BYTE *texture) {
     return passed;
 }
 
-// The SRV list build (0x181abee50), behind every stage's SRV commit, as the engine has it (each branch of its switch on
-// the resource kind ends in the same store), reading a worker's copy of the slots it set.
+// The engine's SRV list build (each branch of its switch ends in the same store), reading a worker's slot copies.
 static BYTE *build_srv_list_hook(BYTE *list, uint32_t *count, uint32_t *first, BYTE **cache) {
     Worker *worker = current_worker();
     if (!worker || !worker->texture_generation) return original_build_srv_list(list, count, first, cache);
@@ -1767,12 +1665,7 @@ static BYTE *build_srv_list_hook(BYTE *list, uint32_t *count, uint32_t *first, B
     return list + 0x68;
 }
 
-// The engine uploads a constant buffer only when its binding's version differs from the one last uploaded, tracked
-// once per buffer: right for one timeline, wrong for several. A worker that skips an upload main made reads, on the
-// GPU, whatever its command list follows (the leaf alpha-test constants of another mesh: tree shadows became sticks).
-// A worker, and main while it records a deferred segment, uploads each buffer once per command list at each version and
-// leaves the engine's record alone; once another timeline uploaded a buffer, main forgets the engine's record of it.
-// Open addressing over entries of the current list; entries of earlier lists count as free.
+// The engine's once-per-buffer upload record is wrong across timelines: each list tracks its own uploads by version.
 static UploadedBuffer *list_slot(UploadedBuffer *table, BYTE *key, uint32_t list) {
     UploadedBuffer *slot = &table[((uintptr_t)key >> 4) * 0x9e3779b9u & (CB_TABLE_SIZE - 1)];
     while (slot->buffer && slot->buffer != key && slot->list == list) slot = slot + 1 == table + CB_TABLE_SIZE ? table : slot + 1;
@@ -1792,8 +1685,7 @@ static CbCopy *copy_slot(CbCopy *table, uint32_t capacity, BYTE *buffer) {
     return slot;
 }
 
-// The timeline's own buffer for an engine constant buffer. Keyed by the engine's object, whose address a freed buffer
-// can hand on to one of another size; a new copy holds nothing yet.
+// Keyed by the engine's object, whose address a freed buffer can pass to one of another size.
 static ID3D11Buffer *cb_copy(UploadTracker *uploads, BYTE *buffer, ID3D11Buffer *engine_buffer, uint32_t bytes, BOOL *created) {
     if (2 * (uploads->copy_count + 1) > uploads->copy_capacity) {
         uint32_t capacity = uploads->copy_capacity ? 2 * uploads->copy_capacity : 4096;
@@ -1860,8 +1752,7 @@ static BYTE *ring_allocate_hook(BYTE *holder, BYTE *span, uint64_t renderer, uin
     return original_ring_allocate(holder, span, renderer, bytes, c, d, e);
 }
 
-// The constant-buffer upload (0x181abecc0) as the engine has it, for main's range of a split view, uploading main's own
-// values where it wrote the buffer in its range.
+// The engine's CB upload, for main's range of a split view, uploading main's own values where it wrote the buffer.
 static BYTE *upload_main_values(BYTE *bindings, uint32_t *count, uint32_t *first, BYTE **cache) {
     BYTE *renderer = *(BYTE **)(engine + RENDER_DEVICE_RVA) + RENDERER_OFFSET;
     *count = *first = 0;
@@ -2077,7 +1968,7 @@ static void create_detail_queries(void) {
     gpu_detail_ready = TRUE;
 }
 
-// Whether the driver builds command lists itself (without, the runtime records the calls and replays them at execute).
+// Without driver command lists the runtime records the calls and replays them at execute.
 static void log_device(void) {
     D3D11_FEATURE_DATA_THREADING threading = {0};
     ID3D11Device_CheckFeatureSupport(device, D3D11_FEATURE_THREADING, &threading, sizeof threading);
@@ -2115,7 +2006,6 @@ static int describe_target(char *out, size_t size, ID3D11Resource *resource, UIN
                     slices, texture.ArraySize, texture.SampleDesc.Count);
 }
 
-// Once per split view: what its lists bind, by DXGI format number (shadow slices of one array lose more in a list).
 static void log_targets(uint32_t type, uint32_t cascade, const TargetState *state) {
     static BOOL logged[VIEW_TYPES][STATS_CASCADES];
     if (logged[type][cascade]) return;
@@ -2154,8 +2044,7 @@ static void log_targets(uint32_t type, uint32_t cascade, const TargetState *stat
 
 static void rotate_group_pools(ID3D11DeviceContext *immediate);
 
-// GPU time of the views this module may split, in both modes: a timestamp before the view, after main's own range and
-// after the replay; a disjoint query per frame. Results are read GPU_TIMING_FRAMES frames later.
+// GPU time of the views this module may split, both modes; results are read GPU_TIMING_FRAMES frames later.
 static int gpu_view_begin(ID3D11DeviceContext *immediate, uint32_t type, uint32_t cascade) {
     if (!device) ID3D11DeviceContext_GetDevice(immediate, &device);
     if (!gpu_timing_ready) {
@@ -2271,7 +2160,6 @@ static void read_group_pool(ID3D11DeviceContext *immediate, GroupPool *pool) {
     pool->pending = FALSE;
 }
 
-// At each new frame: read the pools old enough, and on every overhaul_group_every-th frame hand a free pool to the splits.
 static void rotate_group_pools(ID3D11DeviceContext *immediate) {
     current_group_pool = NULL;
     if (!group_pools_ready) {
@@ -2293,7 +2181,6 @@ static void rotate_group_pools(ID3D11DeviceContext *immediate) {
         }
 }
 
-// The current frame when the view's lists should write gpudetail queries, or NULL.
 static GpuFrame *gpu_detail_frame(int view) {
     if (view < 0) return NULL;
     GpuFrame *frame = &gpu_frames[gpu_frame_number % GPU_TIMING_FRAMES];
@@ -2353,9 +2240,7 @@ static ID3D11Buffer *create_clone_buffer(D3D11_BUFFER_DESC desc, uint32_t bytes)
     return buffer;
 }
 
-// The clone's buffer and capacity for the list's upload mode: mapping writes into the small buffer, the staging modes keep
-// the original's size and upload once a list. A stamp unlike the scene's makes the first map a DISCARD, as a deferred
-// context requires.
+// A stamp unlike the scene's makes the first map a DISCARD, as a deferred context requires.
 static void select_clone_buffer(Worker *worker, BYTE *copy) {
     BYTE *buffer_copy = copy + RING_HOLDER_SIZE;
     CloneBuffers *buffers = clone_buffers(buffer_copy);
@@ -2366,7 +2251,6 @@ static void select_clone_buffer(Worker *worker, BYTE *copy) {
     *(uint32_t *)(copy + 0x78) = *(uint32_t *)(*(BYTE **)(engine + ENGINE_RVA) + SCENE_UPDATE_STAMP_OFFSET) ^ 1;
 }
 
-// A request past a small clone's capacity grows it; the geometry ring's reach about 1 MB.
 static void grow_clone(Worker *worker, BYTE *holder, uint32_t bytes) {
     if (worker->upload_mode) return;
     for (int i = 0; i < worker->clone_count; i++) {
@@ -2452,10 +2336,7 @@ static size_t chunker_size(BYTE *chunker) {
     __builtin_trap();
 }
 
-// A group-instance mesh as one view's draws must see it: record writes the view's instance count (+0x1f0) and pass bit
-// (+0x1f4) into the shared mesh (the vegetation node's record, 0x181b6cb00), and the chunker's size and the gatherer
-// read them while the next view may already be recording. The view also holds the thread's own chunker (+0x1e8), and the
-// chunker's mesh (+0x28) points back at it.
+// Record stores a view's count and pass bit in the shared mesh, and the next view may record while this one draws.
 static BOOL bind_group_view(BYTE *view, BYTE *chunker, const Job *job) {
     BYTE *mesh = *(BYTE **)(job_item(job) + 0x10);
     if (!overhaul_group_gather || *(BYTE **)mesh != engine + GROUP_INSTANCE_MESH_VTABLE_RVA) return FALSE;
@@ -2518,7 +2399,7 @@ static BYTE *group_view_for(BYTE *mesh) {
     return main_group.mesh_of == mesh ? main_group.view : NULL;
 }
 
-// The gatherer (rcx) reads only its mesh (+0x08) and, through it, the fields up to GROUP_MESH_VIEW_SIZE; it writes none.
+// The gatherer reads only its mesh (+0x08) up to GROUP_MESH_VIEW_SIZE and writes none, so a view copy suffices.
 static uint64_t group_gather_hook(BYTE *gatherer, BYTE *mapped, const uint32_t *ids) {
     BYTE *view = group_view_for(*(BYTE **)(gatherer + 8));
     if (!view) return original_group_gather(gatherer, mapped, ids);
@@ -2526,10 +2407,7 @@ static uint64_t group_gather_hook(BYTE *gatherer, BYTE *mapped, const uint32_t *
     return original_group_gather((BYTE *)fake, mapped, ids);
 }
 
-// Program objects keep the lists their commits build (CBs, samplers, SRVs, UAVs) in output arrays inside the object, and
-// the D3D runtime reads the list it is given twice (once to set up each view's per-context record, once to bind): two
-// threads committing one program would hand each other's lists to the runtime mid-call. A worker's renderer binds
-// private copies instead, each with its own output arrays; the binding lists and the D3D shader stay shared.
+// The runtime reads a commit's list from the program's output arrays twice: workers bind copies with their own arrays.
 static const struct {
     uint32_t output, bindings;
 } program_outputs[] = {{0x18, 0x08}, {0x40, 0x30}, {0x70, 0x50}, {0x80, 0x60}, {0x90, 0x60}};
@@ -2540,7 +2418,7 @@ static uint32_t output_entries(const BYTE *program, int i) {
     return bindings[1] > entries ? bindings[1] : entries;
 }
 
-// Copies the program into its clone, keeping the clone's own output arrays, grown when the program's lists grew.
+// Keeps the clone's own output arrays.
 static void fill_program_clone(ProgramClone *clone) {
     void *outputs[PROGRAM_OUTPUTS];
     for (int i = 0; i < PROGRAM_OUTPUTS; i++) outputs[i] = *(void **)(clone->copy + program_outputs[i].output + 8);
@@ -2570,8 +2448,7 @@ static ProgramClone *insert_program(Worker *worker, ProgramClone clone) {
         }
 }
 
-// A battle load frees programs and their binding lists and builds new ones, often at the same addresses, so a copy filled
-// in an earlier range can hold freed samplers and SRVs: each range refills a copy from the live program at its first bind.
+// A load can rebuild programs at the same addresses: each range refills its copy from the live program at first bind.
 static BYTE *program_clone(Worker *worker, BYTE *program) {
     uint32_t mask = worker->program_capacity - 1;
     for (uint32_t slot = (uint32_t)((uintptr_t)program >> 4) * 0x9e3779b9u & mask;; slot = (slot + 1) & mask) {
@@ -2620,7 +2497,7 @@ SET_SHADER_WRAPPER(2)
 SET_SHADER_WRAPPER(3)
 SET_SHADER_WRAPPER(4)
 SET_SHADER_WRAPPER(5)
-// RENDERER slots that bind a stage's program: VS, GS, HS, DS, PS, CS.
+// Renderer slots that bind each stage's program: VS, GS, HS, DS, PS, CS.
 static const uint32_t set_shader_slots[STAGES] = {0x20, 0x40, 0x60, 0x80, 0xa0, 0xc0};
 static void *const set_shader_wrappers[STAGES] = {(void *)set_shader_0, (void *)set_shader_1, (void *)set_shader_2,
                                                   (void *)set_shader_3, (void *)set_shader_4, (void *)set_shader_5};
@@ -2631,8 +2508,7 @@ static BOOL job_forced(const RangeRecorder *recorder) {
            (recorder->current_index == recorder->first_job || recorder->jobs[recorder->current_index - 1].recorder != recorder->current->recorder);
 }
 
-// Only a Variant node drawing without instancing writes the bone palette; forced on an instanced one, the writer would
-// read a pose the item need not have.
+// Only a non-instanced Variant node writes the bone palette; forced, an instanced one would read a pose it may lack.
 static BOOL draws_without_instancing(const Job *job) {
     BYTE *effect = *(BYTE **)(job_item(job) + 0x10);
     void *vtable = *(void **)effect;
@@ -2761,8 +2637,7 @@ static void copy_packets(ViewSlot *slot, Timers *timer) {
     timer->packet_bytes += bytes;
 }
 
-// Groups the view would draw, or -1 for a recorder kind this module does not know. Counted before any sort: the
-// program sort is not a strict weak ordering, so a view handed back to the original must not be sorted twice.
+// -1: unknown recorder. Unsorted, as the program sort isn't a strict weak ordering and a handed-back view sorts again.
 static int64_t count_jobs(BYTE *context) {
     uint32_t bucket_count = *(uint32_t *)(context + 0x1c);
     BYTE *recorder_vectors = *(BYTE **)(context + 0x40);
@@ -2787,8 +2662,7 @@ static int64_t count_jobs(BYTE *context) {
     return count;
 }
 
-// Lists the view's groups in execute's order: buckets in order, the bucket's recorders after its program sort, each
-// recorder's groups in order.
+// In execute's order: buckets, each bucket's recorders after its program sort, each recorder's groups.
 static void snapshot_jobs(ViewSlot *slot, BYTE *context) {
     slot->job_count = 0;
     uint32_t bucket_count = *(uint32_t *)(context + 0x1c);
@@ -2838,8 +2712,7 @@ static void ensure_bucket_capacity(Range *range, uint32_t bucket_count) {
     }
 }
 
-// Begin callbacks run for every bucket, empty ones too, before its draws. Each range runs those of the buckets it
-// draws, a bucket split between two ranges in both, and the empty buckets before its first draw.
+// Begin callbacks run for every bucket, empty ones too; a range runs its buckets' and the empty ones before its first.
 static void build_range_context(ViewSlot *slot, Range *range, BYTE *context, Worker *worker) {
     const Job *jobs = slot->jobs;
     uint32_t bucket_count = *(uint32_t *)(context + 0x1c);
@@ -2885,8 +2758,7 @@ static void share_ends(int range_count, LONG first_share, double *ends) {
     for (int k = 0; k < range_count; k++) ends[k] = shares ? (main_share + 100.0 * k) / shares : 1;
 }
 
-// Ends that would have given last frame's ranges equal times, if each range's time is spread evenly over its weight;
-// halfway there from last frame's ends, so a frame's noise does not swing them.
+// Ends that would have equalised last frame's range times, moved only halfway so one frame's noise doesn't swing them.
 static void balanced_ends(const Balance *balance, int range_count, LONG first_share, double *ends) {
     LONGLONG total = 0;
     for (int k = 0; k < balance->count; k++) total += balance->ticks[k];
@@ -2946,7 +2818,7 @@ static void release_targets(TargetState *state) {
     memset(state, 0, sizeof *state);
 }
 
-// Cold, like the engine's own renderer after end_frame's reset_state, but keeping the target record and saved targets.
+// As the engine's renderer after end_frame's reset, but keeping the target record and saved targets.
 static void make_cold(BYTE *renderer) {
     memset(renderer + 0x20, 0, RENDERER_TARGETS_START - 0x20);
     memset(renderer + RENDERER_TARGETS_END, 0, RENDERER_SIZE - RENDERER_TARGETS_END);
@@ -3179,8 +3051,7 @@ static ID3D11DeviceContext *engine_immediate_context(void) {
     return *(ID3D11DeviceContext **)(*(BYTE **)(engine + RENDER_DEVICE_RVA) + RENDERER_OFFSET + 0x10);
 }
 
-// The node's lists: pose pairs at +0x270, A, B and C at +0xf8, +0x160 and +0x1c8 (list objects; body at +0x08:
-// count +0x04, items +0x08, needs_merge +0x30).
+// Node lists: poses +0x270, A +0xf8, B +0x160, C +0x1c8; a list's body (+0x08) holds count +0x04, items +0x08.
 static void sort_render_list(BYTE *body) {
     uint32_t count = *(uint32_t *)(body + 0x04);
     BYTE *items = *(BYTE **)(body + 0x08);
@@ -3251,7 +3122,7 @@ static BOOL grow_list_sort(uint32_t count) {
     return list_sort.capacity != 0;
 }
 
-// The order the render sort's radix sort (s2prof sortfix) gives: stable by the 64-bit key at +0xa8.
+// Matches the render sort fix's order: stable by the 64-bit key at +0xa8.
 static void parallel_sort_list(BYTE *body) {
     LONGLONG started = now_ticks();
     uint32_t count = *(uint32_t *)(body + 0x04);
@@ -3304,7 +3175,7 @@ static void drain_and_help(BYTE *unused) {
     help_list_sort();
 }
 
-// Each texture maps on its own and copies its own 1024 rows; the immediate context's lock (below) serialises the maps.
+// Each texture maps and fills its own rows; the immediate context's lock serialises the maps.
 static void early_fill_task(BYTE *node) {
     texture_fill_count = 0;
     next_texture_fill = 0;
@@ -3322,7 +3193,7 @@ static void early_fill_task(BYTE *node) {
         while (workers[EARLY_PREPARE_WORKERS + h]->task) _mm_pause();
 }
 
-// prepare's main part: the pose merge the keys resolve through, then A's keys, merge and sort.
+// The pose merge first: the keys resolve through it.
 static void early_keys_task(BYTE *node) {
     if (node[0x2a0]) ((ListMergeFn)(engine + POSE_MERGE_RVA))(node + 0x270);
     early.counts[0] = *(uint32_t *)(node + 0x274);
@@ -3346,8 +3217,7 @@ static void early_lists_task(BYTE *node) {
     help_list_sort();
 }
 
-// The immediate context takes no lock of its own unless asked: three fill threads mapping instance textures on it at
-// once crashed the driver, and main may call it during the UI update beside them.
+// The immediate context isn't thread-safe unless asked: fill threads map on it, and main may use it in the UI update.
 static void protect_immediate_context(BOOL on) {
     static BOOL logged;
     if (!context_lock) {
@@ -3396,7 +3266,7 @@ static void battle_view_update_hook(BYTE *battle_view, BYTE *frame_argument) {
     kick_task(workers[2], early_lists_task, node);
 }
 
-// Lists that grew or need a merge again since the early prepare, or rows dirty again, mean something added after it.
+// Lists that grew or need a merge again, or rows dirty again, mean something was added after the early prepare.
 static BOOL early_prepare_holds(BYTE *node, uint32_t stamp) {
     return early.stamp == stamp && !node[0x2a0] && !node[0x130] && !node[0x198] && !node[0x200] && !node[0x2e1] &&
            early.counts[0] == *(uint32_t *)(node + 0x274) && early.counts[1] == *(uint32_t *)(node + 0x104) &&
@@ -3484,7 +3354,6 @@ static BYTE execute_lists(ViewSlot *slot, int first, ID3D11DeviceContext *immedi
     return result;
 }
 
-// The probe lists: what executing a list costs the GPU when it draws nothing, executed where the view's own lists were.
 static void execute_probe_lists(ViewSlot *slot, ID3D11DeviceContext *immediate, BOOL restore) {
     if (probe_error) return;
     if (!probe_context) {
@@ -3523,7 +3392,7 @@ static void push_submission(ViewSlot *slot, ID3D11CommandList *list) {
     submissions[submissions_pushed++ % MAX_SUBMISSIONS] = (Submission){slot, list};
 }
 
-// Executes the finished front of the queue on the immediate context; with wait, all of it.
+// Executes in order, so only the finished front of the queue; with wait, all of it.
 static void submit(BOOL wait) {
     while (submissions_done != submissions_pushed) {
         Submission *submission = &submissions[submissions_done % MAX_SUBMISSIONS];
@@ -3674,16 +3543,12 @@ static BYTE *draw_context(void) {
     return *(BYTE **)(engine + DRAW_CONTEXT_RVA);
 }
 
-// The shadow view's next cascade is recorded ahead only with recordcascades: it records on the view object the cascade
-// being drawn uses (its index at +0x94), and its vegetation record rewrote the group-instance meshes the draws read,
-// which groupgather's snapshot now covers.
+// Not the shadow view: its next cascade records on the view object being drawn (see overhaul_record_cascades).
 static BOOL records_ahead(uint32_t type) {
     return type < VIEW_TYPES && type != 1 && (overhaul_record_ahead_views >> type & 1);
 }
 
-// The view whose record can run during this view's draws, or NULL: the next cascade of the shadow view, or the next view
-// the group renders when it records through the queue walk (a view with its own pass group or record could use the
-// buckets in between). The record is checked at the view's own turn.
+// The next cascade or queue-walk view; a view with its own pass group or record could use the buckets in between.
 static BYTE *record_ahead_target(BYTE *view, uint32_t type, uint32_t *cascade) {
     *cascade = UINT32_MAX;
     if (!render_context) return NULL;
@@ -3733,8 +3598,7 @@ static void record_task(BYTE *unused) {
     InterlockedAdd64(&record_worker_ticks[ab_mode()], now_ticks() - started);
 }
 
-// The record worker starts once the view's groups are copied and before main draws, so the next view records beside
-// main's own range as well as the workers'.
+// Started before main draws, so the next view records beside main's own range as well as the workers'.
 static void kick_record_ahead(BYTE *next, uint32_t cascade, Worker *worker, Timers *timer) {
     ahead.view = next;
     ahead.cascade = cascade;
@@ -3744,8 +3608,7 @@ static void kick_record_ahead(BYTE *next, uint32_t cascade, Worker *worker, Time
     kick_task(worker, record_task, NULL);
 }
 
-// By thread id: the game leaves the overhaul one TEB slot under 64, and a second TLS index lands past them.
-// Every record of every view asks while packets are taken, so the thread id is the TEB's (ClientId.UniqueThread).
+// Keyed by thread id read from the TEB, as every record asks: the game leaves no second fast TLS slot.
 static PacketBuffer *thread_packets(void) {
     DWORD self = __readgsdword(0x48);
     if (effects_pending)
@@ -3781,8 +3644,7 @@ static BOOL capture_record(BYTE *effect, uint32_t index, uint32_t flags) {
     return !buffer->forward;
 }
 
-// Records reach the engine's recorders through two effect methods: vtbl+0x158 (thunk 0x1819d2d60, and extrasrecord's
-// first record) calls this; a thread recording into packets keeps the record and leaves the recorders and buckets alone.
+// Records reach the recorders through effect vtbl+0x158 and +0x160; a thread recording into packets leaves them alone.
 static uint64_t push_record_hook(BYTE *context, BYTE *effect, uint32_t index, uint32_t flags) {
     if (capture_record(effect, index, flags)) return 0;
     return original_push_record(context, effect, index, flags);
@@ -3794,8 +3656,7 @@ static uint64_t record_whole_hook(BYTE *effect) {
     return original_record_whole(effect);
 }
 
-// The vegetation node's record (0x181b6cb00) without its stores into the shared meshes: the instance count and pass bit
-// it would store for this view go into the packets, where the cascade's group-instance jobs take them from.
+// The vegetation record without its stores into the shared meshes: the view's count and pass bit go into the packets.
 static void vegetation_record_packets(BYTE *queue, BYTE *view, PacketBuffer *buffer) {
     uint32_t count = *(uint32_t *)(queue + 0xdc);
     BYTE **meshes = *(BYTE ***)(queue + 0xe0);
@@ -3818,9 +3679,7 @@ static void vegetation_record_packets(BYTE *queue, BYTE *view, PacketBuffer *buf
     }
 }
 
-// The queue records known to touch only their own walk off main: units (their view type is 1 in every cascade), rigid
-// models, and vegetation through vegetation_record_packets. Imposters (a TBB batch and counters per call), terrain, weather
-// and the rest record on main.
+// Only records known to touch just their own walk run off main: units, rigid models, vegetation (via packets).
 static BOOL worker_records(void *record) {
     return record == engine + VARIANT_RECORD_RVA || record == engine + RIGID_RECORD_RVA || record == engine + VEGETATION_RECORD_RVA;
 }
@@ -3874,8 +3733,7 @@ static CascadeRecord *kicked_cascade(BYTE *view) {
     return &cascade_records[cascade];
 }
 
-// At the cascade's own turn: main records the queues the worker left, into packets. With packetverify the engine also
-// records the whole view into its buckets, as it would have, and those are what get drawn.
+// At the cascade's turn main records the queues left to it; under packet verify the engine records the view too.
 static void finish_cascade_record(BYTE *view, CascadeRecord *record) {
     int mode = ab_mode();
     LONGLONG started = now_ticks();
@@ -3919,7 +3777,6 @@ static void finish_all_cascade_records(void) {
     packets_active = 0;
 }
 
-// Scratch for build_packet_jobs, reused by every view.
 static RecordEntry *build_entries;
 static uint32_t build_entry_count, build_entry_capacity;
 static uint32_t *build_entry_table, build_table_size;
@@ -3931,8 +3788,7 @@ static uint32_t *build_indices, build_index_capacity;
 static const RecordPacket **build_order;
 static uint32_t build_order_capacity;
 
-// Each buffer is in record order with rising queue numbers, and each queue was recorded whole by one thread, so merging by
-// queue gives the serial record's order.
+// Each buffer rises by queue and each queue had one recording thread, so merging by queue gives the serial order.
 static uint32_t merge_packets(const CascadeRecord *record) {
     const PacketBuffer *a = &record->worker_packets, *b = &record->main_packets;
     uint32_t total = a->count + b->count, ia = 0, ib = 0;
@@ -3949,7 +3805,6 @@ static uint32_t merge_packets(const CascadeRecord *record) {
     return total;
 }
 
-// The engine's own record of the view, from its packets.
 static void replay_packets(BYTE *context, const CascadeRecord *record) {
     uint32_t total = merge_packets(record);
     for (uint32_t p = 0; p < total; p++) original_push_record(context, build_order[p]->effect, build_order[p]->index, build_order[p]->flags);
@@ -4017,9 +3872,7 @@ static void open_group(RecordEntry *entry, uint32_t e, BYTE *item, uint32_t inde
     entry->used++;
 }
 
-// The batch recorder's record (0x1819d2310): a flagged record opens a group; an unflagged one joins the newest earlier
-// group of the same item with room, searching back no further than a flagged group, or is dropped when the recorder has
-// no groups or none spare.
+// Mirrors the batch recorder's record (0x1819d2310), including dropping an unflagged record with no group to join.
 static void batch_record(uint32_t e, BYTE *item, uint32_t index, uint32_t flags) {
     RecordEntry *entry = &build_entries[e];
     if (flags) {
@@ -4053,7 +3906,7 @@ static void add_built_job(ViewSlot *slot, BYTE *packet, uint32_t bucket, BYTE *r
     if (*(BYTE **)mesh != engine + GROUP_INSTANCE_MESH_VTABLE_RVA) return;
     job->group_count = *(uint32_t *)(mesh + 0x1f0);
     job->group_bit = *(uint32_t *)(mesh + 0x1f4);
-    // The meshes hold the engine's own values under packetverify; the check is of the worker's.
+    // The meshes hold the engine's own values under packet verify; the check is of the worker's.
     if (!verifying) return;
     for (uint32_t i = 0; i < record->worker_packets.group_count; i++)
         if (record->worker_packets.groups[i].mesh == mesh) {
@@ -4063,9 +3916,7 @@ static void add_built_job(ViewSlot *slot, BYTE *packet, uint32_t bucket, BYTE *r
         }
 }
 
-// BatchRecorder's group vector grows one group at a time and never shrinks, and an unflagged record finding it full is
-// dropped (0x1819d2310, 0x1819ece50): the groups a rebuilt view opened past it are added as the engine would have, so the
-// views and frames after see the vector the serial record leaves.
+// The batch recorder's groups never shrink and a full vector drops records: grow it as the serial record would have.
 static void grow_batch_groups(BYTE *recorder, uint32_t size) {
     while (*(uint32_t *)(recorder + 0x14) < size) {
         BYTE *group = ((AllocateFn)(engine + ENGINE_ALLOCATE_RVA))(INSTANCE_GROUP_SIZE);
@@ -4079,9 +3930,7 @@ static void grow_batch_groups(BYTE *recorder, uint32_t size) {
     }
 }
 
-// The jobs execute_pass would have drawn had the engine recorded this view: the two threads' packets merged into record
-// order, each bucket's recorders in first-record order (program-sorted where the bucket sorts), a single recorder's indices
-// in record order, a batch recorder's groups as its record builds them.
+// The jobs execute would have drawn had the engine recorded the view, in the engine's own order at every level.
 static void build_packet_jobs(ViewSlot *slot, BYTE *context, const CascadeRecord *record, BOOL verifying) {
     uint32_t bucket_count = *(uint32_t *)(context + 0x1c);
     BYTE *sort_flags = *(BYTE **)(context + 0x30);
@@ -4169,7 +4018,6 @@ static void build_packet_jobs(ViewSlot *slot, BYTE *context, const CascadeRecord
 
 static ViewSlot *verify_slots[2];
 
-// packetverify: the packets' jobs against those the engine recorded for the same view, field by field.
 static void verify_packet_jobs(BYTE *context, const CascadeRecord *record) {
     for (int s = 0; s < 2; s++)
         if (!verify_slots[s] && !(verify_slots[s] = calloc(1, sizeof *verify_slots[s]))) {
@@ -4180,7 +4028,7 @@ static void verify_packet_jobs(BYTE *context, const CascadeRecord *record) {
     build_packet_jobs(built, context, record, TRUE);
     uint32_t bucket_count = *(uint32_t *)(context + 0x1c), saved = 0;
     BYTE *sort_flags = *(BYTE **)(context + 0x30), *recorder_vectors = *(BYTE **)(context + 0x40);
-    // The engine's execute sorts these buckets again, and the program sort is not a strict weak ordering: their order goes back.
+    // Execute sorts these buckets again, and the program sort isn't a strict weak ordering: restore their order.
     for (uint32_t bucket = 0; bucket < bucket_count; bucket++)
         if (sort_flags[bucket]) saved += *(uint32_t *)(recorder_vectors + 16 * bucket + 4);
     BYTE **order = malloc((saved ? saved : 1) * sizeof *order), **at = order;
@@ -4246,7 +4094,6 @@ static void append_record(int which, size_t *size, const void *data, size_t byte
     *size += bytes;
 }
 
-// What a view's record left in the buckets, in bucket and record order: counts, callbacks, each recorder's groups.
 static size_t serialize_records(int which, BYTE *context) {
     size_t size = 0;
     uint32_t bucket_count = *(uint32_t *)(context + 0x1c);
@@ -4288,7 +4135,6 @@ static size_t serialize_records(int which, BYTE *context) {
     return size;
 }
 
-// At the view's own turn: its record runs again into emptied buckets, and the two records must match.
 static void verify_record_ahead(BYTE *view, Timers *timer) {
     BYTE *context = draw_context();
     size_t ahead_size = serialize_records(0, context);
@@ -4361,8 +4207,7 @@ static void effects_record_task(BYTE *argument) {
     record->worker_ticks = now_ticks() - started;
 }
 
-// As the group's views begin: its active effects views, which the record would reach, on the workers after the drawing
-// ones and the record worker.
+// As the group's views begin, on the workers after the drawing ones and the record worker.
 static void kick_early_effects(BYTE *context) {
     if (!overhaul_early_effects || !overhaul_enabled || overlap_frame || overhaul_parallel_cascades || enabled_frames < WARMUP_FRAMES || effects_pending ||
         early.pending)
@@ -4400,8 +4245,7 @@ static void kick_early_effects(BYTE *context) {
     for (int e = 0; e < n; e++) kick_task(effects_records[e]->worker, effects_record_task, (BYTE *)effects_records[e]);
 }
 
-// The effects view's record (0x181b0e980) at the view's turn: what the worker recorded goes into the buckets as the
-// record would have put it there.
+// At the view's turn, the worker's record goes into the buckets as the engine's would have.
 static void effects_record_hook(BYTE *view) {
     CascadeRecord *record = NULL;
     for (int e = 0; e < EARLY_EFFECTS && !record; e++)
@@ -4450,9 +4294,7 @@ static void render_views_hook(BYTE *context, BYTE *renderer, BYTE *options, uint
     render_context = outer;
 }
 
-// With the custom loop off, begin_bucket only stores the view type that the view's record already stored. A worker
-// skips the store, and so does main while the record worker runs: the next view's record may be walking, and its walks
-// read the field.
+// Without the custom loop it only re-stores the view type: workers skip it, and main while a record ahead may walk.
 static uint64_t begin_bucket_hook(BYTE *callbacks, BYTE *argument, BYTE *view) {
     if ((current_worker() || ahead.worker) && !*(BYTE *)(engine + CUSTOM_LOOP_RVA)) return ((ViewTypeFn)method(view, 0x78))(view);
     return original_begin_bucket(callbacks, argument, view);
@@ -4502,10 +4344,7 @@ static void release_queries(ID3D11Query **queries, size_t count) {
     }
 }
 
-// Everything made on the device or copied from the engine's GPU objects: the workers' contexts, constant buffer copies
-// and ring clones (their copies of the engine's rings go stale when the rings are made again), main's deferred context
-// and the wrapper it was taken from, the probe lists' context, the immediate context's lock, the GPU timing queries and
-// the device. Each split makes what it needs again, on the device the engine has then.
+// Everything made on the device or copied from the engine's GPU objects; each split makes what it needs again.
 static void release_device_objects(void) {
     for (int i = 0; i < worker_count; i++) {
         Worker *worker = workers[i];
@@ -4546,12 +4385,7 @@ static void release_device_objects(void) {
     device = NULL;
 }
 
-// The engine releases GPU resources, on the device it has or before it makes another: the buffers the writers were seen
-// writing, the reference copies, the library's buffers and the rings may all be freed or made again, and everything this
-// module made on the device goes too. A release runs on main outside the scene's drawing (a lost device's recovery as
-// the frame starts, the graphics options, a shadow or post-effect change), where no list or record is pending once
-// end_frame's flush has run, and only an early prepare can still be on the workers: it is joined, and its rows marked
-// dirty so the engine fills them again.
+// Runs on main outside the drawing, where only an early prepare can be on the workers: join it, mark its rows dirty.
 static void graphics_rebuild_starts(void) {
     wait_record();
     finish_early_effects();
@@ -4574,9 +4408,7 @@ static void graphics_rebuild_starts(void) {
 static BYTE split_execute(BYTE *context, BYTE *renderer, BYTE *view, int timed_view, int64_t groups, const CascadeRecord *packets);
 static BYTE execute_view(BYTE *context, BYTE *renderer, BYTE *view, uint32_t type, uint32_t cascade, int64_t groups, const CascadeRecord *packets);
 
-// The parallel cascade this execute draws from its packets, or NULL once the engine's buckets hold its groups: under
-// packetverify (the engine recorded it too), or replayed when the overhaul was switched off since the kick, the engine
-// runs it itself, or a recorder kind is not one build_packet_jobs rebuilds.
+// NULL when the engine's buckets hold the cascade: under packet verify, after a switch-off, or an unknown recorder.
 static const CascadeRecord *take_packets(BYTE *context, BYTE *view) {
     CascadeRecord *record = packet_view;
     if (!record || view != record->real_view || *(uint32_t *)(view + 0x94) != record->cascade) return NULL;
@@ -4741,8 +4573,7 @@ static BYTE split_execute(BYTE *context, BYTE *renderer, BYTE *view, int timed_v
         if (slot->timed_frame) ID3D11DeviceContext_End(immediate, (ID3D11Asynchronous *)slot->timed_frame->lists_end[slot->timed_view]);
         if (overhaul_probe_lists) execute_probe_lists(slot, immediate, restore);
         for (int k = 1; k < range_count; k++) forget_uploads(&workers[k - 1]->uploads);
-        // FALSE leaves the immediate context in its default state, so the engine's cache must start cold and the
-        // targets it set before execute must come back.
+        // FALSE leaves the immediate context at defaults: the engine's cache goes cold and its targets are rebound.
         if (!restore) {
             make_cold(renderer);
             bind_targets(immediate, &slot->targets);
@@ -4766,10 +4597,7 @@ static double per_frame_ms(LONGLONG ticks, double frames) {
     return 1000.0 * ticks / frequency.QuadPart / frames;
 }
 
-// D3D call counts per context method, per mode: main's immediate context and the workers' deferred contexts, so a
-// worker list that differs from what main would have issued shows up method by method. Main's own deferred segments
-// (overlap) are counted on the wrapped context, which forwards them. The thunks go in only for an
-// A/B run (report start to end), because the runtime may rewrite its own vtable entries.
+// Per-method D3D call counts; the thunks go in only for an A/B run, as the runtime may rewrite its own vtable entries.
 __attribute__((used)) volatile uint64_t main_calls[2][CONTEXT_METHODS];
 __attribute__((used)) void *original_immediate_methods[CONTEXT_METHODS], *original_deferred_methods[CONTEXT_METHODS];
 __attribute__((used)) const uint64_t worker_calls_offset = offsetof(Worker, d3d_calls);
@@ -5155,7 +4983,6 @@ static void log_view_stats(double frames_off, double frames_on) {
     }
 }
 
-// The views whose draws or instances differ between the modes, beyond the parity tolerance.
 static void log_view_work(const double *frames) {
     api->log_line("  overhaul work by view that differs (draws, instances per frame, off | on):");
     for (int type = 0; type <= VIEW_TYPES; type++) {
@@ -5175,9 +5002,6 @@ static void log_view_work(const double *frames) {
     }
 }
 
-// The view's GPU time per frame by mode; for its split frames, main's part, the wait before the first list, the lists and
-// what follows them (probe lists, rebinding, texture kicks), and per list the time from before its execute to its first
-// command, inside it, and from its last command to the next list. Pipeline statistics per frame for the whole view.
 static void log_gpu_detail(void) {
     if (!gpu_detail_frames[0] && !gpu_detail_frames[1]) return;
     double frames[2], detail_frames[2];
@@ -5225,9 +5049,7 @@ static uint64_t vtable_rva(const BYTE *vtable) {
 #define TOP_GROUPS 24
 #define TOP_CLASSES 12
 
-// Per draw item and view: how often a sampled frame drew it in main's range and on a worker, and the pixels, vertices
-// and instances per draw there. An item that shades far more pixels per instance on a worker than in main's range is
-// drawn with state the worker lacks.
+// An item shading far more pixels per instance on a worker than in main's range is drawn with state the worker lacks.
 static void log_group_stats(void) {
     if (!group_frames[0] && !group_frames[1]) return;
     api->log_line("  groups by pixels shaded per sampled frame (groupstats; %s off %llu | on %llu sampled frames; %llu samples over a pool, %llu over the "
@@ -5267,7 +5089,6 @@ static void log_group_stats(void) {
                       per[1][1], per[1][2], per[1][3], stat->samples[1] ? 100.0 * stat->forced[1] / stat->samples[1] : 0,
                       stat->samples[1] ? 100.0 * stat->first[1] / stat->samples[1] : 0);
     }
-    // The same by effect class (vtable) and view type, pixels per sampled frame and per instance.
     static struct {
         const BYTE *vtable;
         uint32_t type, mode;
@@ -5675,8 +5496,7 @@ static void effects_verify_report(BOOL start) {
     report_switch("effectsverify", &overhaul_effects_verify, start);
 }
 
-// A vtable slot holds a relocated pointer to its function; patch compares it with the file's bytes, at the preferred base,
-// and keeps the write so a refused install is undone.
+// Slots hold relocated pointers: patch compares at the preferred base and keeps the write to undo a refused install.
 static const char *patch_slots(void **slots, int count, const uint32_t *function_rvas, void *const *replacements, void **originals) {
     for (int i = 0; i < count; i++) {
         if (originals) originals[i] = slots[i];

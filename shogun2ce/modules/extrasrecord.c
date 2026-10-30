@@ -3,11 +3,8 @@
 #include <stdint.h>
 #include <intrin.h>
 
-// The record step's extras loop (sub_181b14c20) records indices 0..N-1 of one object (~25-30K a frame) one call at a
-// time: object vtbl+0x158 -> thunk 0x1819d2d60 -> sub_1819d2440 (register the recorder in its bucket once, count the
-// record) -> recorder vtbl+0x10 (append the index). With the generic thunk and a single-item recorder, every call after
-// the first only adds 1 to the bucket's counter and appends its index, so those are done in bulk; the index vector still
-// grows through the engine's own push_back, so its allocations are the same.
+// The record step's extras loop records one object's indices one call at a time; with the generic thunk and a
+// single-item recorder every call after the first only counts and appends its index, so those are done in bulk.
 #define EXTRAS_LOOP_RVA 0x1b14c20
 #define MERGE_RVA 0x1b4ca40
 #define RECORD_THUNK_RVA 0x19d2d60
@@ -26,17 +23,15 @@ typedef void (*MergeFn)(BYTE *list);
 typedef void (*PushBackFn)(IndexVector *vector, const uint32_t *value);
 typedef void (*ExtrasLoopFn)(BYTE *queue, void *pass);
 
-// 0 runs the engine's loop; exported so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG bulk_enabled = 1;
-// 1 alternates the engine's loop and the bulk one call by call, timing both under the same conditions.
+// 1 alternates the engine's loop and the bulk one call by call, timing both.
 __declspec(dllexport) volatile LONG alternate_for_comparison;
 __declspec(dllexport) volatile LONG64 loop_calls[2], loop_cycles[2];
 
 static const BYTE extras_loop_prologue[] = {0x40, 0x56, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0x02, 0x48, 0x8b, 0xf1, 0x48, 0x8b, 0xca};
 static BYTE *engine;
 static volatile LONG *fix_enabled;
-// The bulk record writes the engine's recorder and bucket count itself, which a parallel record on another thread
-// (the overhaul's) must not: only main takes it.
+// The bulk record writes the recorder and bucket count directly, so only main may take it.
 static volatile LONG main_thread;
 
 static BOOL on_main_thread(void) {

@@ -15,7 +15,7 @@
 #define PATCH_ATTEMPTS 100
 #define MAX_RELOCATED_MODULES 8
 
-// Walks this process's threads only; a system-wide thread snapshot takes tens of milliseconds on a busy desktop.
+// This process's threads only: a system-wide thread snapshot is slow on a busy desktop.
 NTSTATUS NTAPI NtGetNextThread(HANDLE process, HANDLE thread, ACCESS_MASK access, ULONG attributes, ULONG flags, PHANDLE next);
 
 #define MAX_LAYERS 4
@@ -96,8 +96,7 @@ static ULONG_PTR preferred_base(HMODULE module) {
     return base;
 }
 
-// Adds delta to every HIGHLOW-relocated dword inside [rva, rva + size) of bytes. Strict: a relocated dword crossing the
-// window's edge means the window does not end on an instruction boundary; otherwise such a dword is left alone.
+// Strict: a relocated dword crossing the window's edge means it doesn't end on an instruction boundary.
 static BOOL relocate(const BYTE *base, DWORD rva, BYTE *bytes, size_t size, ULONG_PTR delta, BOOL strict) {
     const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + ((const IMAGE_DOS_HEADER *)base)->e_lfanew);
     const IMAGE_DATA_DIRECTORY *directory = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
@@ -143,16 +142,14 @@ BOOL code_matches(const BYTE *target, const BYTE *expected, size_t size) {
     return !memcmp(target, adjusted, size);
 }
 
-// The jump is relative, so it is computed for the address it will execute at, which differs from out when out is a
-// staging buffer.
+// Relative to where it will run, which differs from out when out is a staging buffer.
 static void write_jump(BYTE *out, const BYTE *located_at, const void *destination) {
     out[0] = 0xe9;
     LONG offset = (LONG)((const BYTE *)destination - (located_at + JUMP_SIZE));
     memcpy(out + 1, &offset, sizeof offset);
 }
 
-// Other threads are suspended so none can execute a half-written prologue.
-// One patcher at a time: two threads each suspending all others could suspend each other and stop the process.
+// Threads are suspended so none runs a half-written prologue; one patcher at a time, or two could suspend each other.
 static SRWLOCK patch_lock = SRWLOCK_INIT;
 
 static const char *patch_code_locked(BYTE *target, const BYTE *patch, size_t size) {
@@ -241,8 +238,7 @@ void set_hook_owner(const char *module_name) {
     snprintf(hook_owner, sizeof hook_owner, "%.*s", (int)length, module_name);
 }
 
-// Hooks from different modules on one target stack, the newest outermost. A module hooking a target again (a reload)
-// replaces its own layer: the layer above it, or the jump, is pointed at the new replacement.
+// Modules' hooks on one target stack, the newest outermost; a reload replaces only its own layer.
 static const char *add_layer(InstalledHook *hook, const void *replacement, void **original) {
     BYTE patch[MAX_HOOK_PATCH];
     for (int i = 0; i < hook->layer_count; i++)

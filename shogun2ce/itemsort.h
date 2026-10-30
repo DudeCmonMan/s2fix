@@ -3,10 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Render items: contiguous 176-byte records ordered by the unsigned 64-bit key at +0xa8.
+// Render items sort by an unsigned 64-bit key.
 #define RENDER_ITEM_SIZE 0xb0
 #define RENDER_ITEM_KEY_OFFSET 0xa8
-// Objects: 32-byte records in a tbb::concurrent_vector ordered by the float at +0x18, largest first.
+// Objects sit in a tbb::concurrent_vector, sorted by a float, largest first.
 #define OBJECT_SIZE 0x20
 #define OBJECT_VALUE_OFFSET 0x18
 #define VECTOR_SEGMENTS_OFFSET 0x10
@@ -66,9 +66,7 @@ static void prefetch_item(const uint8_t *item, size_t size) {
     __builtin_prefetch(item + size - 1);
 }
 
-// Follows each permutation cycle so items already in place are never touched and the rest move exactly once; each move
-// writes the slot just read, which is still cached. The cycle is walked ahead through the index array so upcoming
-// sources are prefetched instead of every move waiting on the previous one's cache miss.
+// Cycle by cycle, so items in place stay untouched and the rest move once; walking ahead prefetches the sources.
 static size_t permute_items(uint8_t **items, KeyedIndex *order, size_t count, size_t size) {
     uint8_t held[RENDER_ITEM_SIZE];
     size_t moved = 0;
@@ -104,8 +102,7 @@ static size_t count_render_item_descents(const uint8_t *first, size_t count) {
     return descents;
 }
 
-// List A holds ~20,000 items under few distinct keys, so a counting sort over the distinct keys finds the order in one
-// pass where the radix takes a histogram pass and a scatter per varying key byte. Same stable order as the radix.
+// With few distinct keys, one counting pass finds the order the radix needs a pass per key byte for; same stable order.
 #define FEW_KEYS_MAX 1024
 #define FEW_KEYS_SLOTS 4096
 // After a list has more distinct keys than that, its next sorts skip the attempt.
@@ -132,7 +129,7 @@ static int few_key_less(const void *a, const void *b) {
     return x < y ? -1 : x > y;
 }
 
-// Fills order (index = source of each destination) and returns 1, or 0 when there are too many distinct keys or no room.
+// order[i].index is the source of destination i; 0 when there are too many distinct keys or no room.
 static int few_keys_order(const uint8_t *first, size_t count, KeyedIndex *order) {
     if (count > few.id_capacity) {
         uint16_t *ids = realloc(few.ids, count * 2 * sizeof *ids);
@@ -172,9 +169,7 @@ static int few_keys_order(const uint8_t *first, size_t count, KeyedIndex *order)
     return 1;
 }
 
-// Items are moved whole: the game's copy only skips padding and unused bitfield bits, which nothing reads. With few_keys
-// the counting sort is tried first, per list (below FEW_KEYS_LISTS). Returns the number of items moved, or -1 when the
-// buffers cannot be allocated.
+// Moved whole: the game's copy skips only padding and unused bits nothing reads. -1 when buffers can't be allocated.
 static long long sort_render_items(uint8_t *first, uint8_t *last, int few_keys, int list) {
     size_t count = (last - first) / RENDER_ITEM_SIZE;
     if (count < 2) return 0;

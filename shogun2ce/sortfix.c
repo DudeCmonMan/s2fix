@@ -4,7 +4,7 @@
 #include "itemsort.h"
 #include "hook.h"
 
-// std::sort over the renderer's 176-byte items (unsigned key at +0xa8).
+// std::sort over the renderer's items.
 #define RENDER_SORT_RVA 0x1afee20
 #define RENDER_LIST_RETURN_RVA 0x1b20704
 #define OTHER_LIST_RETURN_RVA 0x1b211de
@@ -64,7 +64,7 @@ static LONG64 now_ticks(void) {
     return now.QuadPart;
 }
 
-// The disorder scan is part of the fix's own work, but only measurement for the original, so it is timed only when enabled.
+// The disorder scan is the fix's work when enabled and only measurement otherwise, so only then is it timed.
 static void render_sort_hook(uint8_t *first, uint8_t *last, int64_t ideal, uint64_t predicate) {
     if (sort_depth) {
         original_render_sort(first, last, ideal, predicate);

@@ -3,16 +3,8 @@
 #include "tebslot.h"
 #include <stdint.h>
 
-// Campaign map. The faction-record lookup (sub_180a1b170: table, key) scans an array of 3,368-byte records (count at
-// table +0xc, array at +0x10, key at record +0x8) for the first record holding the key, so every step is a cache miss.
-// Every frame each character model's update (sub_180ae0510) asks whether the player can see it, through every faction
-// friendly to the player (sub_18075f070), and the friendly test (sub_18075ead0) looks the same record up three times.
-// In the original game that was 59% of the main thread on an idle map. This remembers where each lookup found its
-// record. A repeat returns that record only while the table still has the same array and count and the record still
-// holds the key; otherwise the scan runs. The lookup is a 66-byte leaf whose first 14 bytes end in a short branch, so it
-// can't be called through a trampoline: this replaces it, and misses run the same scan here (the offline check compares
-// it with the engine's). Keys are unique within a table, so the record found is the first match; the switch
-// camprelationsverify scans beside every cached answer and counts any difference. Follows Apply Fixes.
+// Campaign map: the faction-record lookup scans big records several times per character per frame. This remembers each
+// record found, reused while its table and key are unchanged (keys are unique per table, so it is the first match).
 #define SEARCH_RVA 0xa1b170
 #define RECORD_BYTES 0xd28
 #define TABLE_COUNT 0xc
@@ -26,8 +18,7 @@ typedef struct {
     uint32_t count, index;
 } Entry;
 
-// Plain counters: a locked 64-bit add on every lookup would cost more than it measures; another thread's lookup can
-// lose a count.
+// Plain counters: a locked add per lookup would cost more than it measures; a count may be lost.
 typedef struct {
     LONG64 lookups, hits, misses, scanned, not_found, mismatches;
 } Stats;
@@ -40,7 +31,7 @@ static const BYTE search_prologue[] = {0x44, 0x8b, 0x51, 0x0c, 0x33, 0xc0, 0x4c,
 static const S2Api *api;
 // Never called: the copied prologue ends in a short branch.
 static void *unusable_trampoline;
-// Each thread keeps its own table, so no lookup ever waits on another thread.
+// A table per thread, so no lookup waits on another.
 static DWORD cache_slot = TLS_OUT_OF_INDEXES;
 
 // The engine's scan: the first record holding the key, or the array's first record when none does.

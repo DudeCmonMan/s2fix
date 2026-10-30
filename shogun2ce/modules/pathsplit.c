@@ -7,27 +7,8 @@
 #include <string.h>
 #include <wchar.h>
 
-// The original game's pathsplit on the Complete Edition. The battle pathfinder triangulates the map in one call
-// (0x18198a2d0) and, when an edge cannot be inserted, reorders the edges and runs it again, up to three times
-// (0x181980a80). Two changes, each leaving the triangulation the same:
-// - The searches. Inserting a point scans the 56-byte triangles from the first for the one holding it, with the test
-//   inline (0x181987480); inserting an edge calls the crossing test (0x18199b320) for every triangle (0x1819a6330). The
-//   tests read the triangles and the points and write nothing, so the searches run on helper threads (pathsplit.h):
-//   the point loop's entry jumps to ours, which finds the triangle with an exact copy of the inline test and re-enters
-//   the engine's loop body there, so the engine's own test passes on it and every register is as the engine leaves it;
-//   the crossing call calls ours, which at the first triangle of a pass works out every triangle's answer, and the
-//   loop's step (0x1819a6469) asks ours for the next crossing triangle instead of walking every one.
-// - The retries. A retry's input is the previous attempt's edges reordered in place by the engine from the edges
-//   alone, so attempts 2 and 3 start alongside attempt 1 on two threads, each running its own copy of the triangulator
-//   and the edge insert, whose globals (the hit list, its one-time set-up guard, the failure flag, the failing edge)
-//   point at the copy's own. When the engine asks for attempt 2 or 3, its input is compared with the prediction byte for
-//   byte: if equal, the copy's result is handed back, else the attempt runs here.
-// x64 code reaches globals and calls by 32-bit offsets, so the thunks and the copies sit within 2 GB above the engine;
-// each copied offset is re-aimed after checking it against the engine (the tables come from the disassembly), and the
-// copies' unwind entries are registered with the engine's unwind data, so exceptions and stack walks pass through them.
-// The three attempts search in lanes: lane 0 is the engine's code on main, lanes 1 and 2 the copies, whose test calls
-// and steps go to their lane's entries; the point loop is shared engine code, so ours finds the lane by thread.
-// [pathsplit] verify=1 also runs each attempt the engine's own way, whose output the game then uses, and compares.
+// The battle pathfinder's triangulation searches its triangles one by one, in up to three attempts on main. The
+// searches run on helper threads, and attempts 2 and 3, predictable from the edges, start alongside attempt 1.
 #define TRIANGULATE_RVA 0x198a2d0
 #define TRIANGULATE_SIZE 0x634
 #define EDGE_INSERT_RVA 0x19a62a0
@@ -55,14 +36,13 @@ typedef int *(*TriangulateFn)(int index_count, const int *edges, const float *po
 typedef uint64_t (*EdgeInsertFn)(BYTE *triangles, const float *a, const float *b);
 typedef void (*FreeFn)(void *block);
 
-// A 32-bit offset in a copied function: where it is, where its instruction ends (what it is relative to), its target.
+// end: where the instruction ends, which the offset is relative to.
 typedef struct {
     uint16_t field, end;
     uint32_t target_rva;
 } CopySite;
 
-// Generated from the disassembly (every rel32 branch leaving the function and every RIP-relative operand); checked
-// against the engine at install.
+// Every rel32 branch leaving the function and every RIP-relative operand; checked against the engine at install.
 static const CopySite edge_insert_sites[] = {
     {0x21, 0x25, 0x3471bd0},  {0x39, 0x3d, 0x344ff00},  {0x5d, 0x61, 0x344fef4},  {0x9a, 0x9e, 0x199b320},  {0xa8, 0xac, 0x344fef0},
     {0xb3, 0xb7, 0x344fef8},  {0xc9, 0xcd, 0x2e3fd98},  {0xd2, 0xda, 0x344fef0},  {0xdb, 0xdf, 0x19fe50},   {0xe1, 0xe5, 0x344fef4},
@@ -97,7 +77,7 @@ typedef struct {
     Stats stats;
 } Result;
 
-// An attempt's searches: its edge insert, the thread running it, and the triangle array and answers of its pass.
+// One attempt's search state.
 typedef struct {
     EdgeInsertFn insert;
     DWORD thread;
@@ -109,8 +89,7 @@ typedef struct {
     Stats stats;
 } Lane;
 
-// A copy's globals: the hit list (capacity, size, data, and its one-time set-up guard, set so the set-up never runs),
-// the "no edge failed" flag and the failing edge.
+// A copy's own globals; the guard is preset so the one-time set-up never runs.
 typedef struct {
     DWORD capacity, size;
     void *data;
@@ -130,7 +109,7 @@ typedef struct {
     BOOL served;
 } Ahead;
 
-// 0 runs the searches on main only and every attempt here, the engine's way; exported, and a switch.
+// 0: the searches on main only and every attempt in turn, the engine's way.
 __declspec(dllexport) volatile LONG split_enabled = 1;
 
 static const BYTE point_entry_original[32] = {0x48, 0x3b, 0xda, 0x0f, 0x84, 0xc3, 0x00, 0x00, 0x00, 0xf3, 0x45, 0x0f, 0x10, 0x4d, 0x04, 0xf3,
@@ -165,8 +144,7 @@ static double ms(LONGLONG ticks) {
     return ticks / qpc_per_ms;
 }
 
-// The engine's inline point test (0x1819874a0 to 0x18198753d), operation for operation: the triangle's three corners
-// are pointers to (x, y); each side's test is a compare of two products, failing when less or unordered.
+// The engine's inline point test operation for operation, so every answer, unordered ones included, matches.
 static unsigned char point_test(const void *triangle, const float *point) {
     const float *a = ((const float *const *)triangle)[0], *b = ((const float *const *)triangle)[1], *c = ((const float *const *)triangle)[2];
     float px = point[0], py = point[1];
@@ -175,7 +153,7 @@ static unsigned char point_test(const void *triangle, const float *point) {
     return (a[1] - c[1]) * (c[0] - px) >= (a[0] - c[0]) * (c[1] - py);
 }
 
-// Called from the point loop's entry through our stub; returns the first triangle whose test passes (end if none).
+// Called through the point stub: the first triangle whose test passes (end if none); the lane is found by thread.
 static BYTE *point_search(BYTE *begin, BYTE *end, const float *point) {
     LONG count = (LONG)((end - begin) / SPLIT_TRIANGLE_BYTES), found = count;
     DWORD thread = GetCurrentThreadId();
@@ -206,8 +184,7 @@ static BOOL answers_fit(Lane *lane, LONG count) {
     return TRUE;
 }
 
-// Called from an edge search for the triangles it visits. A pass starts at the first triangle; its answers are worked
-// out then for the whole array, which the search does not change.
+// A pass's answers are worked out for the whole array at its first triangle; the search doesn't change the array.
 static unsigned char crossing_test(Lane *lane, const BYTE *triangle, const float *a, const float *b) {
     if (lane->splitting && lane->edge_triangles) {
         const BYTE *data = *(BYTE **)(lane->edge_triangles + 8);
@@ -228,8 +205,7 @@ static unsigned char crossing_test(Lane *lane, const BYTE *triangle, const float
     return crosses(triangle, a, b);
 }
 
-// Called from an edge search's step: with a pass's answers, the next crossing triangle (the engine's loop does nothing
-// for the others); otherwise the next triangle, as the engine steps; NULL at the end.
+// With a pass's answers, skips to the next crossing triangle: the engine's loop does nothing for the others.
 static BYTE *next_triangle(Lane *lane, BYTE *current) {
     if (lane->pass_count && current >= lane->pass_data) {
         LONG index = (LONG)((current - lane->pass_data) / SPLIT_TRIANGLE_BYTES) + 1;
@@ -250,7 +226,7 @@ static uint64_t edge_insert(Lane *lane, BYTE *triangles, const float *a, const f
     return result;
 }
 
-// Each lane's entries: lane 0's from the engine's edge insert (hooked and patched), the others' from their copies.
+// Lane 0's entries are called from the engine's edge insert, the others' from their copies.
 #define LANE_ENTRIES(k)                                                                                                                              \
     static unsigned char crossing_test_##k(const BYTE *triangle, const float *a, const float *b) { return crossing_test(&lanes[k], triangle, a, b); } \
     static BYTE *next_triangle_##k(BYTE *current) { return next_triangle(&lanes[k], current); }                                                     \
@@ -261,7 +237,7 @@ LANE_ENTRIES(2)
 static const void *const lane_crossing_tests[SPLIT_LANES] = {(const void *)crossing_test_0, (const void *)crossing_test_1, (const void *)crossing_test_2};
 static const void *const lane_next_triangles[SPLIT_LANES] = {(const void *)next_triangle_0, (const void *)next_triangle_1, (const void *)next_triangle_2};
 static const void *const lane_edge_inserts[SPLIT_LANES] = {(const void *)edge_insert_0, (const void *)edge_insert_1, (const void *)edge_insert_2};
-// The lanes' thunks in the memory near the engine (rel32 calls reach them).
+// Near the engine, so its rel32 calls reach them.
 static BYTE *crossing_thunks[SPLIT_LANES], *step_thunks[SPLIT_LANES], *edge_entry_thunks[SPLIT_LANES], *point_stub;
 
 static const char *patch_searches(BOOL ours) {
@@ -342,7 +318,6 @@ static LONGLONG wait_ahead(void) {
     return now() - started;
 }
 
-// Waits for attempts started for an earlier triangulation and frees what the engine did not ask for.
 static void drop_ahead(void) {
     wait_ahead();
     for (int k = 0; k < SPLIT_LANES - 1; k++) {
@@ -362,7 +337,7 @@ static void swap_edges(int *edges, DWORD i, DWORD j) {
     edges[2 * j] = first, edges[2 * j + 1] = second;
 }
 
-// The engine's reorderings before attempts 2 and 3 (in 0x181980a80), in place, edge by edge.
+// Mirrors the engine's reorderings before attempts 2 and 3 (in 0x181980a80) exactly.
 static void start_ahead(int index_count, const int *edges, const float *points) {
     DWORD count = (DWORD)index_count / 2;
     int *second = malloc((size_t)index_count * 2 * sizeof *second);
@@ -395,8 +370,7 @@ static Ahead *predicted(int index_count, const int *edges, const float *points) 
     return NULL;
 }
 
-// Hands the engine an attempt run alongside, as if it had run here: the index count, the index list (the engine now
-// owns it), and the failure flag and failing edge in the engine's globals (left as they were when the attempt worked).
+// As if it had run here: the engine owns the index list, and the failure globals change only if the attempt failed.
 static int *serve_ahead(Ahead *attempt, uint32_t *out, LONGLONG *waited) {
     LONGLONG started = now();
     WaitForSingleObject(attempt->thread, INFINITE);
@@ -426,8 +400,7 @@ static int *verify_attempt_one(int number, int index_count, const int *edges, co
     memcpy(edges_copy, edges, (size_t)index_count * sizeof *edges_copy);
     memcpy(points_copy, points, (size_t)(highest + 1) * 2 * sizeof *points_copy);
     uint32_t single_out[16] = {0}, split_out[16] = {0};
-    // Split while the copies run, as without verify; the copies run the shared point loop, so they must be done before
-    // it is switched back to the engine's.
+    // The copies run the shared point loop, so they must finish before it is switched back to the engine's.
     Result split = run(index_count, edges_copy, points_copy, split_out, TRUE);
     LONGLONG waited = wait_ahead(), all_done = now() - triangulation_started;
     Result single = run(index_count, edges_copy, points_copy, single_out, FALSE);
@@ -474,7 +447,7 @@ static int *triangulate_hook(int index_count, const int *edges, const float *poi
         if (indices) engine_free(indices);
         return engine.indices;
     }
-    // A retry of the same triangulation the prediction did not match (never seen): it runs here, the engine's way.
+    // A retry the prediction didn't match runs here, in turn.
     if (split_enabled && ahead[0].thread && !(ahead[0].served && ahead[1].served) && ahead[0].index_count == index_count && ahead[0].points == points) {
         Result result = run(index_count, edges, points, out, TRUE);
         api->log_line("pathsplit: triangulation %ld: a retry's input differs from the prediction; it ran here, %.0f ms", triangulations,
@@ -519,7 +492,6 @@ static BYTE *put_jump(BYTE *at, const void *target) {
     return put(at, &target, sizeof target);
 }
 
-// mov rax, target; call rax
 static BYTE *put_call(BYTE *at, const void *target) {
     static const BYTE mov_rax[] = {0x48, 0xb8};
     static const BYTE call_rax[] = {0xff, 0xd0};
@@ -537,9 +509,8 @@ static BOOL put_rel32(BYTE *code, size_t at, size_t length, BYTE *site, const vo
     return TRUE;
 }
 
-// The point loop's stub, jumped to from its entry with rbx the first triangle, rdx the end and r13 the point: rbx =
-// point_search(rbx, rdx, r13); none found continues at the engine's "none" code, else the engine's loop body runs its
-// own test on that triangle, after the two loads the entry made (xmm9, xmm10). r8-r11 are live in the engine's code.
+// Jumped to from the point loop's entry: rbx = point_search(rbx, rdx, r13), keeping rdx and r8-r11 (live); then the
+// entry's two loads (xmm9, xmm10) and the engine's loop body, or its "none" code when nothing was found.
 static BYTE *make_point_stub(BYTE *at) {
     static const BYTE save[] = {0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, 0x48, 0x83, 0xec, 0x28, 0x48, 0x89, 0xd9, 0x4d, 0x89, 0xe8};
     static const BYTE restore[] = {0x48, 0x83, 0xc4, 0x28, 0x41, 0x5b, 0x41, 0x5a, 0x41, 0x59, 0x41, 0x58, 0x5a, 0x48, 0x39, 0xd0};
@@ -556,8 +527,7 @@ static BYTE *make_point_stub(BYTE *at) {
     return put_jump(at, api->engine + POINT_NONE_RVA);
 }
 
-// A lane's step, called from the edge search's step with rsi the triangle just visited: rsi = next or, at the end, the
-// engine's own exit state (eax the count, rcx and rsi the end) with ZF set; r8 holds the engine's crossing count.
+// rsi = next(rsi), ZF clear; at the end the engine's exit state (eax count, rcx = rsi = end), ZF set; keeps r8-r11.
 static BYTE *make_step_thunk(BYTE *at, const void *next) {
     static const BYTE save[] = {0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, 0x48, 0x83, 0xec, 0x28, 0x48, 0x89, 0xf1};
     static const BYTE restore[] = {0x48, 0x83, 0xc4, 0x28, 0x41, 0x5b, 0x41, 0x5a, 0x41, 0x59, 0x41, 0x58, 0x48, 0x85, 0xc0, 0x74, 0x04, 0x48, 0x89, 0xc6, 0xc3};
@@ -591,8 +561,7 @@ static void *copy_global(CopyState *state, uint32_t rva) {
     return NULL;
 }
 
-// A copy of an engine function at `copy`: each 32-bit offset re-aimed at its target from the copy, or for the globals in
-// `state` at the copy's own, and a call to the edge insert at `edge_entry` when given. Every site is checked first.
+// Each offset re-aimed from the copy: at its target, the copy's own global in `state`, or `edge_entry`.
 static const char *copy_function(BYTE *copy, DWORD rva, DWORD size, const CopySite *sites, size_t count, CopyState *state, const void *edge_entry) {
     BYTE *original = api->engine + rva;
     memcpy(copy, original, size);
@@ -611,7 +580,7 @@ static const char *copy_function(BYTE *copy, DWORD rva, DWORD size, const CopySi
     return NULL;
 }
 
-// The copies' unwind entries: the engine's, moved to the copy, with the engine's unwind data (the code is the same).
+// So exceptions and stack walks pass through the copies; the code is the same, so the engine's unwind data fits.
 static int add_unwind_entries(int used, DWORD rva, DWORD size, BYTE *copy) {
     IMAGE_NT_HEADERS64 *headers = (IMAGE_NT_HEADERS64 *)(api->engine + ((IMAGE_DOS_HEADER *)api->engine)->e_lfanew);
     IMAGE_DATA_DIRECTORY directory = headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
@@ -623,7 +592,7 @@ static int add_unwind_entries(int used, DWORD rva, DWORD size, BYTE *copy) {
     return used;
 }
 
-// 64 KB in the first free spot above the engine's image, within reach of its rel32 offsets.
+// Above the engine's image, within reach of the 32-bit offsets x64 code uses for calls and globals.
 static BYTE *allocate_near(void) {
     IMAGE_NT_HEADERS64 *headers = (IMAGE_NT_HEADERS64 *)(api->engine + ((IMAGE_DOS_HEADER *)api->engine)->e_lfanew);
     uintptr_t at = ((uintptr_t)api->engine + headers->OptionalHeader.SizeOfImage + 0xffff) & ~(uintptr_t)0xffff;
@@ -637,8 +606,7 @@ static BYTE *allocate_near(void) {
     return NULL;
 }
 
-// The thunks, the stub and the two copies (attempts 2 and 3, lanes 1 and 2), each a triangulator calling its lane's entry
-// for its own edge insert, whose test call and step go to its lane's. Made before any of our patches.
+// Attempts 2 and 3 (lanes 1 and 2), made before our hooks and patches so they copy the engine's own bytes.
 static const char *make_near_code(void) {
     near_memory = allocate_near();
     if (!near_memory) return "no memory free within reach of the engine";

@@ -3,11 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Checks pathsplit.h against the engine's way of searching: a loop over the triangles in order. Over random 28-byte
-// triangles and tests that pass for about 1 in K of them (none at all, rare, frequent), the split point search must
-// return the first triangle the loop stops at, and the split crossing tests the loop's answer for every triangle; the
-// helpers must run with the asking thread's floating-point control word. Then three threads search at once, one per
-// lane, each with its own control word. The tests' points carry their lane in [2], so a test knows which word to expect.
+// pathsplit.h must answer as the engine's in-order loop does, with helpers on the asking lane's floating-point control
+// word. A test's point carries its lane in [2], so the test knows which word to expect.
 static int failures, checks;
 static volatile LONG wrong_csr;
 static unsigned int expected_csr[SPLIT_LANES];
@@ -32,7 +29,7 @@ static unsigned char crossing_test(const void *triangle, const float *a, const f
     return odds && mix(triangle, a, b) % odds == 0;
 }
 
-// The number of answers that differ from the loop's over `trials` searches of each kind.
+// Answers that differ from the loop's.
 static int compare(int lane, const BYTE *triangles, LONG count, BYTE *answers, int trials, unsigned int *seed) {
     int wrong = 0;
     for (int trial = 0; trial < trials; trial++) {

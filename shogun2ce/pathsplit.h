@@ -2,12 +2,8 @@
 #include <windows.h>
 #include <immintrin.h>
 
-// The battle triangulation's two brute-force searches over its triangle array (modules/pathsplit.c; the original's
-// pathsplit.h with the CE's 56-byte triangles), split across helper threads with the answers the engine's sequential loops give: the point search returns the lowest-numbered
-// triangle whose test passes, the one the engine's loop stops at; the crossing tests give one answer per triangle (0 or
-// 1), in the engine's order. The tests are pure and run with the asking thread's floating-point control words. Up to
-// SPLIT_LANES threads ask at once (the triangulation's attempts run side by side), each in its own lane; the helpers
-// take chunks from any lane, and the asking thread takes chunks of its own job too.
+// The battle triangulation's two brute-force triangle searches, split across helper threads with the answers the
+// engine's sequential loops give: the lowest passing triangle, or one answer per triangle in the engine's order.
 #define SPLIT_HELPERS 7
 #define SPLIT_LANES 3
 #define SPLIT_MAX_CHUNKS 64
@@ -38,8 +34,7 @@ typedef struct {
 } SplitLane;
 
 static SplitLane split_lanes[SPLIT_LANES];
-// Helpers spin between jobs while a triangulation runs in any lane (thousands of searches back to back), else sleep
-// until a job is posted.
+// Helpers spin while a triangulation runs in any lane, its searches coming back to back; else they sleep.
 static volatile LONG split_active, split_posted;
 
 static void split_lower_best(SplitLane *lane, LONG index) {

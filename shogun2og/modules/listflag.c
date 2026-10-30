@@ -3,19 +3,14 @@
 #include <stdint.h>
 #include <string.h>
 
-// The engine's parallel list appends (13 instantiations, among them the render-item list and the 48-byte instance list)
-// add the element to the calling thread's sublist and then store 1 into the list's "needs merge" flag at + 0x24 on every
-// call. When TBB workers append to one list from a parallel loop, that unconditional store keeps the list header's cache
-// line moving between cores. Each store and the instruction after it (mov byte [ebp+0x24],1; lea ecx,[edi+1]) become a
-// call to a stub that stores the flag only when it is not already 1, then does the lea; the flag ends up 1 either way and
-// is cleared only by the single-threaded merge. Every site reloads eax and sets the flags right after, so the stub may
-// use both. The calls stay installed: a revert could return a thread from the stub into the restored instruction, so
-// the switch is read by the stub instead.
+// The parallel list appends store the needs-merge flag on every call, bouncing the list header between cores; each
+// store becomes a call to a stub that stores it only when clear (only the single-threaded merge clears it).
 
-// 0 makes the stub store unconditionally, as the engine does; exported, and a switch, so it can be A/B tested.
+// Read by the stub, never reverted: a revert could return a thread from the stub into the restored instruction.
 __declspec(dllexport) volatile LONG conditional_store_enabled = 1;
 volatile LONG *listflag_fix_enabled;
 
+// Every site reloads eax and sets the flags right after, so the stub may use both.
 void listflag_stub(void);
 __asm__(".text\n.intel_syntax noprefix\n"
         ".globl _listflag_stub\n"

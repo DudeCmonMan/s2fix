@@ -1,8 +1,6 @@
 name: build
 
-# Every push and pull request builds the fixes for both games and runs the sort tests. A version tag (v0.2.0) also creates
-# a draft release with both zips, to be tested in game before it is published. Tags with "pre-release" in their name go
-# to pre-release.yml instead.
+# Every push and pull request builds and tests; a version tag also drafts a release, tested in game before publishing.
 on:
   push:
     branches: [main]

@@ -4,14 +4,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-// Campaign end turn. The campaign AI looks records up in per-faction tables (0x10b21440, thiscall table, key): it scans
-// the 12-byte records (count at table +0x104, array at +0x108, key at record +0x4) for the first whose key matches,
-// calling a compare (0x10b22a80) for each, and returns it, or 0 when none matches. The AI averages values between
-// factions over every other faction, each lookup scanning half a table, so an end turn's cost grows with the cube of
-// the faction count. This remembers where each lookup found its record. A repeat returns that record only while
-// the table still has the same array and count and the record still has the key; otherwise the engine's scan runs
-// again. Keys are unique within a table, so the record found is the first match; the switch cailookupverify runs the
-// engine's scan beside every lookup and counts any difference. Follows Apply Fixes.
+// Campaign end turn: the AI's per-faction table lookups scan linearly, so an end turn grows with the cube of the
+// faction count. This remembers each record found, reused while its table and key are unchanged (keys are unique).
 #define SEARCH_RVA 0xb21440
 #define RECORD_BYTES 12
 #define TABLE_COUNT 0x104
@@ -30,8 +24,7 @@ typedef struct {
     uint32_t key, count, index;
 } Entry;
 
-// Plain counters: a locked 64-bit add on every lookup would cost more than it measures; another thread's lookup can
-// lose a count.
+// Plain counters: a locked add per lookup would cost more than it measures; a count may be lost.
 typedef struct {
     LONG64 lookups, hits, misses, scanned, not_found, mismatches;
 } Stats;
@@ -43,8 +36,7 @@ __declspec(dllexport) volatile Stats lookup_stats;
 static const BYTE search_prologue[] = {0x8b, 0x81, 0x04, 0x01, 0x00, 0x00, 0x53, 0x56};
 static const S2Api *api;
 static SearchFn original_search;
-// Each thread keeps its own table, so no lookup ever waits on another thread. Not __thread: with this toolchain that is
-// emulated TLS, a locked lookup per access. The TEB's own slot is one load and leaves the last error alone.
+// A table per thread, in a TEB slot: __thread is emulated TLS here, which locks and clobbers the last error.
 static DWORD cache_slot = TLS_OUT_OF_INDEXES;
 
 static Entry *thread_cache(void) {

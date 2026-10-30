@@ -5,8 +5,7 @@
 #pragma GCC diagnostic ignored "-Wunused-function"
 #include "renderitem.h"
 
-// Checks the render-item sorts (radix, the counting sort over distinct keys, the tail merge) against a stable insertion
-// sort on the same key words: the lists must come out byte for byte the same.
+// Every render-item sort must leave a list byte for byte as a stable insertion sort on the same key words does.
 static void fill(uint8_t *items, size_t count, int meshes, int groups, int textures, unsigned seed) {
     srand(seed);
     static uint64_t mesh_values[8192];

@@ -2,17 +2,14 @@
 #include "../checks/powcache.h"
 #include <stdint.h>
 
-// The engine converts colours from gamma to linear space with powf(channel, 2.2): the gamma helpers called for every
-// mesh of every object as models are added, and 24 inline calls per draw chunk as the rigid blend shader sets its
-// colours. Every call goes to the CRT's __libm_sse2_powf (x in xmm0, y in xmm1, result in xmm0). Objects share few
-// colours, so results with y = 2.2 are cached by input bits; a hit returns what powf computed for those same bits.
+// The engine converts colours to linear with powf(channel, 2.2) per mesh and per draw; objects share few colours, so
+// results are cached by input bits, a hit returning what powf computed for those same bits.
 #define POWF_RVA 0x15136d8
 #define GAMMA_BITS 0x400ccccd
 #define SLOT_BITS 12
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x) STRINGIFY_(x)
 
-// 0 always calls powf; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG cache_enabled = 1;
 
 static const BYTE powf_prologue[] = {0xf3, 0x0f, 0x10, 0x3d, 0xd4, 0x85, 0x77, 0x11};
@@ -20,12 +17,10 @@ static const BYTE powf_prologue[] = {0xf3, 0x0f, 0x10, 0x3d, 0xd4, 0x85, 0x77, 0
 volatile LONG *powcache_fix_enabled;
 volatile LONG *powcache_cache_enabled = &cache_enabled;
 void *powcache_original;
-// Input bits in the high half, result bits in the low half: one aligned 8-byte access is always a consistent pair across
-// the worker threads. A zeroed slot reads as powf(+0, 2.2) = +0, which is correct.
+// Input bits high, result bits low: one aligned 8-byte access reads a consistent pair. A zeroed slot is powf(+0, 2.2).
 volatile uint64_t powcache_slots[1 << SLOT_BITS] __attribute__((aligned(64)));
 
-// The engine's callers expect only eax, ecx, edx, xmm0-xmm7 and the flags to change, as __libm_sse2_powf does, so the
-// stub uses nothing else and saves what it needs across the original on the stack.
+// Callers expect only eax, ecx, edx, xmm0-xmm7 and the flags to change, as with powf, so the stub uses no more.
 void powf_hook(void);
 __asm__(".text\n.intel_syntax noprefix\n"
         ".globl _powf_hook\n"

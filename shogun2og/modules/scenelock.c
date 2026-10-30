@@ -1,17 +1,14 @@
 #include "../s2module.h"
 #include <stdint.h>
 
-// The Variant node's locked add (thiscall, 0x114b9e10, node vtbl+0x88) holds the critical section at node + 0x204 for
-// a soldier's whole emission. When the main thread and TBB workers call it from one parallel loop, waiters with the
-// engine's spin count of 10000 still fall asleep in the kernel and the holder pays the wake-up; a longer spin keeps them
-// awake through the queue. What the lock protects and how it is taken are unchanged.
+// The Variant node's locked add holds its critical section for a soldier's whole emission, so waiters at the engine's
+// spin count fall asleep and the holder pays the wake-up; a longer spin keeps them awake. Otherwise unchanged.
 #define LOCKED_ADD_RVA 0x14b9e10
 #define NODE_LOCK_OFFSET 0x204
 
 typedef uintptr_t(__attribute__((thiscall)) *LockedAddFn)(BYTE *node, void *a1, void *a2, void *a3, void *a4, void *a5, void *a6, void *a7, void *a8,
                                                           void *a9, void *a10);
 
-// 0 leaves the engine's spin count; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG spin_count = 200000;
 __declspec(dllexport) volatile LONG longer_spin_enabled = 1;
 __declspec(dllexport) CRITICAL_SECTION *volatile node_lock;

@@ -3,17 +3,13 @@
 #include "../texdirect.h"
 #include <stdio.h>
 
-// The engine's sRGB texture requests, served from the file's own blocks instead of D3DX's re-encode (texdirect.h). D3DX
-// decodes and re-encodes every block on the CPU, most of a battle or campaign load; created from the blocks, a texture
-// takes a tiny fraction of that. The game then shows the artwork's own blocks, as it already does for its legacy DXT
-// textures, instead of D3DX's lossy re-encode of them. Follows Apply Fixes and its switch for the textures loaded
-// afterwards.
+// D3DX decodes and re-encodes every block of the engine's sRGB texture requests, most of a load; texdirect.h serves
+// them from the file's own blocks instead, as the game already shows for its legacy DXT textures.
 #define D3DX_CREATE_TEXTURE_IAT_RVA 0x15a17b4
 
 typedef HRESULT(WINAPI *CreateTextureFn)(ID3D11Device *device, const void *data, SIZE_T size, const TexLoadInfo *info, void *pump,
                                          ID3D11Resource **texture, HRESULT *result);
 
-// 0 sends every request to D3DX; exported so it can be A/B tested live.
 __declspec(dllexport) volatile LONG direct_enabled = 1;
 
 static const S2Api *api;

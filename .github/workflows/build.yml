@@ -1,8 +1,6 @@
 name: build-steps
 
-# The build both workflows share: the compilers, the unit tests and both games' zips, uploaded as the
-# artifact "s2fix".
-# Called by release.yml (every push, pull request and version tag) and pre-release.yml (pre-release tags).
+# Shared by release.yml and pre-release.yml: the compilers, the unit tests and both zips, as the artifact "s2fix".
 on:
   workflow_call:
 
@@ -16,8 +14,7 @@ jobs:
       run:
         shell: bash
     env:
-      # The compilers the releases are built and tested with: WinLibs GCC 16.2.0, POSIX threads, MSVCRT, r2; x86_64 for the
-      # Complete Edition, i686 for the original 32-bit game.
+      # x86_64 for the Complete Edition, i686 for the original 32-bit game.
       WINLIBS_URL: https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-msvcrt-r2/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64msvcrt-14.0.0-r2.zip
       WINLIBS_SHA256: 1b90ec73c96e6905a913746b56fb6b20122422787029810d3afc6a3b440f2322
       WINLIBS_I686_URL: https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-msvcrt-r2/winlibs-i686-posix-dwarf-gcc-16.2.0-mingw-w64msvcrt-14.0.0-r2.zip
@@ -64,8 +61,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME//\//-}" ./package.sh
           sha256sum dist/*.zip
 
-      # These load the fixes package.sh built: lookupcache from each game's modules\ (each runs from its game's folder),
-      # borderless from a folder laid out as the game's.
+      # These load the fixes package.sh built, each from a folder laid out as its game's.
       - name: Tests against the built fixes
         run: |
           OG_FLAGS="-O2 -Wall -Wextra -Werror -D__USE_MINGW_ANSI_STDIO=1 -static -msse2 -mfpmath=sse -ffp-contract=off -mstackrealign -Ishogun2og"

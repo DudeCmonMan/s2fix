@@ -18,13 +18,12 @@
 #include <winevt.h>
 #include <winternl.h>
 
-// The Complete Edition's render device, a global: the swap chain and the immediate context (its renderer's, at +0x1f0 +
-// 0x10) the screenshots and GPU times use.
+// The render device, whose swap chain and immediate context the screenshots and GPU times use.
 #define DEVICE_GLOBAL_RVA 0x3450230
 #define D3D11_DEVICE_VTABLE_RVA 0x23de040
 #define SWAP_CHAIN_OFFSET 0x188
 #define CONTEXT_OFFSET 0x200
-// %APPDATA%\The Creative Assembly\Shogun2CompleteEdition\Steam\scripts\ holds the game's settings.
+// The game's settings, under %APPDATA%.
 #define PREFERENCES_PATH L"\\The Creative Assembly\\Shogun2CompleteEdition\\Steam\\scripts\\preferences.script.txt"
 // An offline check runs the sequence with shorter times.
 #ifndef BASELINE_MS
@@ -57,8 +56,7 @@ typedef struct {
     BOOL pending;
 } GpuSet;
 
-// A screenshot moves from requested (main copies the back buffer) to copied (main maps it a few frames later) to ready
-// (its pixels are in memory for the report thread to encode).
+// Requested: main copies the back buffer; copied: main maps it frames later; ready: the report thread encodes it.
 enum { SHOT_FREE, SHOT_REQUESTED, SHOT_COPIED, SHOT_READY, SHOT_FAILED };
 
 typedef struct {
@@ -109,8 +107,7 @@ static const GUID dxgi_device_iid = {0x54ec77fa, 0x1377, 0x44e6, {0x8c, 0x32, 0x
 static const GUID dxgi_factory1_iid = {0x770aae78, 0xf26f, 0x4dba, {0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87}};
 static const GUID dxgi_adapter3_iid = {0x645967a4, 0x1392, 0x4310, {0xa7, 0x98, 0x80, 0x53, 0xce, 0x3e, 0x93, 0xfd}};
 
-// IDXGIAdapter3::QueryVideoMemoryInfo, called through the vtable: the budget and use, which the adapter description
-// does not give.
+// IDXGIAdapter3::QueryVideoMemoryInfo: the budget and use, which the adapter description lacks.
 typedef struct {
     UINT64 budget, usage, available_for_reservation, reservation;
 } VideoMemoryInfo;
@@ -153,8 +150,6 @@ static LONGLONG now(void) {
 static void to_utf8(const wchar_t *text, char *out, int size) {
     if (!WideCharToMultiByte(CP_UTF8, 0, text, -1, out, size, NULL, NULL)) out[0] = 0;
 }
-
-// ---- text ----
 
 static void text_append(Text *t, const char *data, size_t length) {
     if (t->length + length + 1 > t->capacity) {
@@ -272,8 +267,6 @@ static BOOL copy_text_file(const wchar_t *source, const char *name) {
     return ok;
 }
 
-// ---- the main thread: frames, GPU times, screenshots ----
-
 static BYTE *render_device(void) {
     BYTE *device = host.engine && host.device_readable ? *(BYTE *volatile *)(host.engine + DEVICE_GLOBAL_RVA) : NULL;
     return device && *(BYTE **)device == host.engine + D3D11_DEVICE_VTABLE_RVA ? device : NULL;
@@ -289,7 +282,6 @@ static IDXGISwapChain *swap_chain(void) {
     return device ? *(IDXGISwapChain **)(device + SWAP_CHAIN_OFFSET) : NULL;
 }
 
-// The back buffer formats the screenshots and the banner read and write.
 static BOOL readable_format(DXGI_FORMAT format) {
     return format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8A8_UNORM ||
            format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8X8_UNORM || format == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB ||
@@ -356,8 +348,7 @@ static BOOL convert_pixels(Shot *shot, const D3D11_MAPPED_SUBRESOURCE *mapped, D
     return TRUE;
 }
 
-// Before Present the back buffer holds the finished frame; it is copied (resolved first if multisampled) to a staging
-// texture and read a few frames later, so main never waits on the GPU.
+// Read a few frames later, so main never waits on the GPU.
 static void copy_back_buffer(Shot *shot, ID3D11DeviceContext *context) {
     IDXGISwapChain *chain = swap_chain();
     ID3D11Texture2D *back = NULL;
@@ -440,12 +431,7 @@ static void map_copies(ID3D11DeviceContext *context) {
     }
 }
 
-// ---- the banner on screen ----
-
-// "Snapshot Running: <stage>, <percent>" in the middle of the screen while the report runs: GDI renders it on main when
-// its text changes (at stage boundaries, outside the measured blocks), and every frame it is copied onto the back buffer
-// before Present, after the GPU's end timestamp and the screenshot copy, so neither includes it. A copy changes no
-// pipeline state the engine caches.
+// Rendered between blocks and copied after the GPU timestamp and screenshot; a copy changes no state the engine caches.
 static SRWLOCK overlay_lock = SRWLOCK_INIT;
 static char overlay_text[160];
 static volatile LONG overlay_version;
@@ -461,7 +447,6 @@ static void set_overlay(const char *stage, int percent) {
     InterlockedIncrement(&overlay_version);
 }
 
-// The banner follows the back buffer, the resolution the game renders at: text 1/20 of its height, 70% of its width.
 static void overlay_size(const D3D11_TEXTURE2D_DESC *target, UINT *font_height, UINT *width, UINT *height) {
     *font_height = target->Height / 20 < 24 ? 24 : target->Height / 20;
     *width = target->Width * 7 / 10;
@@ -544,8 +529,7 @@ static void draw_overlay(ID3D11DeviceContext *context) {
     ID3D11Texture2D_Release(back);
 }
 
-// Main alone uses these, so it lets them go once the report has stopped: the staging copies and the banner's texture
-// would otherwise stay in video memory for the rest of the session.
+// Main alone uses these, so main releases them after the report, or they'd hold video memory all session.
 static volatile LONG release_wanted;
 
 static void release_device_objects(void) {
@@ -618,8 +602,6 @@ void report_after_present(void) {
     ID3D11DeviceContext_End(context, (ID3D11Asynchronous *)set->start);
 }
 
-// ---- screenshots on the report thread ----
-
 static BOOL encode(const Shot *shot, const wchar_t *path, BOOL jpeg) {
     IWICImagingFactory *factory = NULL;
     IWICStream *stream = NULL;
@@ -653,7 +635,6 @@ static BOOL encode(const Shot *shot, const wchar_t *path, BOOL jpeg) {
     return ok;
 }
 
-// Takes count consecutive frames; the first can be lossless. Lines go into the report's screenshot list.
 static void take_burst(Text *list, const char *state, int count, BOOL first_png) {
     for (int i = 0; i < count; i++) {
         if (shots[i].pixels) free(shots[i].pixels);
@@ -691,8 +672,6 @@ static void take_burst(Text *list, const char *state, int count, BOOL first_png)
     }
 }
 
-// ---- frame statistics ----
-
 static int compare_doubles(const void *a, const void *b) {
     double x = *(const double *)a, y = *(const double *)b;
     return x < y ? -1 : x > y;
@@ -704,8 +683,7 @@ static double percentile(const double *sorted, int count, double fraction) {
     return sorted[i < count ? i : count - 1];
 }
 
-// Frames from first to last with the given mode (-1: any), each frame's time being the interval since the one before;
-// frames within SKIP_AFTER_FLIP_MS of a mode change are left out.
+// mode -1 takes any; a frame's time is the interval since the one before.
 static void frame_stats(LONG first, LONG last, int mode, Stats *out) {
     memset(out, 0, sizeof *out);
     if (last - first < 2) return;
@@ -770,8 +748,6 @@ static LONG stop_recording(void) {
     return frame_count;
 }
 
-// ---- the snapshot ----
-
 static void file_version(const wchar_t *path, char *out, size_t size) {
     out[0] = 0;
     DWORD handle, bytes = GetFileVersionInfoSizeW(path, &handle);
@@ -824,7 +800,7 @@ static void section_system(Text *t) {
     BYTE *buffer = bytes ? malloc(bytes) : NULL;
     if (buffer && GetLogicalProcessorInformationEx(RelationAll, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)buffer, &bytes)) {
         int cores = 0, smt_cores = 0;
-        // Caches grouped by level and size: a dual-CCD X3D shows its two L3s apart.
+        // Grouped by level and size, so unequal caches of one level show apart.
         struct {
             int level;
             DWORD size;
@@ -1070,7 +1046,7 @@ static void section_process(Text *t) {
     if (GetProcessMemoryInfo(process, (PROCESS_MEMORY_COUNTERS *)&counters, sizeof counters))
         text_printf(t, "Memory: working set %.0f MB (peak %.0f), private %.0f MB, page faults %lu\n", counters.WorkingSetSize / 1048576.0,
                     counters.PeakWorkingSetSize / 1048576.0, counters.PrivateUsage / 1048576.0, counters.PageFaultCount);
-    // Free address space is no limit for a 64-bit game (the original's 4 GB is), so only what is taken.
+    // Free address space is no limit for a 64-bit game, so only what is taken.
     SIZE_T committed = 0, reserved = 0, regions = 0;
     MEMORY_BASIC_INFORMATION region;
     for (BYTE *at = NULL; VirtualQuery(at, &region, sizeof region) == sizeof region; at = (BYTE *)region.BaseAddress + region.RegionSize) {
@@ -1216,8 +1192,6 @@ static void section_folder(Text *t) {
     FindClose(search);
 }
 
-// ---- the zip ----
-
 static uint32_t crc_table[256];
 
 static void make_crc_table(void) {
@@ -1351,7 +1325,6 @@ static void remove_folder(const wchar_t *path) {
     RemoveDirectoryW(path);
 }
 
-// perf-logs\temp\<prefix>_<date-time>, where a report or a snapshot gathers its files.
 static BOOL make_folder(const char *prefix, const char *what) {
     SYSTEMTIME local;
     GetLocalTime(&local);
@@ -1367,8 +1340,6 @@ static BOOL make_folder(const char *prefix, const char *what) {
     return TRUE;
 }
 
-// The text with names replaced, the host's and the proxy's logs and any crash reports join the folder's other files, which
-// are packed into perf-logs\<prefix>_<date-time>.zip; the folder goes once they are.
 static BOOL pack(Text *text, const char *text_name, const char *prefix, const char *what, LONGLONG started) {
     redact(text);
     wchar_t path[MAX_PATH];
@@ -1412,8 +1383,6 @@ static void stop_main_work(void) {
     release_wanted = 1;
 }
 
-// ---- the sequence ----
-
 static void set_flag(volatile LONG *flag, LONG value) {
     InterlockedExchange(flag, value);
 }
@@ -1444,7 +1413,7 @@ static void print_ab(Text *t, const Stats *off, const Stats *on) {
                     on->p95 - off->p95, on->p99 - off->p99, on->gpu_mean - off->gpu_mean);
 }
 
-// Progress is the time spent against the time the sequence is planned to take.
+// By time, against the time the sequence is planned to take.
 static LONGLONG progress_started, progress_planned;
 
 static void progress(const char *stage) {
@@ -1599,12 +1568,10 @@ static DWORD WINAPI report_thread(LPVOID unused) {
     return 0;
 }
 
-// ---- the snapshot ----
-
 static const char *snapshot_reason;
 static void (*snapshot_done)(const char *reason);
 
-// An event's XML without the elements naming the computer and the account it ran under.
+// The computer's and the account's names never leave in the report.
 static void strip_element(wchar_t *xml, const wchar_t *open, const wchar_t *close) {
     wchar_t *start = wcsstr(xml, open);
     wchar_t *end = start ? wcsstr(start, close) : NULL;
@@ -1620,8 +1587,7 @@ static void append_wide(Text *t, const wchar_t *text) {
     free(utf8);
 }
 
-// The display drivers' events in Windows' System log since the game started (a driver that stopped responding and
-// recovered, a reset of the graphics kernel), newest first, as Windows records them less the computer and the account.
+// Display driver events since the game started: a driver that stopped responding, a graphics kernel reset.
 static void section_display_events(Text *t) {
     heading(t, "Display driver events since the game started (Windows' System log, newest first)");
     FILETIME created, exited, kernel, user, current;
@@ -1732,7 +1698,7 @@ BOOL report_running(void) {
     return running != 0;
 }
 
-// With running already set: the main thread's part starts afresh, then the work's own thread.
+// Called with running already set; main's part starts afresh before the work's own thread.
 static BOOL start_work(const char *prefix, const char *what, LPTHREAD_START_ROUTINE work) {
     overlay_version = 0;
     gpu_stop = gpu_stopped = 0;

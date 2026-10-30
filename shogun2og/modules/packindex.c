@@ -1,12 +1,8 @@
 #include "../s2module.h"
 #include "../checks/packindex.h"
 
-// Each pack the engine opens gets a table of its files (0x1126e800), filled from the pack's index: a lookup, then an
-// insert (0x112e3db0), per file. The table starts at 8 slots and probes linearly, two string compares per slot, and
-// grows (2n+1) only once a full scan finds no free slot, so the scans run longer and longer as it fills, and a big
-// pack's table can end almost full. Here a pack's first insert sizes the still-empty table to twice its file count, so
-// it never grows and stays at most half full. Lookups find the same entries at any size, and the engine's only walks
-// of the table (releasing the pack, listing its files at a reset) don't depend on which slot an entry is in.
+// A pack's file table starts at 8 slots, probes linearly and grows only when full, so big packs' inserts scan ever
+// longer; a pack's first insert sizes it to twice its file count. No engine walk depends on an entry's slot.
 #define PACK_INSERT_CALL_RVA 0x126ec00
 #define INSERT_RVA 0x12e3db0
 #define ALLOCATOR_RVA 0x17cc4a4
@@ -27,7 +23,6 @@ typedef void *(__attribute__((thiscall)) *InsertFn)(Table *table, const DWORD *k
 typedef void *(__cdecl *AllocFn)(size_t size, size_t alignment);
 typedef void(__cdecl *FreeFn)(void *memory);
 
-// 0 leaves the engine's tables at 8 slots; read at each pack's first insert.
 __declspec(dllexport) volatile LONG sizing_enabled = 1;
 __declspec(dllexport) volatile LONG tables_sized;
 
@@ -46,7 +41,7 @@ static BOOL empty(const Table *table) {
     return TRUE;
 }
 
-// The engine's own allocation and release for these tables.
+// The engine's own allocator and release, since the engine frees the table later.
 static void resize(Table *table, DWORD capacity) {
     AllocFn allocate = *allocator ? *allocator : aligned_malloc;
     DWORD *slots = allocate((size_t)capacity * 8, 4);

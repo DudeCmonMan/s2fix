@@ -4,12 +4,9 @@
 #include <intrin.h>
 #include <xmmintrin.h>
 
-// The UI update (thiscall, 0x10f948e0, the components' vtbl+0x38) recurses over every component each frame and mostly
-// waits on the first loads of each child. Entering a node prefetches the lines its children's updates read first
-// (vtable and Lua binding, child list and state fields, update callback, pending action and controller), so a sibling's
-// lines arrive while the earlier siblings' subtrees run. Only prefetches; what runs is unchanged.
+// The UI update recurses over every component each frame, mostly waiting on each child's first loads; entering a node
+// prefetches the lines its children's updates read first. Only prefetches; what runs is unchanged.
 #define UPDATE_RVA 0xf948e0
-// Low dword of the main tick's u64 frame stamp.
 #define FRAME_STAMP_RVA 0x17cc340
 #define CHILD_COUNT_OFFSET 0x9c
 #define CHILDREN_OFFSET 0xa0
@@ -22,9 +19,8 @@ typedef struct {
 } Stats;
 
 __declspec(dllexport) volatile Stats stats;
-// 0 never prefetches; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG prefetch_enabled = 1;
-// 1 prefetches only on even frames and times the whole tree update both ways, for a same-session comparison.
+// 1 prefetches only on even frames, timing the tree update both ways.
 __declspec(dllexport) volatile LONG alternate_frames;
 
 static const BYTE update_prologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec, 0x64};

@@ -7,13 +7,8 @@
 #include <string.h>
 #include <xmmintrin.h>
 
-// Splits the Variant node's draw-time walk (0x114bc310, thiscall) over a queue's sorted render items. Per item the walk
-// filters by pass, picks the LOD (0x114ca3f0: reads only shared tables, tweakers and the camera) and records it through
-// the LOD's vtable slot +0xa8, passing "state changed since the last recorded item" flags that decide instancing. Helpers
-// filter and pick LODs for ordered chunks; the caller records each chunk, in order, as soon as it is ready, with the same
-// flags, so recording and batching are unchanged. Each chunk starts its flags from scratch, so its first record is
-// re-flagged against the previous chunk's last recorded item. The lookup has x87 code, so helpers take the caller's x87
-// control word as well as its MXCSR.
+// Splits the Variant node's serial draw-time walk: helpers filter items and pick LODs for ordered chunks; the caller
+// records each chunk in order with the same flags, re-flagging a chunk's first record against the previous one's last.
 #define WALK_RVA 0x14bc310
 #define LOD_LOOKUP_RVA 0x14ca3f0
 #define MERGE_RVA 0x14e74d0
@@ -25,8 +20,7 @@
 #define CHUNKS_PER_WORKER 12
 #define MAX_CHUNKS ((HELPERS + 1) * CHUNKS_PER_WORKER)
 #define HELPER_SPIN_ROUNDS 20000
-// Set by the contention fix: a short spin covers the gaps between one frame's jobs, then the helpers sleep instead
-// of spinning into the draw phase. The budget can be patched live.
+// Set by the contention fix: spin briefly between a frame's jobs, then sleep instead of spinning into the draw phase.
 __declspec(dllexport) volatile LONG short_spin_enabled;
 __declspec(dllexport) volatile LONG short_spin_us = 50;
 
@@ -67,9 +61,7 @@ typedef struct {
 } WalkStats;
 
 __declspec(dllexport) volatile WalkStats walk_stats;
-// 0 runs the engine's walk; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG split_enabled = 1;
-// 1 runs the engine's walk with its record calls logged and compares them with what the split would record; a switch.
 __declspec(dllexport) volatile LONG verify = 0;
 __declspec(dllexport) volatile LONG split_min_items = 1024, chunk_min_items = 256;
 
@@ -91,11 +83,9 @@ static LodLookupFn lod_lookup;
 static MergeFn merge;
 static AlternateRecordFn alternate_record;
 static ChunkOutput outputs[MAX_CHUNKS];
-// The generation a chunk was last finished in.
 static volatile LONG64 chunk_done[MAX_CHUNKS];
 static Job job;
-// High 32 bits: job generation; low 32 bits: next chunk to claim. Claims compare-and-swap the whole word, so a helper
-// still finishing an old job can never take a chunk index from the next one.
+// High 32 bits: job generation; low 32 bits: next chunk to claim. Swapped as one, so a stale claim fails.
 static volatile LONG64 claim_word;
 static Record *logged;
 static DWORD logged_count, logged_capacity;
@@ -157,6 +147,7 @@ static DWORD WINAPI helper(LPVOID unused) {
             continue;
         }
         seen = claim >> 32;
+        // The LOD lookup has x87 code.
         unsigned short x87 = job.x87;
         _mm_setcsr(job.csr);
         __asm__ volatile("fldcw %0" : : "m"(x87));
@@ -177,13 +168,12 @@ static LONG64 start_job(BYTE *queue, BYTE *list, DWORD pass_bit, float scale, DW
     generation++;
     InterlockedExchange64(&claim_word, generation << 32 | 1);
     WakeByAddressAll((void *)&claim_word);
-    // The caller takes the first chunk: it is needed first, and the caller just merged the items, so they are in its cache.
+    // The caller takes the first chunk: it is needed first, and the merge just left its items in the caller's cache.
     if (job.chunk_count) run_chunk(0, generation);
     return generation;
 }
 
-// Waits for a chunk, running it here if no helper has claimed it yet, then re-flags its first record against the previous
-// chunk's last.
+// Runs a chunk here if no helper has claimed it yet, then re-flags its first record against the previous chunk's last.
 static ChunkOutput *finish_chunk(LONG chunk, LONG64 generation, ItemState *previous) {
     LONG64 unclaimed = generation << 32 | chunk;
     while (chunk_done[chunk] != generation)
@@ -226,8 +216,7 @@ void __attribute__((used)) walksplit_log_record(BYTE *lod, DWORD index, DWORD fl
     logged[logged_count++] = (Record){lod, index, flags};
 }
 
-// Replaces the walk's record call (call [eax+0xa8], with ecx the LOD and index, flags on the stack): logs them, then
-// makes the same call, which returns past the nop the patch leaves. It stays in place after verifying.
+// Replaces the walk's record call (call [eax+0xa8]); returns past the patch's nop and stays in place after verifying.
 void walksplit_record_spy(void);
 __asm__(".text\n.intel_syntax noprefix\n"
         ".globl _walksplit_record_spy\n"
@@ -256,7 +245,7 @@ static BOOL patch_record_call(void) {
     return record_call_patched = !error;
 }
 
-// Predicts the walk's records without making them, runs the engine's walk with its record calls logged, and compares.
+// The engine's walk makes the records; the split's are only predicted and compared.
 static void verify_walk(BYTE *queue, BYTE *list, DWORD pass_bit, float scale, DWORD alternate_list) {
     if (!record_call_patched && !patch_record_call()) {
         verify = 0;

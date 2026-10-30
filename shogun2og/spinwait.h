@@ -1,8 +1,7 @@
 #pragma once
 #include <windows.h>
 
-// A helper spins for its next job before sleeping. A count of pause rounds lasts as long as the CPU makes it, so a short
-// spin is bounded in time instead; the clock is read every SPIN_CHECK_ROUNDS pauses.
+// A count of pause rounds lasts as long as the CPU makes it, so a short spin is bounded in time instead.
 #define SPIN_CHECK_ROUNDS 32
 
 static LONGLONG spin_ticks_per_us;

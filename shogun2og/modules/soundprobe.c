@@ -2,13 +2,8 @@
 #include "../checks/soundprobe.h"
 #include <objbase.h>
 
-// The engine's sound start-up (on the main thread, before the packs load) starts Miles and finds which speaker layouts
-// work by opening and closing the audio driver once for each of 12 (0x10f5dc90), then opens the first that works for
-// good (the rest of 0x10f5cb30). The probes mostly wait on the audio driver, and nothing uses the sound system until
-// sound part 2 (0x10095eb0), after the packs and the database have loaded. Here Miles' start-up and the probes run on a
-// helper thread, with the main thread's floating-point modes and COM apartment type, and the main thread opens the
-// driver as the engine does when part 2 starts. The shutdown the engine registers after part 1 waits for the helper
-// too, in case start-up ends first.
+// The engine's sound start-up probes 12 speaker layouts on main, mostly waiting on the driver, though nothing uses
+// sound until part 2; this runs Miles' start-up and the probes on a helper, and main opens the driver at part 2.
 #define START_CALL_RVA 0xf5bfd5
 #define SOUND_START_RVA 0xf5cb30
 #define MILES_START_RVA 0xf5dc90
@@ -32,7 +27,7 @@ typedef HRESULT(WINAPI *ApartmentTypeFn)(APTTYPE *type, APTTYPEQUALIFIER *qualif
 typedef HRESULT(WINAPI *ComInitFn)(LPVOID reserved, DWORD mode);
 typedef void(WINAPI *ComUninitFn)(void);
 
-// 0 runs the engine's sound start-up on the main thread; read when the game starts its sound.
+// Read when the game starts its sound.
 __declspec(dllexport) volatile LONG probe_enabled = 1;
 
 static const S2Api *api;
@@ -66,6 +61,7 @@ static double now_ms(void) {
     return (double)count.QuadPart * 1000.0 / (double)frequency.QuadPart;
 }
 
+// With main's floating-point modes and COM apartment type, as Miles would have had on main.
 static DWORD WINAPI probe_thread(LPVOID unused) {
     (void)unused;
     __asm__ volatile("fldcw %0" : : "m"(main_x87));
@@ -121,6 +117,7 @@ static void __cdecl part2_hook(DWORD a, void *b) {
     original_part2(a, b);
 }
 
+// The shutdown the engine registers after part 1 can come before part 2.
 static void __cdecl shutdown_hook(void) {
     finish();
     sound_shutdown();

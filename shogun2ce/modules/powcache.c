@@ -3,23 +3,20 @@
 #include <stdint.h>
 #include <string.h>
 
-// The engine converts colours from gamma to linear space with powf(channel, 2.2) per object and per draw (sub_1819e3a20
-// from the render-item task and battle logic, effect parameter writers), ~2.5% of the main thread inside the CRT's pow.
-// Objects share few colours, so results are cached by input bits; a hit returns what powf computed for those same bits.
+// The engine converts colours to linear with powf(channel, 2.2) per mesh and per draw; objects share few colours, so
+// results are cached by input bits, a hit returning what powf computed for those same bits.
 #define POWF_RVA 0x4a1420
 #define GAMMA_BITS 0x400ccccdu
 #define SLOT_BITS 12
 
 typedef float (*PowfFn)(float, float);
 
-// 0 always calls powf; exported so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG cache_enabled = 1;
 
 static const BYTE powf_prologue[] = {0xf3, 0x0f, 0x11, 0x4c, 0x24, 0x10, 0xf3, 0x0f, 0x11, 0x44, 0x24, 0x08, 0x48, 0x83, 0xec, 0x28};
 static PowfFn original_powf;
 static volatile LONG *fix_enabled;
-// Input bits in the high half, result bits in the low half: one aligned 64-bit access is always a consistent pair across
-// the worker threads. A zeroed slot reads as powf(+0, 2.2) = +0, which is correct.
+// Input bits high, result bits low: one aligned 8-byte access reads a consistent pair. A zeroed slot is powf(+0, 2.2).
 static volatile uint64_t slots[1 << SLOT_BITS];
 
 static float powf_hook(float base, float exponent) {

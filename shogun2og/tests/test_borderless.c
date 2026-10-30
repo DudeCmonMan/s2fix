@@ -1,13 +1,5 @@
+// The borderless module against a stand-in engine, on a desktop of its own as the window covers the monitor.
 // Usage: test_borderless.exe <folder holding fixes\borderless.dll and s2prof.ini with [window] borderless=1>
-//
-// The borderless module against a stand-in engine: a block holding the engine's import slots (the real user32
-// functions), its window, settings and render device globals, and a window made as the engine makes its windowed one,
-// for a resolution wider than the desktop (as at a downsampling resolution on one monitor), which Windows makes smaller.
-// Through the slots, as the engine calls them: the window is restyled to cover its monitor while GetClientRect reports
-// the engine's resolution; mouse messages are scaled to it, the monitor's last pixel to the resolution's last; a display
-// change (SetWindowLongW, AdjustWindowRect, MoveWindow, GetClientRect, as at 0x11416729) keeps the window on its monitor
-// and takes the new resolution; a popup style hands the window back. Runs on a desktop of its own, since the window
-// covers the monitor.
 #define _WIN32_WINNT 0x0A00
 #include <windows.h>
 #include <windowsx.h>
@@ -102,8 +94,7 @@ static LPARAM mouse_through_engine(HWND window, UINT message, int x, int y) {
     return received.lParam;
 }
 
-// The display change's windowed branch: style, window size for the client size, the move, then the client size read
-// back as the resolution.
+// The engine's windowed display change, in its order.
 static void change_resolution(HWND window, LONG width, LONG height) {
     ((SetWindowLongFn)slot(SET_WINDOW_LONG_IAT_RVA))(window, GWL_STYLE, WINDOWED_STYLE);
     RECT rect = {0, 0, width, height};

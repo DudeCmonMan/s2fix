@@ -5,11 +5,11 @@ cd "$(dirname "$0")"
 PYTHON=python3
 "$PYTHON" -c '' 2>/dev/null || PYTHON=python
 ./build.sh
-# The root package.sh passes DIST and VERSION (the release workflow passes the tag); a build here alone gets a timestamp.
+# The root package.sh passes DIST and VERSION; run alone, the zip gets a timestamp.
 DIST=${DIST:-../dist}
 mkdir -p "$DIST"
 ZIP="$DIST/s2fix_shogun2_original_${VERSION:-$(date +%s)}.zip"
-# Unzipped into the game folder: the proxy, host and settings beside Shogun2.exe, the fixes in fixes\.
+# Unzipped into the game folder, beside Shogun2.exe.
 "$PYTHON" -I -c 'import os, sys, zipfile
 with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as archive:
     archive.write("proxy/d3d11.dll", "d3d11.dll")

@@ -2,9 +2,7 @@
 #include "s2module.h"
 #include <string.h>
 
-// A set of code patches that follows a switch: a thread applies them while Apply Fixes and the switch are on and puts the
-// engine's bytes back otherwise. Patches are rewritten with the game's other threads suspended, so a flip is safe at any
-// time; the thread checks every POLL_MS, well inside a bench block's skipped first 200 ms.
+// Code patches that follow a switch and Apply Fixes, rewritten with the other threads suspended, so a flip is safe.
 #define MAX_PATCH_BYTES 16
 #define POLL_MS 20
 

@@ -3,8 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 
-// The engine bytes at [rva, rva + size), relocations and s2prof's own writes taken out, hash (FNV-1a 64) to hash in the
-// build the fixes were made for. Generated into checks/<module>.h.
+// [rva, rva + size) must hash (FNV-1a 64) to hash, less relocations and s2prof's writes. Generated into checks/.
 typedef struct {
     DWORD rva, size;
     uint64_t hash;
@@ -20,45 +19,32 @@ typedef struct {
     BYTE *engine;
     volatile LONG *fix_enabled;
     void (*log_line)(const char *format, ...);
-    // prologue holds the target's bytes as they are in the DLL file; addresses the loader relocates are adjusted before
-    // the comparison. The size must end on an instruction boundary, cover at least 5 bytes, and hold no relative branch.
+    // prologue: the target's file bytes; whole instructions, at least 5 bytes, no relative branch.
     const char *(*hook)(BYTE *target, const BYTE *prologue, size_t size, const void *replacement, void **original);
     // Reserved: the layout stays fixed, so the host and the modules can be built separately.
     void *reserved[2];
-    // Makes a module's on/off flag available to an A/B capture; report(TRUE) runs before each A/B and report(FALSE) after
-    // it, so the module can log its own per-mode counters.
+    // For A/B captures; report(TRUE) runs before each and report(FALSE) after, to log per-mode counters.
     void (*register_switch)(const char *name, volatile LONG *flag, void (*report)(BOOL start));
-    // Writes replacement over the size bytes at target once they hold expected (the file's bytes; relocated addresses in
-    // them are adjusted), with the other threads suspended. Swapping expected and replacement reverts it.
+    // expected holds the file's bytes; the other threads are suspended. Swapping expected and replacement reverts it.
     const char *(*patch)(BYTE *target, const BYTE *expected, const BYTE *replacement, size_t size);
-    // Names the module whose hooks follow, for a loader other than the host's (a reload replaces only its own hooks).
+    // For a loader other than the host's: a reload replaces only the named module's hooks.
     void (*set_hook_owner)(const char *module_name);
     // The game's main thread, the one that presents frames; 0 until the first frame.
     volatile DWORD *main_thread;
-    // The host begins one fix per module and ends it with s2_module_main's result. A fix that ends with an error has its
-    // hooks, patches and switches undone. A module holding several independent fixes ends each one and begins the next
-    // by name.
+    // An error undoes the fix's hooks, patches and switches; a module with several fixes ends each, begins the next.
     const char *(*end_fix)(const char *error);
     void (*begin_fix)(const char *name);
     // NULL when every check holds, else which engine code differs; fixes call it before installing anything.
     const char *(*check_engine)(const S2Check *checks, int count);
-    // Asks the engine to release and rebuild every GPU resource it holds, through its own recovery, at the start of the
-    // next frame, with its loading screen shown; any thread may ask. Resets are at least 5 s apart, from the end of the
-    // last rebuild: a request sooner, or while one is asked for or running, is dropped (the log says so).
-    // The reason goes to the log, so it must outlive the request: a string literal.
+    // Any thread; dropped if one is pending or within 5 s of the last. reason is logged later: a string literal.
     void (*request_graphics_reset)(const char *reason);
-    // before runs on the main thread each time the engine releases GPU resources and after each time it creates them
-    // again, whatever started it: a requested reset, a window resize, a failed present, the graphics options, a load.
-    // A rebuild can release more than once before it creates, and a device the engine can't use yet delays the after.
-    // Either may be NULL.
+    // On main, whatever the cause: before each GPU release (may repeat), after each re-creation. Either may be NULL.
     void (*on_graphics_reset)(void (*before)(void), void (*after)(void));
 } S2Api;
 
 typedef const char *(*S2ModuleMain)(const S2Api *api);
 
-// A quick check before hooking several targets, so a mismatched build is left untouched. A target s2prof already hooked
-// starts with its jump; the hook call itself checks the bytes against the file, relocations applied. Another mod's jump
-// passes too: its hook call refuses, and the host undoes the fix's earlier hooks.
+// Leaves a mismatched build untouched; a jump passes, as the hook call itself then checks or refuses it.
 static inline BOOL s2_prologue_ready(const BYTE *target, const BYTE *prologue, size_t size) {
     return target[0] == 0xe9 || !memcmp(target, prologue, size);
 }

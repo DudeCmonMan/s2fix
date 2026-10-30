@@ -4,11 +4,8 @@
 #include <string.h>
 #include <intrin.h>
 
-// On every game update the engine walks its list of Lua states (cdecl, 0x1127a1c0) and calls lua_gc(L, LUA_GCSTEP, 1)
-// on each. The states are all lua_newthread coroutines of the one lua_newstate, sharing a single global_State, so the
-// one heap's incremental collector is stepped once per state, mostly re-sweeping a heap with little garbage. This steps
-// each distinct heap once per walk, on its first state in list order. Allocation still drives the collector's own steps.
-// The full-collect path (flag 1) is unchanged.
+// The engine steps Lua's incremental collector once per Lua state, but all its states share one heap, so it re-sweeps
+// a heap with little garbage many times; this steps each distinct heap once per walk. Full collects are unchanged.
 #define GC_STATES_RVA 0x127a1c0
 #define LUA_GC_RVA 0xea2b20
 #define STATE_LIST_FIRST_RVA 0x17bf050
@@ -28,7 +25,6 @@ typedef struct {
 } GcStats;
 
 __declspec(dllexport) volatile GcStats gc_stats;
-// 0 steps every state as the engine does; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG dedupe_enabled = 1;
 
 static const BYTE gc_states_prologue[] = {0x56, 0x8b, 0x35, 0x50, 0xf0, 0x7b, 0x11};

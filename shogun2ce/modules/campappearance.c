@@ -4,13 +4,8 @@
 #include <stdint.h>
 #include <string.h>
 
-// Campaign map. Every frame each character's appearance pick walks its appearance set for the entry that fits
-// (sub_180e40590: set, age, season, rank, scale), copying and comparing each entry's season name. The walk reads only the
-// set (flags at +0..3; a hash table with bucket count +0x14, buckets +0x18, size +0x20) and its entries (age bound
-// +0x30, rank bound +0x34, season name +0x50, scale bound +0xb0), which are database records, so its answer depends on
-// the set and the four arguments. This keeps the last answer per (set, arguments), in a table per thread, and returns
-// it while the set's flags and table are unchanged. The switch campappearanceverify runs the engine's walk beside every
-// cached answer and counts any difference, which would also show an entry changing. Follows Apply Fixes.
+// Campaign map: each character's appearance pick walks its appearance set every frame; the answer depends only on the
+// set and the four arguments, so the last answer is kept per (set, arguments) while the set is unchanged.
 #define WALK_RVA 0xe40590
 #define SET_FLAGS 0x0
 #define SET_BUCKET_COUNT 0x14
@@ -46,7 +41,7 @@ static BYTE *walk_hook(BYTE *set, int32_t age, uint32_t season, int32_t rank, fl
     Entry *cache = *api->fix_enabled && appearance_enabled ? teb_slot_block(cache_slot, sizeof(Entry) << CACHE_BITS) : NULL;
     if (!cache) return original_walk(set, age, season, rank, scale);
     appearance_stats.walks++;
-    // The walk clamps the age to 0 (sub_180166080, a max) and compares the scale as a float: equal bits give the same answer.
+    // The walk clamps the age to 0 and compares the scale as a float: equal bits give the same answer.
     if (age < 0) age = 0;
     uint32_t scale_bits, flags, bucket_count = *(uint32_t *)(set + SET_BUCKET_COUNT), size = *(uint32_t *)(set + SET_SIZE);
     BYTE *buckets = *(BYTE **)(set + SET_BUCKETS);

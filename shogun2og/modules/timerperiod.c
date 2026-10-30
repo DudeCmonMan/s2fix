@@ -1,10 +1,7 @@
 #include "../s2module.h"
 
-// The engine's timestamp (0x112f2400, 135 callers, the main tick among them) reads timeGetTime inside
-// timeBeginPeriod(1)/timeEndPeriod(1) (0x112f2420). With nothing else holding the period, every pair takes the process's
-// count from 0 to 1 and back: two kernel calls each time, and the timer resolution flips between 1 ms and 15.6 ms under
-// the other threads' sleeps. Holding the period here keeps the count above 0, so the engine's pairs only count. Follows
-// Apply Fixes and its switch.
+// The engine's timestamp wraps each read in timeBeginPeriod(1)/timeEndPeriod(1), two kernel calls that also flip the
+// timer resolution; holding the period here keeps the count above 0, so those pairs only count.
 #define POLL_MS 100
 
 typedef UINT(WINAPI *TimePeriodFn)(UINT period);

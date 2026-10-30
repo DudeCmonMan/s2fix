@@ -1,9 +1,7 @@
 #pragma once
 #include "radixsort.h"
 
-// The Variant node's 312-byte render items as the three list sorts compare them (insertion sorts 0x114a9380, 0x114a8f60,
-// 0x114a97c0). The engine's copies skip only the padding at +0x121..+0x123 and +0x135..+0x137, so whole-item moves are
-// equivalent to its field-by-field ones.
+// Render items as the engine's three list sorts compare them. Its copies skip only padding, so whole-item moves match.
 #define RENDER_ITEM_SIZE 0x138
 #define ITEM_POSE_OFFSET 0x00
 #define ITEM_MESH_OFFSET 0xe8
@@ -16,11 +14,9 @@
 #define CACHE_LINE 64
 #define TAIL_MAX 64
 
-// Cycles this thread spent moving items in sort_render_items; a caller reads its delta.
 static __thread uint64_t permute_cycles;
 
-// List A (prepare): mesh, texture index, group. List B (record): mesh, group. List C (record): mesh, pose, param block,
-// param value, group; with tie grouping, the texture index last.
+// List A sorts as the node prepares, B and C as it records.
 typedef enum { LIST_A, LIST_B, LIST_C, LISTS } ListKind;
 
 static uint32_t item_u32(const uint8_t *item, size_t offset) {
@@ -35,7 +31,7 @@ static uint64_t item_u64(const uint8_t *item, size_t offset) {
     return value;
 }
 
-// The engine compares param values as floats, so +0 and -0 are equal; NaNs order arbitrarily for the engine and last here.
+// The engine compares floats, so +0 equals -0; NaNs order arbitrarily there and last here.
 static uint32_t ordered_float(uint32_t bits) {
     if (bits == 0x80000000u) bits = 0;
     return bits & 0x80000000u ? ~bits : bits | 0x80000000u;
@@ -66,8 +62,7 @@ static int words_less(const uint64_t *a, const uint64_t *b, int count) {
     return 0;
 }
 
-// 1 moves items with the build's inline vector copy, 0 with msvcrt's memcpy, whose path for most of these alignments is
-// rep movsd (itemsort's inlinecopy switch). The call goes through a pointer so the compiler can't inline it.
+// The inlinecopy switch; the 0 path calls msvcrt's memcpy (rep movsd here) through a pointer, so it isn't inlined.
 static volatile long item_copy_inline = 1;
 static void *(*volatile item_copy_call)(void *, const void *, size_t) = memcpy;
 
@@ -81,8 +76,7 @@ static void prefetch_item(const uint8_t *item) {
     __builtin_prefetch(item + RENDER_ITEM_SIZE - 1);
 }
 
-// Follows each permutation cycle so items already in place are never touched and the rest move exactly once; upcoming
-// sources are prefetched along the cycle.
+// Cycle by cycle, so items in place are never touched and the rest move exactly once.
 static size_t permute_items(uint8_t *first, KeyedIndex *order, size_t count) {
     uint8_t held[RENDER_ITEM_SIZE];
     size_t moved = 0;
@@ -105,9 +99,7 @@ static size_t permute_items(uint8_t *first, KeyedIndex *order, size_t count) {
     return moved;
 }
 
-// A sorted list with a few items appended (the UI's 3D model adds ~8 to list A's ~8,400 and prepares the node again): the
-// tail is sorted on its own and merged in from the back, the prefix moving in blocks, so only the items after the first
-// insertion move, each once. On ties the prefix's items stay first, which is the stable radix sort's order.
+// Merges a short appended tail from the back, so only items past its first insertion move; ties keep the radix order.
 static long long merge_tail(ListKind list, int tie_grouping, uint8_t *first, size_t prefix, size_t count) {
     static __thread uint8_t held[TAIL_MAX][RENDER_ITEM_SIZE];
     uint64_t keys[TAIL_MAX][MAX_KEY_WORDS], key[MAX_KEY_WORDS];
@@ -142,8 +134,7 @@ static long long merge_tail(ListKind list, int tie_grouping, uint8_t *first, siz
     return (long long)(count - end);
 }
 
-// List A holds ~7,300 items under ~50 distinct keys, so a counting sort over the distinct keys finds the order in one
-// pass over the items where the radix takes one pass per key word plus its digit passes. Same stable order as the radix.
+// With few distinct keys, one counting pass finds the order the radix needs a pass per key word for; same stable order.
 #define FEW_KEYS_MAX 1024
 #define FEW_KEYS_SLOTS 4096
 // After a list kind has more distinct keys than that, its next sorts skip the attempt.
@@ -176,7 +167,7 @@ static int few_key_less(const void *a, const void *b) {
     return words_less(x, y, few.words) ? -1 : words_less(y, x, few.words) ? 1 : 0;
 }
 
-// Fills order (index = source of each destination) and returns 1, or 0 when there are too many distinct keys or no room.
+// order[i].index is the source of destination i; 0 when there are too many distinct keys or no room.
 static int few_keys_order(ListKind list, int tie_grouping, const uint8_t *first, size_t count, KeyedIndex *order) {
     if (count > few.id_capacity) {
         uint16_t *ids = realloc(few.ids, count * 2 * sizeof *ids);
@@ -219,10 +210,7 @@ static int few_keys_order(ListKind list, int tie_grouping, const uint8_t *first,
     return 1;
 }
 
-// Stable LSD radix over the key words, least significant word first, or merge_tail when only a short tail is out of
-// order (tail_merge, and *merged set), or the counting sort over distinct keys (few_keys) when there are few. Returns the
-// number of items moved, 0 when the list was already in order (then nothing is touched), or -1 when the buffers cannot
-// be allocated.
+// Returns the items moved, 0 when already in order (nothing touched), or -1 when the buffers can't be allocated.
 static long long sort_render_items(ListKind list, int tie_grouping, uint8_t *first, uint8_t *last, int tail_merge, int few_keys, int *merged) {
     size_t count = (last - first) / RENDER_ITEM_SIZE;
     if (count < 2) return 0;

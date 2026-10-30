@@ -4,10 +4,8 @@
 #include <stdio.h>
 #include "exports.h"
 
-// Loaded from the game folder in place of the system d3d11.dll, which the engine loads by bare name. Every export jumps to
-// the system DLL's. It loads s2fix (s2prof.dll beside it) as it loads, so s2fix's device-time hook is in before the
-// engine's own LoadLibrary("d3d11.dll") returns; s2fix does the device work itself, so any other loader that brings it
-// in before the device is created works too.
+// Stands in for the system d3d11.dll, which the engine loads by bare name, and loads s2fix, so its device-time hook is
+// in before the engine's own LoadLibrary("d3d11.dll") returns.
 #define HOST_FILE L"s2prof.dll"
 #define LOG_FOLDER L"perf-logs"
 #define LOG_FILE L"proxy.log"

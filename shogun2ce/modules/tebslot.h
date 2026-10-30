@@ -3,10 +3,7 @@
 #include <intrin.h>
 #include <stdlib.h>
 
-// A per-thread pointer in a TlsAlloc slot, read straight from the TEB. Not __thread: with this toolchain that can be
-// emulated TLS (a locked winpthreads lookup and two last-error calls per access), which cost the original game's
-// campaign cache 1.5 ms a frame at 20 million lookups a second. The TEB's own slot is one load and leaves the last error
-// alone.
+// A per-thread pointer in a TEB slot: __thread is emulated TLS here, which locks and clobbers the last error.
 #define TEB_TLS_SLOTS 0x1480
 #define TEB_TLS_EXPANSION 0x1780
 #define TEB_SLOT_COUNT 64
@@ -17,8 +14,7 @@ static inline void *teb_slot_get(DWORD slot) {
     return expansion ? expansion[slot - TEB_SLOT_COUNT] : NULL;
 }
 
-// The thread's zeroed block of bytes, made on its first use; NULL if it can't be. The game's code reads the last error
-// after calls that end in a fix, so it is put back.
+// Made on first use; the last error is put back, as the game reads it after calls that end in a fix.
 static inline void *teb_slot_block(DWORD slot, size_t bytes) {
     void *block = teb_slot_get(slot);
     if (block) return block;

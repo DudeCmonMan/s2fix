@@ -2,13 +2,8 @@
 #include "../checks/listkeep.h"
 #include <stdint.h>
 
-// The Variant node's clear (0x181b1a9e0, end of frame) empties its pose list and lists A, B and C. Each list body is
-// {capacity, count, items}, the per-thread sublists at +0x10 {capacity, thread count +0x14, 16-byte {capacity, count,
-// items} at +0x18} that the parallel append fills, the merge's offsets at +0x20 {capacity, count +0x24, data +0x28} and
-// the needs-merge flag at +0x30. The clear frees every sublist buffer and empties the sublist vector, so in every frame
-// the next parallel append rebuilds it under the list's lock and each thread's sublist regrows from one item, copying all
-// its items at each doubling. This clear empties the sublists and keeps their buffers, the vector and the offsets' size,
-// which is the state the append's rebuild leaves (offsets all zero) and the merge leaves (sublists empty, buffers kept).
+// The Variant node's list clear frees every per-thread sublist, so each frame's parallel appends regrow them item by
+// item; this clear empties them and keeps their buffers, the state the append's rebuild leaves (offsets zeroed).
 #define CLEAR_RVA 0x1b1a9e0
 #define FREE_RVA 0x19fe10
 #define PUSH_OFFSET_RVA 0x2714f0
@@ -31,7 +26,6 @@ typedef struct {
 // The pose list (16-byte rows), then lists A, B and C (176-byte render items), in the engine's order.
 static const ListLayout lists[] = {{0x270, 0x10}, {0x100, 0xb0}, {0x168, 0xb0}, {0x1d0, 0xb0}};
 
-// 0 runs the engine's clear; exported, and a switch.
 __declspec(dllexport) volatile LONG keep_enabled = 1;
 
 static const BYTE clear_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0xd9,

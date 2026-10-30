@@ -80,8 +80,7 @@ static int check_render_items(size_t count, int pattern, int few_keys) {
     return 1;
 }
 
-// Mirrors oneTBB's layout: segment k holds indices [2^k, 2^(k+1)) (segment 0 holds [0, 2)), each allocated separately,
-// and the table stores each segment's address minus its first index times the element size.
+// oneTBB's layout: segment k holds indices [2^k, 2^(k+1)), allocated apart and stored pre-offset by its first index.
 typedef struct {
     uint8_t header[VECTOR_SEGMENTS_OFFSET];
     uintptr_t *segments;
@@ -180,8 +179,7 @@ static int check_entries(size_t count, int pattern) {
     return 1;
 }
 
-// The counting sort takes up to FEW_KEYS_MAX distinct keys; one more falls back to the radix, and that list skips the
-// attempt for its next FEW_KEYS_BACKOFF sorts.
+// One key past FEW_KEYS_MAX falls back to the radix, and that list skips the next FEW_KEYS_BACKOFF attempts.
 static int check_few_keys_limit(void) {
     size_t count = 4 * FEW_KEYS_MAX;
     uint8_t *items = malloc(count * RENDER_ITEM_SIZE);

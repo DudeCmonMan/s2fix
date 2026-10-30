@@ -4,12 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Checks texdirect_plan on DDS files laid out as the engine hands them to D3DX (DX10-wrapped or legacy, random blocks
-// with opaque 4-colour endpoints, as encoded opaque art has): each request it serves must give the file's blocks at every
-// level the file holds and, when d3dx11_42.dll is present, a texture described as D3DX describes its own, with every
-// texel of each level it adds within D3DX's re-encoding error of D3DX's; each request asking for a change goes to D3DX.
-// (D3DX re-encodes the whole chain when it adds levels, and pulls BC1 blocks with transparent texels toward black on
-// every pass; the direct path copies those blocks, so transparency is covered by the block comparison.)
+// texdirect_plan on DDS files as the engine hands them to D3DX: served requests keep the file's blocks, and added levels
+// match D3DX's within its re-encoding error (when d3dx11_42.dll is present); requests for a change go to D3DX.
 #define TOLERANCE 24
 typedef HRESULT(WINAPI *CreateTextureFn)(ID3D11Device *device, const void *data, SIZE_T size, const TexLoadInfo *info, void *pump,
                                          ID3D11Resource **texture, HRESULT *result);
@@ -73,7 +69,6 @@ static ID3D11Texture2D *readable_copy(ID3D11Resource *texture) {
     return staging;
 }
 
-// Levels of the texture made from the plan whose blocks differ from the plan's source.
 static int differing_levels(const TexPlan *plan) {
     ID3D11Texture2D *texture, *staging;
     if (FAILED(ID3D11Device_CreateTexture2D(device, &plan->desc, plan->levels, &texture))) return -1;
@@ -101,7 +96,7 @@ static void endpoint(int v, int *rgb) {
     rgb[0] = (v >> 11 & 31) * 255 / 31, rgb[1] = (v >> 5 & 63) * 255 / 63, rgb[2] = (v & 31) * 255 / 31;
 }
 
-// Texel (x, y) of a level as 8-bit RGBA, per the D3D spec.
+// Decoded per the D3D spec.
 static void texel(UINT format, const BYTE *level, UINT pitch, UINT x, UINT y, int *rgba) {
     BOOL bc1 = format <= 72;
     const BYTE *block = level + (y / 4) * pitch + (x / 4) * (bc1 ? 8 : 16), *c = block + (bc1 ? 0 : 8);
@@ -124,7 +119,7 @@ static void texel(UINT format, const BYTE *level, UINT pitch, UINT x, UINT y, in
     }
 }
 
-// The largest channel difference between the levels the plan adds and D3DX's for the same request; -1 without D3DX.
+// -1 without D3DX.
 static int added_levels_difference(const Dds *dds, const TexLoadInfo *info, const TexPlan *plan, UINT stored) {
     ID3D11Resource *resource;
     if (!d3dx_create || FAILED(d3dx_create(device, dds->data, dds->size, info, NULL, &resource, NULL))) return -1;

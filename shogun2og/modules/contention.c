@@ -1,10 +1,7 @@
 #include "../s2module.h"
 
-// With the game's threads on one CCD (cpuplace), the overhaul's workers waited for a CPU behind helper threads spinning
-// idle, and main waited for the workers: frames of 8-15 ms in heavy scenes. This sets the flags the pools read: the
-// overhaul's workers run above normal priority (main waits on them) and spin briefly before sleeping, and walksplit's and
-// batchsplit's helpers spin 50 us instead of 20,000 pause rounds (about 230 us) before sleeping. Without this DLL the
-// pools keep their old waits. The pools' own checks follow Apply Fixes. Switch contention.
+// With the threads on one CCD, the overhaul's workers waited for CPUs behind idle-spinning helpers while main waited
+// for them; this sets the flags the pools read: workers above normal priority, and every pool spinning briefly.
 #define POLL_MS 10
 
 __declspec(dllexport) volatile LONG contention_enabled = 1;

@@ -3,12 +3,8 @@
 #include <string.h>
 #include <wchar.h>
 
-// Checks modules/lookupcache.dll against a stand-in engine whose import slots hold the real functions, with a scratch
-// data\ folder beside this program (the module takes the data folder beside the executable): a missing data file is
-// answered from memory after Windows said so once, with the same error; files that exist, paths outside the data
-// folder, wildcard searches and the switch turned off always go to Windows; a write open in the data folder drops what
-// was remembered. A mod's folder counts as the data folder does: one whose pack is open when the module loads, and one
-// whose pack the engine opens later.
+// lookupcache.dll against a stand-in engine and a scratch data\ folder beside this program, as the module expects it:
+// only missing data and mod files are answered from memory, with Windows' error; a write open drops what is remembered.
 #define ENGINE_BYTES 0x1600000
 
 static BYTE *engine;

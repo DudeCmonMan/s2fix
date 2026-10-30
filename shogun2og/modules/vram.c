@@ -5,15 +5,8 @@
 #include <stdint.h>
 #include <wchar.h>
 
-// The engine's video memory total (0x113f1360, engine vtable +0x158) is the texture manager's budget (over it, textures
-// lose their top mips and quality settings are lowered), sizes the imposter and unit-model pools, and is what the options
-// screen shows. It is 95% of DXGI's DedicatedVideoMemory, which DXGI caps at 3 GiB for a 32-bit process: 2918 MB on a
-// 24 GB card. This answers with the adapter's own local video memory budget instead (IDXGIAdapter3, 64-bit even here),
-// clamped to the most the engine's 32-bit fields hold, whenever that is more than the engine's figure. Every user of the
-// total checked on the disassembly treats it as unsigned up to 4 GiB - 1: the texture budget (0x113df9d6, it subtracts),
-// the pools (0x113f5865, through double), the thresholds (0x113911f3, 0x113f9134) and the display (0x111d0c2f). The
-// first readers are logged, so new ones can be checked. A total the texture manager pinned after a real allocation
-// failure (engine +0x69ce0) is kept. Read at start: [vram] enabled=0 in s2prof.ini keeps the game's figure.
+// The engine's video memory total (texture budget, pools) is 95% of DXGI's dedicated memory, capped at 3 GiB for a
+// 32-bit process; this returns the adapter's own budget when larger. Every reader checked treats it as unsigned.
 #define TOTAL_RVA 0x13f1360
 #define DEVICE_GLOBAL_RVA 0x1c9a93c
 #define D3D11_DEVICE_VTABLE_RVA 0x17666f8
@@ -37,7 +30,6 @@ static TotalFn original_total;
 static volatile LONG unlocked_total, logged_total;
 static volatile LONG readers[LOGGED_READERS];
 
-// The adapter the engine chose, once its device has one: its local budget, clamped. 0 until it can be read.
 static uint32_t adapter_total(void) {
     BYTE *device = *(BYTE *volatile *)(api->engine + DEVICE_GLOBAL_RVA);
     if (!device || *(BYTE **)device != api->engine + D3D11_DEVICE_VTABLE_RVA) return 0;
@@ -63,6 +55,7 @@ static void log_reader(void *return_address) {
     }
 }
 
+// Readers are logged so new ones can be checked; a total pinned after a real allocation failure is kept.
 static uint32_t __attribute__((thiscall)) total_hook(BYTE *engine_object) {
     log_reader(__builtin_return_address(0));
     uint32_t engine_total = original_total(engine_object), pinned = *(uint32_t *)(engine_object + PINNED_TOTAL_OFFSET);
@@ -76,7 +69,7 @@ static uint32_t __attribute__((thiscall)) total_hook(BYTE *engine_object) {
     return total > engine_total ? total : engine_total;
 }
 
-// s2prof.ini sits next to the game, two folders up from fixes\vram.dll.
+// s2prof.ini is two folders up from fixes\vram.dll.
 static BOOL enabled_in_ini(void) {
     wchar_t path[MAX_PATH];
     HMODULE self = NULL;

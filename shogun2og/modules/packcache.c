@@ -1,12 +1,8 @@
 #include "../patchset.h"
 #include "../checks/packcache.h"
 
-// The engine reads packs and loose data files through file mappings made from FILE_FLAG_NO_BUFFERING handles: each pack
-// is reopened at 0x112e14e0 with 0x70000001, loose files are opened at 0x11284e50 with 0x68000001. Such a mapping keeps
-// its pages only while the game holds it, so every game start reads all its data from disk again (200 MB of a pack: 205
-// disk faults and ~120 ms on every run; through a cached handle none from the second run, 35 ms). Without the flag
-// Windows keeps the data between starts; the overlapped and access hints stay. Only files opened afterwards change, so
-// it takes effect from the next start (boot.pack is reopened before s2fix loads).
+// The engine maps packs and loose data files through FILE_FLAG_NO_BUFFERING handles, whose pages go when closed, so
+// every start reads its data from disk again; dropping the flag lets Windows keep it (from the next start).
 __declspec(dllexport) volatile LONG cache_enabled = 1;
 
 static CodePatch patches[] = {

@@ -2,11 +2,11 @@
 #include <string.h>
 #include "cpupick.h"
 
-// Checks the placement rules on CPU layouts by shape (what Windows reports, never a model), plus two real readouts.
+// The placement rules on CPU layouts by shape, as Windows reports them, never by model.
 static CpuInfo cpus[CPU_MAX];
 static int count, failures, checks, twins = 1;
 
-// Appends cores of `threads` logical CPUs each; Windows numbers a core and a cache by their first CPU.
+// Windows numbers a core and a cache by their first CPU.
 static void add(int cores, int threads, int cache, int efficiency, uint32_t mb, const uint8_t *ranks) {
     for (int core = 0; core < cores; core++) {
         int first = count;
@@ -45,8 +45,7 @@ static void expect_list(uint64_t mask, const char *text) {
 }
 
 int main(void) {
-    // Two cache groups of different sizes, SMT: this PC's 9950X3D, read on the desktop and with a game running (the
-    // V-Cache driver then ranks the cache group higher, and two cores tie at the top).
+    // Two cache groups of different sizes, SMT; with a game running the large cache's cores lead and two tie.
     static const uint8_t desktop0[] = {5, 3, 6, 4, 7, 2, 0, 1}, desktop1[] = {10, 14, 13, 11, 12, 14, 8, 9};
     static const uint8_t game0[] = {13, 11, 14, 12, 14, 10, 8, 9}, game1[] = {2, 7, 5, 3, 4, 6, 0, 1};
     reset();
@@ -110,8 +109,7 @@ int main(void) {
     expect("fast SMT cores and slow cores", -1, 1, 1, 0, 4, 0x30, 0xffcf, "the only one");
     expect("fast SMT cores and slow cores, main's core only", -1, 0, 1, 0, 4, 0x30, 0xffffffcfull, NULL);
 
-    // Fast cores without SMT beside slow cores: too few for the others, so they go wide, and main, on a core of one CPU,
-    // may use theirs too.
+    // Fast cores without SMT: too few for the others, who go wide, and main on its one-CPU core may use theirs.
     static const uint8_t p6[] = {3, 3, 2, 5, 2, 3};
     reset();
     add(6, 1, 0, 1, 24, p6);

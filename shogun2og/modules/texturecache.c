@@ -4,8 +4,8 @@
 #include <string.h>
 #include <intrin.h>
 
-// The HUD's texture lookup (thiscall, 0x113ef7e0: a string-keyed open-addressing map, called per UI image quad per
-// frame) hashes the name and probes on every call; its result is cached per key object.
+// The HUD's texture lookup, called per UI quad per frame, hashes the name and probes on every call; its result is
+// cached per key object.
 #define STRING_MAP_FIND_RVA 0x13ef7e0
 #define STRING_EQUAL_RVA 0xee2c0
 #define MAP_CAPACITY_OFFSET 0x4
@@ -20,10 +20,9 @@ typedef struct {
     LONG64 calls[2], cycles[2], mismatches, hits;
 } HookStats;
 
-// 0 runs only the new code; 1 runs both and counts differing results, returning the engine's; 2 alternates calls and times both.
+// 0: ours only; 1: both, counting differences and returning the engine's; 2: alternating, timing both.
 __declspec(dllexport) volatile LONG lookup_mode = MODE_PRODUCTION;
 __declspec(dllexport) volatile HookStats lookup_stats;
-// 0 always runs the engine's lookup; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG cache_enabled = 1;
 
 typedef struct {
@@ -42,8 +41,7 @@ static MapFindFn original_map_find;
 static StringEqualFn string_equal;
 static __thread CachedFind find_cache[CACHE_SLOTS];
 
-// Keys are unique, so an entry still holding an equal key is the one the full lookup returns. The entry array and its size
-// must be unchanged so the cached index still points into the live table.
+// Keys are unique: an entry still holding an equal key is the lookup's answer while the array and size are unchanged.
 static BYTE *cached_map_find(BYTE *map, const void *key) {
     const BYTE *entries = *(BYTE *const *)map;
     uint32_t capacity = *(const uint32_t *)(map + MAP_CAPACITY_OFFSET);

@@ -4,10 +4,8 @@
 #include <intrin.h>
 #include <xmmintrin.h>
 
-// The UI update (sub_18147f560, the components' vtbl+0x70) recurses over every component each frame and mostly waits on
-// the first loads of each child. Entering a node prefetches the lines its children's updates read first (vtable, child
-// list and state fields, controller), so a sibling's lines arrive while the earlier siblings' subtrees run. Only
-// prefetches; what runs is unchanged.
+// The UI update recurses over every component each frame, mostly waiting on each child's first loads; entering a node
+// prefetches the lines its children's updates read first. Only prefetches; what runs is unchanged.
 #define UPDATE_RVA 0x147f560
 #define FRAME_STAMP_RVA 0x2ead830
 #define MAX_PREFETCHED_CHILDREN 64
@@ -19,9 +17,8 @@ typedef struct {
 } Stats;
 
 __declspec(dllexport) volatile Stats stats;
-// 0 never prefetches; exported so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG prefetch_enabled = 1;
-// 1 prefetches only on even frames and times the whole tree update both ways, for a same-session comparison.
+// 1 prefetches only on even frames, timing the tree update both ways.
 __declspec(dllexport) volatile LONG alternate_frames;
 
 static const BYTE update_prologue[] = {0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56, 0x48, 0x81, 0xec, 0xb0, 0x00, 0x00, 0x00};

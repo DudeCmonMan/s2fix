@@ -5,13 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-// The record step's per-queue list sort (std::sort instantiation sub_181aff120, called only from sub_181b15ab0) orders
-// render items by mesh, word + 0x00, word + 0x98, float + 0x94 and material, but not by the state nibble at + 0xa0. With
-// instancing on, the record loop after it starts a new instancing group whenever that nibble differs from the previous
-// item's, so tied items with alternating nibbles were drawn in groups of ~1.5. std::sort leaves the order of tied items
-// unspecified, and the list's input order already varies with how TBB filled the per-thread lists, so this regroups each
-// run of items whose five key fields are bit-identical by nibble, keeping their relative order otherwise. Each run starts
-// with the nibble of the item before it, so a boundary where only word + 0x00 changes does not break a group either.
+// The record step's list sort leaves ties in any order, and instancing breaks a group at every change of the state
+// nibble (+0xa0); this regroups each run of tied items by nibble, keeping their order otherwise.
 #define QUEUE_SORT_RVA 0x1aff120
 #define FRAME_STAMP_RVA 0x2ead830
 #define ITEM_SIZE 0xb0
@@ -29,10 +24,8 @@ typedef struct {
 } SortOnceStats;
 
 __declspec(dllexport) volatile TieGroupStats tie_group_stats;
-// 0 leaves the engine's tie order; exported so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG enabled = 1;
-// List C is sorted in each of a frame's six records; after the first it is already in order, and the engine's introsort is
-// then the identity (UP2 4.6), so sort_once skips the sort and the regroup when a scan finds nothing to change.
+// After a frame's first sort list C is in order and the introsort is the identity, so an in-order list skips both.
 __declspec(dllexport) volatile LONG sort_once = 1;
 
 static const BYTE queue_sort_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x55, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57};
@@ -99,7 +92,7 @@ static void verify_skip(const BYTE *first, size_t bytes, int64_t ideal, uint64_t
     free(copy);
 }
 
-// A stable counting sort of one tie run by nibble, with the lead nibble first.
+// A stable counting sort of one tie run by nibble, the previous item's nibble first so its group carries on.
 static void regroup(BYTE *first, size_t count, DWORD lead) {
     size_t offsets[NIBBLES] = {0};
     for (size_t i = 0; i < count; i++) offsets[nibble(first + i * ITEM_SIZE)]++;

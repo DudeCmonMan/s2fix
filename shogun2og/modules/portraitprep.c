@@ -3,16 +3,8 @@
 #include <stdint.h>
 #include <string.h>
 
-// The UI's 3D models (the general's portrait, the advisor) are drawn through the battle's Variant node: 0x110ddc00
-// adds the model's pose and items, calls the node's prepare-now (vtbl+0x84, 0x114c47f0), draws the model into its
-// rectangle and clears the node. Prepare-now runs the whole prepare again: keys for every item of lists A and B, the
-// instance textures, and list A's sort, over the ~10,000 battle items it already prepared this frame, to add ~8. The
-// model's draws carry only its own instances, and nothing draws the battle's items after it, so this prepares only what
-// was added since the frame's prepare: keys for the new items, the instance-texture rows of the new poses, and the new
-// items sorted among themselves after the battle's. The model's view then records the same sequence, since its walk
-// records none of the battle's items. The engine's fill would rewrite every row of every instance texture
-// (WRITE_DISCARD) for the model's one pose, most of the model's time. Only the new rows are written, into the textures
-// and rows the engine's fill puts them in; the discarded rows are read by nothing after this.
+// A UI model (portrait, advisor) drawn through the battle's Variant node re-runs the whole battle prepare for a few
+// items; this prepares only what the model added, as nothing draws the battle's items after it.
 #define PREPARE_RVA 0x14c4780
 #define PREPARE_NOW_RVA 0x14c47f0
 #define UI_MODEL_RVA 0x10ddc00
@@ -66,9 +58,7 @@ typedef struct {
     LONG64 calls, shortcuts, fallbacks, items_keyed, rows_written, full_fills;
 } Stats;
 
-// 0 lets prepare-now run the whole prepare, as the engine does; exported, and a switch.
 __declspec(dllexport) volatile LONG portrait_prepare = 1;
-// 0 lets the shortened prepare run the engine's whole texture fill; exported, and a switch.
 __declspec(dllexport) volatile LONG portrait_fill = 1;
 __declspec(dllexport) volatile Stats portrait_stats;
 
@@ -82,7 +72,6 @@ static UiModelFn original_ui_model;
 // Set while a UI model draws on main; other hooks on prepare-now hide the call site's return address.
 static int in_ui_model;
 static volatile uint64_t *frame_stamp;
-// The last whole prepare on main: its node, frame, and the lists' lengths when it returned.
 static BYTE *prepared_node;
 static uint64_t prepared_stamp;
 static uint32_t prepared_a, prepared_b, prepared_rows;
@@ -102,7 +91,7 @@ static BOOL instancing_active(const BYTE *node) {
     return node[NODE_INSTANCING] && !node[NODE_INSTANCING_OFF] && *(const uint32_t *)(node + NODE_TEXTURE_COUNT);
 }
 
-// As compute_keys_list (0x114e7cf0) keys each item: the texture index and row of its pose, the row as a float.
+// Mirrors the key pass (0x114e7cf0): each item's pose texture index and row, the row as a float.
 static void key_items(BYTE *node, BYTE *items, uint32_t first, uint32_t end) {
     KeyLookupFn lookup = (KeyLookupFn)(api->engine + KEY_LOOKUP_RVA);
     for (uint32_t i = first; i < end; i++) {
@@ -119,8 +108,7 @@ static uint32_t texture_rows(BYTE *texture) {
     return ((RowsFn)(*(void ***)texture)[0x64 / 4])(texture);
 }
 
-// As 0x114c5470 fills an instance texture holding rows [start, start + its rows), for rows [first, end) only: mapped
-// with WRITE_DISCARD, each row's bones (48 bytes each, clipped to the row pitch) at its offset from start.
+// Mirrors 0x114c5470's fill for rows [first, end) only; the rows WRITE_DISCARD drops are read by nothing after this.
 static void fill_rows(BYTE *node, BYTE *texture, uint32_t start, uint32_t first, uint32_t end) {
     BYTE *engine = api->engine, *device = *(BYTE **)(engine + RENDER_DEVICE_RVA);
     BYTE *renderer = ((GetRendererFn)(*(void ***)device)[GET_RENDERER_SLOT / 4])(device);
@@ -137,9 +125,7 @@ static void fill_rows(BYTE *node, BYTE *texture, uint32_t start, uint32_t first,
     portrait_stats.rows_written += end - first;
 }
 
-// The engine's fill (0x114e78e0) with only rows [first, count) written. Fewer rows than the last texture holds go into
-// the first texture that holds more, from row 0; otherwise the textures fill from the last down, each from the rows
-// the later ones took.
+// The engine's fill with only rows [first, count) written, into the textures and rows it would put them in.
 static void fill_new_rows(BYTE *node, uint32_t first) {
     uint32_t count = *(uint32_t *)(node + POSE_COUNT), textures = *(uint32_t *)(node + NODE_TEXTURE_COUNT);
     BYTE **texture = *(BYTE ***)(node + NODE_TEXTURES);
@@ -227,7 +213,6 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     api = host;
     if (!api->main_thread) return "the host is older than this module (no main_thread)";
     frame_stamp = (volatile uint64_t *)(api->engine + FRAME_STAMP_RVA);
-    // 0x110ddc00 calls prepare-now through the node's vtbl+0x84 at 0x110ddfdc.
     static const BYTE call_site[] = {0xff, 0x90, 0x84, 0x00, 0x00, 0x00};
     if (memcmp(api->engine + 0x10ddfdc, call_site, sizeof call_site)) return "the UI model's prepare call differs from the analysed build";
     const char *error = api->hook(api->engine + UI_MODEL_RVA, ui_model_prologue, sizeof ui_model_prologue, (const void *)ui_model_hook, (void **)&original_ui_model);

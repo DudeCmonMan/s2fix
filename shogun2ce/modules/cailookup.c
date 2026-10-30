@@ -5,17 +5,8 @@
 #include <stdint.h>
 #include <string.h>
 
-// Campaign end turn. The AI rates how one faction stands with another (sub_180de2140: unused, faction A, faction B, the
-// list of factions, a weight source, the AI context) by averaging, over every other faction C, half of A's value for C
-// and half of C's value for B, then blending that average with A's value for B by a weight. Each value is a record in a
-// faction's table (count at +0x194, array at +0x198; 24-byte records naming the other faction at +8, the value at
-// +0x10), found by a linear scan the compiler copied inline, so one rating scans two tables per faction and an end turn's
-// cost grows with the cube of the faction count. This replaces the rating with the same arithmetic in the same order
-// (baseline x86-64 has no fused multiply-add, so each step rounds as the engine's does), and remembers where each record
-// was. A repeat uses that record only while the table still has the same array and count and the record still names the
-// faction; otherwise it scans. A table names each faction once, so the record found is the first. The switch
-// cailookupverify runs the engine's rating beside each one and counts any result that differs in a bit. Follows Apply
-// Fixes.
+// Campaign end turn: the AI's faction rating scans two tables per faction, so an end turn grows with the cube of the
+// faction count. This replaces the rating with the same arithmetic, remembering each record found (one per faction).
 #define AVERAGE_RVA 0xde2140
 #define TABLE_RVA 0xdc36c0
 #define SKIP_RVA 0xc9be70
@@ -40,8 +31,7 @@ typedef struct {
     uint32_t count, index;
 } Entry;
 
-// Plain counters: a locked 64-bit add on every lookup would cost more than it measures; another thread's lookup can
-// lose a count.
+// Plain counters: a locked add per lookup would cost more than it measures; a count may be lost.
 typedef struct {
     LONG64 ratings, ticks, lookups, hits, mismatches;
 } Stats;
@@ -55,7 +45,7 @@ static const S2Api *api;
 static AverageFn original_average;
 static TableFn table_of;
 static SkipFn skipped;
-// Each thread keeps its own table, so no lookup ever waits on another thread.
+// A table per thread, so no lookup waits on another.
 static DWORD cache_slot = TLS_OUT_OF_INDEXES;
 
 // The engine's inline scan: the first record naming the faction, or NULL.
@@ -91,6 +81,7 @@ static float value(BYTE *record) { return *(float *)(record + RECORD_VALUE); }
 
 static float weight(BYTE *weights) { return (*(WeightFn **)weights)[WEIGHT_SLOT](weights); }
 
+// The engine's arithmetic in its order: baseline x86-64 has no FMA, so each step rounds as the engine's does.
 static float average(BYTE *a, BYTE *b, BYTE *list, BYTE *weights, BYTE *context) {
     BYTE *table_a = table_of(context, a);
     float sum = 0.0f;

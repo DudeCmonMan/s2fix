@@ -7,16 +7,14 @@
 #include <stdlib.h>
 #include "wrap.h"
 
-// The engine gets our device and immediate context instead of the runtime's. Every call is forwarded as is: queueing the
-// context's calls for a render thread needs the engine to hold these objects rather than the real ones. Each slot jumps
-// through the real object's current vtable, since the runtime rewrites its context's vtable entries while running.
+// The engine must hold our objects for its context calls to be queued for a render thread. Each slot jumps through the
+// real object's current vtable, since the runtime rewrites its context's vtable entries while running.
 #define DEVICE_SLOTS 69
 #define CONTEXT_SLOTS 149
 #define CONTEXT_GET_DEVICE_SLOT 3
 #define GET_IMMEDIATE_CONTEXT_SLOTS {40, 43, 50, 61}
 
-// The forwarding thunks read their target right after the vtable pointer. The context's target is the immediate context,
-// or a deferred one the overhaul records main into while workers draw; references and queries stay with the immediate.
+// The thunks read real right after the vtable; immediate keeps references and queries while real is a deferred context.
 typedef struct {
     void *const *vtable;
     IUnknown *real, *immediate;

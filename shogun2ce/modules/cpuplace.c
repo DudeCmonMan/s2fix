@@ -8,21 +8,11 @@
 // mingw-w64's headers lack these; its kernel32 import library has them.
 WINBASEAPI BOOL WINAPI GetSystemCpuSetInformation(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
 WINBASEAPI BOOL WINAPI SetProcessDefaultCpuSets(HANDLE, const ULONG *, ULONG);
-// Walks this process's threads only; a system-wide thread snapshot takes tens of milliseconds on a busy desktop.
+// Walks only this process's threads: a system-wide snapshot is slow on a busy desktop.
 NTSTATUS NTAPI NtGetNextThread(HANDLE process, HANDLE thread, ACCESS_MASK access, ULONG attributes, ULONG flags, PHANDLE next);
 
-// Places the game's threads by cpupick.h's rules, from what Windows reports about this PC. Two fixes:
-// - cpuplace keeps the other threads in main's cache group ([cpu] ccd in s2prof.ini: auto, off, or a group number) when
-//   it leaves them enough CPUs. Windows may run main on a two-CCD chip's higher-clocked CCD, while the engine's
-//   cache-missing render code runs far faster on a 3D V-Cache CCD. Its twins switch (off: one logical CPU per core) is
-//   there to measure SMT sharing.
-// - maincore gives main, the thread that presents frames, the group's highest-ranked core to itself and makes that CPU
-//   its ideal processor. The engine leaves main unpinned, so pool threads would run on its core's twin.
-// CPU sets place every thread: the process's default for the others, main's own for main. Hard masks can only be
-// narrowed by CPU sets, so while placing a pin that leaves out a CPU its thread may use is widened to the process's mask
-// (a pinned thread that wakes waits for its one CPU while others sit idle). Both follow Apply Fixes and their switches; off puts back the engine's masks and main's CPU set and
-// ideal processor. A thread rechecks every POLL_MS, so it follows the switches within a bench block's skipped first
-// 200 ms, and rescans every RESCAN_MS for threads the engine pins later.
+// Windows may run main off a two-CCD chip's V-Cache CCD, and pool threads on its core's twin. This places threads by
+// cpupick.h's rules: the others in main's cache group (cpuplace), main's core to main alone (maincore).
 #define CONFIG_FILE L"s2prof.ini"
 #define MAX_CPUS 64
 #define MAX_TRACKED 256
@@ -38,7 +28,6 @@ typedef struct {
     LONG priority, base_priority;
 } ThreadBasicInfo;
 
-// What this module changed on a thread, to put back.
 typedef struct {
     DWORD thread;
     ULONGLONG created;
@@ -47,7 +36,6 @@ typedef struct {
     BOOL selected, ideal_set, seen;
 } TrackedThread;
 
-// 0 leaves the threads where the engine and Windows put them; exported so each can be A/B tested live.
 __declspec(dllexport) volatile LONG placement_enabled = 1;
 __declspec(dllexport) volatile LONG main_core_enabled = 1;
 __declspec(dllexport) volatile LONG twins_enabled = 1;
@@ -107,15 +95,14 @@ static TrackedThread *find_tracked(DWORD thread, ULONGLONG created) {
     for (int i = 0; i < tracked_count; i++) {
         if (tracked[i].thread != thread) continue;
         if (tracked[i].created == created) return &tracked[i];
-        // A new thread with an exited one's id: what was changed went with the old one.
+        // Ids are reused: what was changed went with the exited thread.
         tracked[i] = tracked[--tracked_count];
         return NULL;
     }
     return NULL;
 }
 
-// Gives main its CPU set and ideal processor and widens the engine's pins while placing, or puts all of it back; returns
-// how many masks it changed.
+// Hard masks beat CPU sets: while placing, a pin leaving out a CPU its thread may use is widened to the process's mask.
 static int place_threads(CpuPlacement placement, DWORD main_thread) {
     int changed = 0;
     DWORD_PTR process_mask, system_mask;
@@ -137,8 +124,7 @@ static int place_threads(CpuPlacement placement, DWORD main_thread) {
             continue;
         ULONGLONG created_at = (ULONGLONG)created.dwHighDateTime << 32 | created.dwLowDateTime;
         TrackedThread *t = find_tracked(thread, created_at);
-        // Before the first frame main is unknown; a thread pinned to CPU 0 stands in (the original game's engine pins main
-        // there), so both games' offline checks see main's CPU set.
+        // Until the first frame names main, a thread pinned to CPU 0 stands in (the original game pins main there).
         BOOL main = main_thread ? thread == main_thread : (t ? t->engine_mask : basic.affinity) == 1;
         BOOL main_placed = main && placement.main_cpu >= 0;
         if (!t && ((basic.affinity & process_mask) != process_mask || main_placed) && tracked_count < MAX_TRACKED) {
@@ -147,7 +133,7 @@ static int place_threads(CpuPlacement placement, DWORD main_thread) {
         }
         if (!t) continue;
         t->seen = TRUE;
-        // A mask other than the one set here is the engine's, first seen or changed since.
+        // A mask other than ours is the engine's, first seen or changed since.
         if (basic.affinity != t->set_mask) t->engine_mask = basic.affinity, t->set_mask = 0;
         DWORD_PTR allowed = main_placed ? (DWORD_PTR)placement.main_cpus : others;
         DWORD_PTR wanted = placing && (allowed & ~t->engine_mask) ? process_mask : t->engine_mask;
@@ -165,7 +151,6 @@ static int place_threads(CpuPlacement placement, DWORD main_thread) {
         }
     }
     if (handle) CloseHandle(handle);
-    // Exited threads, and threads with nothing to put back, are dropped.
     int kept = 0;
     for (int i = 0; i < tracked_count; i++) {
         TrackedThread *t = &tracked[i];
@@ -202,7 +187,7 @@ static DWORD WINAPI follow_switches(LPVOID unused) {
         BOOL fixes = *api->fix_enabled, confined = confine && placement_enabled && fixes;
         CpuPlacement wanted = cpu_placement(cpus, cpu_count, group_cpu, confined, own_core && main_core_enabled && fixes, twins_enabled);
         BOOL changed = wanted.main_cpu != applied.main_cpu || wanted.main_cpus != applied.main_cpus || wanted.others != applied.others;
-        // Main is known from the first frame and gets its CPU set at once.
+        // Main, known from the first frame, is placed at once rather than at the next rescan.
         DWORD main_thread = *api->main_thread;
         if (!changed && main_thread == placed_main && since_scan < RESCAN_MS) continue;
         since_scan = 0;
@@ -226,17 +211,17 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     wchar_t path[MAX_PATH], setting[16];
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)(void *)s2_module_main, &self);
     GetModuleFileNameW(self, path, MAX_PATH);
-    // The module sits in fixes\ next to s2prof.ini.
+    // s2prof.ini is two folders up from fixes\cpuplace.dll.
     *wcsrchr(path, L'\\') = 0;
     *wcsrchr(path, L'\\') = 0;
     wcscat(path, L"\\" CONFIG_FILE);
     GetPrivateProfileStringW(L"cpu", L"ccd", L"auto", setting, 16, path);
 #ifdef CCD_OVERRIDE
-    // Development builds can force the setting, to A/B a placement without changing the installed ini.
+    // Lets a build force the setting without changing the installed ini.
     wcscpy(setting, CCD_OVERRIDE);
 #endif
     confine = wcscmp(setting, L"off") != 0;
-    // cache is the setting's name before the rules (the largest L3), which they still apply first.
+    // cache: the setting's old name, still accepted.
     long number = -1;
     const char *error = read_cpus(), *why = NULL;
     if (!error && confine && wcscmp(setting, L"auto") && wcscmp(setting, L"cache")) {

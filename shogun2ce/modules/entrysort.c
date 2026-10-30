@@ -3,9 +3,8 @@
 #pragma GCC diagnostic ignored "-Wunused-function"
 #include "../entrysort.h"
 
-// The engine's per-entry std::sort (MSVC _Sort_unchecked) over object pointers. Its comparator chases three pointers and
-// recomputes both distances on every comparison; entrysort.h computes each object's keys once. Every recursive call of the
-// original fully sorts its range, so replacing any call is equivalent.
+// The engine's per-entry sort recomputes both distances on every comparison; entrysort.h computes each object's keys
+// once. Every recursive call fully sorts its range, so replacing any call is equivalent.
 #define ENTRY_SORT_RVA 0x331d50
 
 typedef struct {

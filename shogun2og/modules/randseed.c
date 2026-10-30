@@ -2,17 +2,11 @@
 #include <stdio.h>
 #include <tlhelp32.h>
 
-// The game's OpenSSL (0.9.8k, libeay32.dll) seeds its random pool from Windows' random generator and from the state
-// of the system, which includes up to 80 entries of every heap of the process, read through toolhelp. Windows copies
-// the list of every block of every heap for each entry it reads, so the cost grows with what the game has loaded (more
-// with mods), and the game's start-up seeds twice (curl's set-up seeds once without marking the pool seeded, so its
-// first connection seeds again while the game waits). OpenSSL looks the toolhelp functions up by name on each seeding;
-// given a Heap32First that finds no entries, it keeps every other source and skips the heap entries. Its random
-// numbers serve only curl's network encryption.
+// The game's OpenSSL seeds from every heap's entries through toolhelp, slower the more is loaded, twice at start-up;
+// handing it a Heap32First that finds no entries keeps every other source. Only curl's encryption uses those numbers.
 #define GET_PROC_ADDRESS_IAT_RVA 0xa20b8
 #define VERSION "OpenSSL 0.9.8k "
 
-// 0 lets OpenSSL read the heap entries; exported, and a switch, like the other fixes.
 __declspec(dllexport) volatile LONG seed_enabled = 1;
 __declspec(dllexport) volatile LONG seedings_eased;
 

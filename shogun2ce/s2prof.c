@@ -46,26 +46,24 @@
 #define MAX_CRASH_REPORTS 8
 #define CPP_EXCEPTION_CODE 0xe06d7363u
 #define ENGINE_MODULE L"empire.retail.x64.dll"
-// The frame tick stores each frame's timestamp at this global; counting its changes counts frames without hooking.
+// The frame tick stores its timestamp here; counting the changes counts frames without a hook.
 #define FRAME_STAMP_STORE_RVA 0x161fd1
 #define FRAME_STAMP_RVA 0x2ead830
 static const BYTE frame_stamp_store[] = {0x48, 0x89, 0x05, 0x58, 0xb8, 0xd4, 0x02};
 // The render device's present, which runs on the game's main thread.
 #define PRESENT_RVA 0x1ae7240
 static const BYTE present_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x6c, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x60};
-// The render device's device creation (vtable +0xd0): D3D11CreateDevice through the global below with flags 1
-// (D3D11_CREATE_DEVICE_SINGLETHREADED); the ID3D11Device goes to the render device's +0x180.
+// The render device's device creation: a single-threaded D3D11CreateDevice through the slot below.
 #define CREATE_DEVICE_RVA 0x1ac7e80
 static const BYTE create_device_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x56, 0x57, 0x41, 0x56};
 // D3D11CreateDevice, which the device's constructor looks up in d3d11.dll.
 #define D3D11_CREATE_DEVICE_SLOT_RVA 0x345cac0
 #define RENDER_DEVICE_RVA 0x3450230
 #define DEVICE_INTERFACE 0x180
-// The fixes install in well under a second; past this the device is created without them.
+// Past this the device is created without the fixes, which install far sooner.
 #define HOLD_WAIT_MS 30000
 #define WAIT_STEP_MS 100
-// The targeted build: its timestamp and image size. Another mod's copy keeps the timestamp and these sections, and may
-// add sections after them.
+// The targeted build; another mod's copy keeps the timestamp and its sections, and may add sections after them.
 #define ENGINE_TIMESTAMP 0x6ac7c293u
 #define ENGINE_IMAGE_SIZE 0x3744000u
 #define BUILD_WARNING L"s2fix is not running with the targeted Shogun 2 build, not all fixes may work!"
@@ -427,14 +425,14 @@ static int walk_stack(const Thread *thread, uintptr_t *frames) {
     return unwind_frames(context, thread->stack_base, frames);
 }
 
-// Error-severity NTSTATUS codes and MSVC C++ exceptions; informational ones (thread naming, debug prints) are skipped.
+// Informational exceptions (thread naming, debug prints) are not crashes.
 static BOOL is_reported(DWORD code) {
     return (code & 0xc0000000u) == 0xc0000000u || code == CPP_EXCEPTION_CODE;
 }
 
 #define DUMPED_BYTES 64
 
-// The bytes a register points at, when that is committed readable memory: the objects the faulting code was using.
+// The registers point at the objects the faulting code was using.
 static void log_memory(const char *name, DWORD64 address) {
     MEMORY_BASIC_INFORMATION region;
     if (!VirtualQuery((void *)address, &region, sizeof region) || region.State != MEM_COMMIT || (region.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
@@ -446,8 +444,7 @@ static void log_memory(const char *name, DWORD64 address) {
     log_line("  [%s] %s", name, text);
 }
 
-// First chance, so the report is written before the game's own crash handling; a fault something later handles is
-// reported too, which is why only the first few are.
+// First chance, to beat the game's crash handling; handled faults are reported too, hence the cap.
 static LONG CALLBACK report_crash(EXCEPTION_POINTERS *pointers) {
     const EXCEPTION_RECORD *record = pointers->ExceptionRecord;
     if (!is_reported(record->ExceptionCode) || InterlockedIncrement(&crash_reports) > MAX_CRASH_REPORTS) return EXCEPTION_CONTINUE_SEARCH;
@@ -526,7 +523,7 @@ static BOOL record_stack(uint32_t key, const uintptr_t *frames, int depth) {
     }
 }
 
-// Thread cycle times count at the invariant TSC rate; GetThreadTimes only advances in 15.6 ms ticks.
+// Cycle times, since GetThreadTimes only advances in 15.6 ms ticks.
 static double cpu_percent(const Thread *thread, const CaptureStats *stats, int mode) {
     return stats->seconds[mode] > 0 ? 100.0 * thread->cycles[mode] / (stats->seconds[mode] * stats->tsc_hz) : 0;
 }
@@ -849,9 +846,9 @@ static BOOL sample(HANDLE timer, CaptureStats *stats, int seconds) {
     return accumulate_counters(mode);
 }
 
-// ab is the switch an A/B capture alternates, or NULL for a plain capture, whose profile splits by the fix switch.
 static BOOL capture_quiet;
 
+// ab alternates in an A/B capture; NULL for a plain capture, whose profile splits by the fix switch.
 static void capture(int seconds, Switch *ab) {
     int number = capture_number++;
     BOOL alternating = ab != NULL;
@@ -893,8 +890,7 @@ static void capture(int seconds, Switch *ab) {
     if (!capture_quiet) MessageBeep(ok ? MB_ICONASTERISK : MB_ICONHAND);
 }
 
-// The debug report drives these: the switches, and the A/B capture without its own beeps (the report beeps once at its
-// start and once at its end).
+// The debug report drives these; its A/B capture is quiet, as the report beeps at its own start and end.
 
 static int report_switch_count(void) {
     return switch_count;
@@ -937,9 +933,7 @@ static void start_report(void) {
     report_start();
 }
 
-// The escape hatch for a picture gone wrong: the snapshot records the frame on screen and the state, then the engine
-// rebuilds its graphics resources. Without a snapshot (the debug report is running, or perf-logs can't be written) the
-// reset still runs. A press the reset would refuse (too soon after the last one) takes no snapshot either.
+// The escape hatch for a broken picture: snapshot the frame and state, then rebuild the graphics resources.
 static void snapshot_and_reset(const char *reason) {
     if (!graphics_reset_allowed(reason)) return;
     init_report();
@@ -1050,7 +1044,7 @@ static void log_fix_summary(ULONGLONG milliseconds) {
              milliseconds);
 }
 
-// For the offline install check: the engine writes s2prof holds, and the fix (write group) each belongs to.
+// For the offline install check: s2prof's engine writes, and the fix each belongs to.
 __declspec(dllexport) int s2prof_live_writes(LiveWrite *out, int capacity) {
     return list_live_writes(out, capacity);
 }
@@ -1130,8 +1124,7 @@ static void load_modules(const wchar_t *dir) {
     FindClose(search);
 }
 
-// Shows the log live. Closing a console ends its process, the game, so the window has no close
-// button and ignores Ctrl+C. It opens while the proxy loads, before the game has a window to take focus from.
+// Closing a console ends the game, so it has no close button and ignores Ctrl+C.
 static DWORD open_console(void) {
     if (!GetPrivateProfileIntW(L"s2prof", L"console", 0, config_path)) return ERROR_SUCCESS;
     // ACCESS_DENIED means the process already has a console, such as when started from one; that one is used.
@@ -1222,7 +1215,7 @@ static HRESULT WINAPI create_d3d11_device(IDXGIAdapter *adapter, D3D_DRIVER_TYPE
     return result;
 }
 
-// The renderer starts: the fixes go in first, then the device is created through s2fix's D3D11CreateDevice.
+// The fixes go in before the device is created, through s2fix's D3D11CreateDevice.
 static uint64_t create_device_hook(BYTE *device, uint64_t adapter) {
     hold_ran = TRUE;
     if (!s2prof_wait_ready(HOLD_WAIT_MS)) log_line("the fixes were not installed after %d s; the device is created without them", HOLD_WAIT_MS / 1000);
@@ -1235,7 +1228,7 @@ static uint64_t create_device_hook(BYTE *device, uint64_t adapter) {
     return result;
 }
 
-// The device may be created soon after the engine loads, so its hook goes in at once, as s2fix or the engine loads.
+// The device may be created soon after the engine loads, so its hook goes in at once.
 static void engine_loaded(BYTE *base) {
     engine = base;
     const char *error = S2_CHECK_ENGINE(&module_api, device_checks);
@@ -1350,7 +1343,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     wcscpy(wcsrchr(output_dir, L'\\'), L"\\perf-logs");
     multithreaded_device = GetPrivateProfileIntW(L"device", L"multithreaded_device", 0, config_path);
     wrap_context = GetPrivateProfileIntW(L"device", L"wrap_context", 0, config_path);
-    // The thread first: a load that fails must leave no hook behind. It waits for the engine.
+    // The thread first, so a failed load leaves no hook behind.
     HANDLE thread = CreateThread(NULL, 0, controller, NULL, 0, NULL);
     if (!thread) return FALSE;
     CloseHandle(thread);

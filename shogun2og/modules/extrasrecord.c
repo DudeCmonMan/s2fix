@@ -3,11 +3,8 @@
 #include <stdint.h>
 #include <intrin.h>
 
-// The record step's extras loop (thiscall, 0x114bb6d0, a mesh instance list's queue record) records indices 0..N-1 of
-// one object one call at a time: object vtbl+0xa8 -> thunk 0x113d03c0 -> push_record 0x113ceca0 (register the recorder
-// in its bucket once, count the record) -> recorder vtbl+8 (append the index). With the generic thunk and a single-item
-// recorder (0x113cecf0), every call after the first only adds 1 to the bucket's counter and appends its index, so those
-// are done in bulk; the index vector still grows through the engine's own push_back, so its allocations are the same.
+// The record step's extras loop records one object's indices one call at a time; with the generic thunk and a
+// single-item recorder every call after the first only counts and appends its index, so those are done in bulk.
 #define EXTRAS_LOOP_RVA 0x14bb6d0
 #define MERGE_RVA 0x14e69b0
 #define RECORD_THUNK_RVA 0x13d03c0
@@ -26,7 +23,6 @@ typedef void(__attribute__((thiscall)) *MergeFn)(BYTE *list);
 typedef void(__attribute__((thiscall)) *PushBackFn)(IndexVector *vector, const uint32_t *value);
 typedef void(__attribute__((thiscall)) *ExtrasLoopFn)(BYTE *queue, void *pass);
 
-// 0 runs the engine's loop; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG bulk_enabled = 1;
 __declspec(dllexport) volatile LONG64 bulk_loops, bulk_records;
 
@@ -34,8 +30,7 @@ static const BYTE extras_loop_prologue[] = {0x53, 0x8b, 0xd9, 0x8b, 0x4c, 0x24, 
 static BYTE *engine;
 static volatile LONG *fix_enabled;
 static ExtrasLoopFn original_extras_loop;
-// The bulk record writes the engine's recorder and bucket count itself, which a record on another thread (a parallel
-// renderer's) must not: only the first caller, main, takes it.
+// The bulk record writes the recorder and bucket count directly, so only main (the first caller) may take it.
 static volatile LONG main_thread;
 
 static BOOL on_main_thread(void) {
@@ -48,7 +43,6 @@ static void *method(void *object, int offset) {
     return (*(void ***)object)[offset / 4];
 }
 
-// The engine's loop, with the records after the first one done in bulk when the record path is the generic one.
 static void bulk_extras_loop(BYTE *queue, void *pass) {
     uint32_t pass_bit = ((PassBitFn)method(pass, 0x30))(pass);
     BYTE *object = *(BYTE **)(queue + 0x4);

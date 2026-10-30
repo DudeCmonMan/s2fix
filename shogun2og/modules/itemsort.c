@@ -3,15 +3,8 @@
 #include "../renderitem.h"
 #include "../checks/itemsort.h"
 
-// The Variant node's three std::sort instantiations over its 312-byte render items (MSVC introsort, cdecl): list A in the
-// prepare (0x114aba00), and lists B (0x114ab800, while variant_rigid_sort is on) and C (0x114abc00) in every record pass,
-// so a frame with 2-3 shadow cascades and the default views sorts B and C several times over the same contents. Every
-// move is a field-by-field item copy. These become stable radix sorts on the comparators' keys that move each item at
-// most once and leave a list that is already in order untouched, which makes the repeated sorts of B and C a scan.
-// With tie grouping (the tiegroup switch), list C's ties are also ordered by the instance-texture index at +0x124: the
-// record loop after the sort opens a new instancing group whenever that index changes, and the engine's sort leaves tied
-// items in any order. Every recursive call of the original fully sorts its range, so replacing the outermost is
-// equivalent.
+// The Variant node's item sorts (B and C re-sorted in every record pass) become stable radix sorts leaving an ordered
+// list untouched. Each recursive call of the engine's sort fully sorts its range: replacing the outermost is enough.
 #define SORT_A_RVA 0x14aba00
 #define SORT_B_RVA 0x14ab800
 #define SORT_C_RVA 0x14abc00
@@ -23,13 +16,12 @@ typedef struct {
 } ListStats;
 
 __declspec(dllexport) volatile ListStats list_stats[LISTS];
-// 0 runs the engine's sorts; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG sort_enabled = 1;
-// 0 leaves list C's ties in the order the sort finds them; a switch.
+// Orders list C's ties by instance texture (+0x124): each change of it opens a new instancing group.
 __declspec(dllexport) volatile LONG tie_grouping = 1;
-// 0 radix-sorts a sorted list with a short unsorted tail too; a switch.
+// Merges a sorted list's short unsorted tail instead of radix-sorting the list.
 __declspec(dllexport) volatile LONG tail_merge = 1;
-// 0 always radix-sorts; 1 counting-sorts over the distinct keys when there are at most FEW_KEYS_MAX; a switch.
+// Counting-sorts over the distinct keys when there are at most FEW_KEYS_MAX.
 __declspec(dllexport) volatile LONG few_keys = 1;
 
 static const BYTE sort_prologue[] = {0x81, 0xec, 0x40, 0x01, 0x00, 0x00};

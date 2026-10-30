@@ -7,15 +7,8 @@
 #include <string.h>
 #include <xmmintrin.h>
 
-// Splits the Variant node's soldier batch (0x114bab30, thiscall, from the entity display at 0x102b4b5d), which runs
-// serially on main, into ordered chunks run on helper threads. The batch's instancing setup runs once, as the batch does
-// it, then each chunk runs the batch's per-object loop over its own range, calling the engine's per-object function
-// (0x114b9180) exactly as the loop does. Its only shared writes are the caller's flags word, which each chunk keeps for
-// itself, and the list appends (0x114da700, slot +8 of the lists' vtable): chunk 0 appends straight into the node's lists,
-// later chunks' appends are captured and replayed in chunk order through the engine's own serial append, so every list
-// ends up with the same items in the same order. The one difference: each chunk starts the flags word afresh, and an item
-// stores that word at +0xf4 until its chunk's first instanced emit. That field is read only without instancing
-// (0x114bbf80) or with variant_rigid_sort off (0x114bbcf0), so the batch splits only with both on.
+// Splits the Variant node's serial soldier batch into ordered chunks on helper threads; later chunks' list appends are
+// captured and replayed in chunk order, so every list gets the same items in the same order.
 #define BATCH_RVA 0x14bab30
 #define PER_OBJECT_RVA 0x14b9180
 #define APPEND_RVA 0x14da700
@@ -29,8 +22,7 @@
 #define MAX_CHUNKS ((HELPERS + 1) * CHUNKS_PER_WORKER)
 #define MAX_LISTS 4
 #define HELPER_SPIN_ROUNDS 20000
-// Set by the contention fix: a short spin covers the gaps between one frame's jobs, then the helpers sleep instead
-// of spinning into the draw phase. The budget can be patched live.
+// Set by the contention fix: spin briefly between a frame's jobs, then sleep instead of spinning into the draw phase.
 __declspec(dllexport) volatile LONG short_spin_enabled;
 __declspec(dllexport) volatile LONG short_spin_us = 50;
 
@@ -73,12 +65,9 @@ typedef struct {
 } SplitStats;
 
 __declspec(dllexport) volatile SplitStats split_stats;
-// 0 runs the engine's batch; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG split_enabled = 1;
-// 1 runs the engine's batch with its appends captured and compares them with what the split would append; a switch.
 __declspec(dllexport) volatile LONG verify = 0;
 __declspec(dllexport) volatile LONG split_min_objects = 16, chunk_min_objects = 4;
-// 1 replays a captured list with one copy when its vector has room; a switch.
 __declspec(dllexport) volatile LONG bulk_replay = 1;
 
 static const BYTE batch_prologue[] = {0x83, 0xec, 0x1c, 0xf3, 0x0f, 0x10, 0x0d, 0x78, 0x27, 0x5c, 0x11};
@@ -91,7 +80,7 @@ static DWORD capture_slot;
 static Capture captures[MAX_CHUNKS], engine_capture;
 static volatile LONG64 chunk_done[MAX_CHUNKS];
 static Job job;
-// High 32 bits: job generation; low 32 bits: next chunk to claim (see walksplit).
+// High 32 bits: job generation; low 32 bits: next chunk to claim. Swapped as one, so a stale claim fails.
 static volatile LONG64 claim_word;
 static volatile LONG main_thread;
 static BOOL busy;
@@ -134,8 +123,7 @@ static DWORD __attribute__((thiscall)) append_hook(BYTE *list, const BYTE *item,
     return 0;
 }
 
-// The serial append is a push_back (0x114dc2b0) onto the vector at the list's start, {capacity, count, data}, with an item
-// copy equal to a memcpy (see itemcopy). Only a vector that would grow goes through the engine.
+// The serial append pushes onto {capacity, count, data} with a memcpy-equal copy; only growth needs the engine's.
 static void replay(Capture *capture) {
     for (int i = 0; i < capture->list_count; i++) {
         CapturedList *captured = &capture->lists[i];
@@ -152,7 +140,7 @@ static void replay(Capture *capture) {
     }
 }
 
-// The batch's per-object loop (0x114baba6..0x114bacc1) over objects [first, end), with its change flags.
+// Mirrors the batch's per-object loop (0x114baba6) over [first, end), with its change flags.
 static void run_objects(DWORD first, DWORD end) {
     BYTE *node = job.node;
     DWORD flags = 0x11e, last_group = 0xffffffff, last_effect = 0xffffffff;
@@ -233,8 +221,7 @@ static DWORD WINAPI helper(LPVOID unused) {
     return 0;
 }
 
-// Runs every chunk, helpers and caller together. The caller takes chunk 0, whose appends go straight into the lists, then
-// whatever is still unclaimed.
+// The caller takes chunk 0, whose appends go straight into the lists, then helps with what is left.
 static void run_job(BYTE *node, const DWORD *handles, DWORD count, void *view, BYTE *transforms, BYTE *extras, const DWORD *groups, BYTE *a7,
                     const float *values, DWORD instance_slot, BOOL capture_all) {
     DWORD chunk_objects = max((DWORD)chunk_min_objects, (count + MAX_CHUNKS - 1) / MAX_CHUNKS);
@@ -254,7 +241,7 @@ static void run_job(BYTE *node, const DWORD *handles, DWORD count, void *view, B
         while (chunk_done[chunk] != generation) _mm_pause();
 }
 
-// The batch's instancing setup (0x114bab5b..0x114bab8a), with instancing known to be active.
+// Mirrors the batch's instancing setup (0x114bab5b), run once as the batch does.
 static DWORD prepare_instancing(BYTE *node, void *view) {
     DWORD value = (DWORD)(uintptr_t)view;
     node[0x1c9] = 1;
@@ -267,7 +254,7 @@ static BOOL same_item(const BYTE *a, const BYTE *b) {
            !memcmp(a + 0x124, b + 0x124, 0x135 - 0x124);
 }
 
-// Runs the engine's batch with its appends captured, predicts the split's appends, compares, then appends the engine's.
+// The engine's batch runs with its appends captured; the split's are predicted, compared, then dropped.
 static void verify_batch(BYTE *node, const DWORD *handles, DWORD count, void *view, BYTE *transforms, BYTE *extras, const DWORD *groups, BYTE *a7,
                          const float *values) {
     engine_capture.list_count = 0;
@@ -308,6 +295,7 @@ static void verify_batch(BYTE *node, const DWORD *handles, DWORD count, void *vi
     if (counts_differ) split_stats.mismatched_counts++;
 }
 
+// Items hold their chunk's flags (+0xf4), read only without instancing or variant_rigid_sort, so split only with both.
 static void __attribute__((thiscall)) batch_hook(BYTE *node, const DWORD *handles, DWORD count, void *view, BYTE *transforms, BYTE *extras,
                                                  const DWORD *groups, BYTE *a7, const float *values) {
     if (!*api->fix_enabled || (!split_enabled && !verify) || count < (DWORD)split_min_objects || busy || !on_main_thread() || !instancing_active(node) ||

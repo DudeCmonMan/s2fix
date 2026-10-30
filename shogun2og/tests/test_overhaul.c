@@ -12,12 +12,8 @@
 #include <string.h>
 #include <xmmintrin.h>
 
-// Checks the overhaul's value copies and shader-library scan against a stand-in engine: SCENE with SHADERS inline, its
-// constant buffers and parameters in the engine's layout at addresses each check picks, every allocation ending at a
-// no-access page so a read past one faults where it happens. A load that replaces SCENE must leave no writer reading the
-// old scene's buffers, and the scan must leave out memory that only looks like a parameter (s2fix issue 7's crashes, in
-// the Complete Edition's overhaul, which this one was ported from).
-// Usage: test_overhaul.exe [check number], all of them by default.
+// The overhaul against a stand-in engine whose allocations end at a no-access page: a load must leave no writer reading
+// the old scene, and the library scan must skip memory that only looks like a parameter (s2fix issue 7's crashes).
 static void *guarded_malloc(size_t bytes) {
     size_t rounded = (bytes + 15) & ~(size_t)15, pages = (rounded + 4095) / 4096;
     BYTE *base = VirtualAlloc(NULL, (pages + 1) * 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -45,9 +41,9 @@ static void guarded_free(void *block) {
 #define SCENE_BYTES (LIBRARY_OFFSET + LIBRARY_SIZE)
 #define UNLOCKED_SLOT 1
 #define LOCKED_SLOT 3
-// What a freed scene's memory holds in the check: -0.5 as floats, a pointer above 2 GB, which this program can't map.
+// -0.5 as floats, and as a pointer above 2 GB, which this program can't map.
 #define REUSED_BYTES 0xbf000000u
-// Two of the engine's SHADER_PARAMETER classes: one keeping a typed copy of its value pointer at +0x24, one without.
+// Two shader parameter classes: one keeps a typed copy of its value pointer, one doesn't.
 #define TYPED_PARAMETER_RVA 0x174942c
 #define PLAIN_PARAMETER_RVA 0x17494b8
 
@@ -90,15 +86,14 @@ static void check(BOOL ok, const char *what) {
     printf("%s %s\n", ok ? "ok" : "FAIL", what);
 }
 
-// The engine's constructor, as far as the overhaul reads it: a cleared SCENE that the engine object points at.
+// The engine's constructor, as far as the overhaul reads it.
 static BYTE *new_scene(BYTE *at) {
     memset(at, 0, SCENE_BYTES);
     *(BYTE **)(engine_object + SCENE_OFFSET) = at;
     return at;
 }
 
-// A constant buffer at library offset `at` and its parameter at `parameter_at`, whose value is `value_offset` into the
-// shadow; the device object and the shadow come from the heap.
+// The device object and the shadow come from the heap, as the engine's do.
 static FakeBuffer add_buffer(BYTE *scene, uint32_t at, uint32_t parameter_at, uint32_t bytes, uint32_t value_offset) {
     BYTE *library = scene + LIBRARY_OFFSET, *device = calloc(1, 0x40);
     FakeBuffer fake = {library + at, library + parameter_at, calloc(1, bytes)};
@@ -143,9 +138,7 @@ static void draw_view(int slot, BYTE *parameter) {
     main_values.drawing = FALSE;
 }
 
-// A slot that writes under the lock puts back the buffers it wrote before each call. After a load the old scene's
-// memory holds other data; the Complete Edition's first crash read a buffer pointer from it (value_copy, from
-// call_writer).
+// After a load the old scene's memory holds other data; a locked slot must not read a buffer pointer from it.
 static void stale_learned(void) {
     running = "a locked writer after a load";
     BYTE *old_scene = new_scene(VirtualAlloc(NULL, SCENE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
@@ -164,8 +157,7 @@ static void stale_learned(void) {
     check(scene_changes == changes + 1, "the load is logged once");
 }
 
-// A slot that runs unlocked compares each buffer it wrote with the bytes of its first write. A new scene that lands
-// over the old one can put a larger buffer where a smaller one was; the old reference copy is then read past its end.
+// A new scene over the old can put a larger buffer where a smaller one was, past the old reference copy's end.
 static void stale_reference(void) {
     running = "an unlocked writer after a load";
     BYTE *region = VirtualAlloc(NULL, SCENE_BYTES + 0x800, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -186,8 +178,7 @@ static void stale_reference(void) {
     check(scene_changes == changes + 1, "the load is logged once");
 }
 
-// The scan of the library at a split view's fork, then the snapshot of every buffer's values. The Complete Edition's
-// second crash copied from address 1: the shadow of library memory the scan took for a parameter.
+// Library memory the scan takes for a parameter would be copied from a bogus shadow address.
 static void lookalike_parameter(void) {
     running = "the shader library scan";
     BYTE *scene = new_scene(VirtualAlloc(NULL, SCENE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)), *library = scene + LIBRARY_OFFSET;

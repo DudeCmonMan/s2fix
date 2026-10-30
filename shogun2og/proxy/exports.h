@@ -1,5 +1,4 @@
-// The system d3d11.dll's exports with their ordinals, the same in its 32-bit build (Windows 10.0.22621 and 22631); every
-// one jumps to the system DLL's. build.sh generates d3d11.def from this list.
+// The system d3d11.dll's exports and ordinals, the same in its 32-bit build; build.sh generates d3d11.def from them.
 #define D3D11_EXPORTS(STUB) \
     STUB(D3D11CreateDeviceForD3D12, 1) \
     STUB(D3DKMTCloseAdapter, 2) \

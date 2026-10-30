@@ -5,10 +5,8 @@
 #include <emmintrin.h>
 #include <intrin.h>
 
-// The engine's per-draw instance gathers: for each instance id they look up a record and copy it into the mapped instance
-// buffer, sub_181b21d80 from record + 8 (lookup slot 1) and its twin sub_181b21cd0 from the record itself (lookup slot
-// 0). Their fast 16-byte loop needs source, destination and size all 16-aligned, which the sources rarely are, so most
-// records went through a full memcpy call. This does the same copies with unaligned 16-byte moves.
+// The instance gathers use their 16-byte loop only when source, destination and size are 16-aligned, else memcpy;
+// this does the same copies with unaligned 16-byte moves.
 #define INSTANCE_GATHER_RVA 0x1b21d80
 #define RECORD_GATHER_RVA 0x1b21cd0
 
@@ -21,9 +19,9 @@ typedef struct {
     LONG64 calls[2], records[2], cycles[2], odd_sizes;
 } InstanceCopyStats;
 
-// [0] sub_181b21d80, [1] sub_181b21cd0
+// [0] the instance gather, [1] the record gather.
 __declspec(dllexport) volatile InstanceCopyStats instance_copy_stats[2];
-// 1 alternates engine and new copies call by call, timing both under the same conditions; 0 always uses the new copy.
+// 1 alternates the engine's and the new copy call by call, timing both.
 __declspec(dllexport) volatile LONG alternate_for_comparison = 0;
 
 typedef uint8_t *(*RecordLookupFn)(void *lookup, uint32_t id);
@@ -35,8 +33,7 @@ static const BYTE record_gather_prologue[] = {0x48, 0x89, 0x6c, 0x24, 0x10, 0x48
 static GatherFn original_instance_gather, original_record_gather;
 static volatile LONG *fix_enabled;
 
-// Records are not a multiple of 16 bytes, so the tail is covered by one more 16-byte move ending at the record's end; it
-// rewrites a few already copied bytes with the same values.
+// The tail is one more 16-byte move ending at the record's end, rewriting a few copied bytes with the same values.
 static void copy_record(uint8_t *destination, const uint8_t *source, uint32_t size) {
     if (size < 16) {
         memcpy(destination, source, size);
@@ -48,8 +45,7 @@ static void copy_record(uint8_t *destination, const uint8_t *source, uint32_t si
     if (copied < size) _mm_storeu_si128((__m128i *)(destination + size - 16), _mm_loadu_si128((const __m128i *)(source + size - 16)));
 }
 
-// Same loop as the engine: the record count is re-read from the buffer each iteration and offsets advance by the
-// gatherer's record size (the dword just before it).
+// The engine's loop, re-reading the record count each iteration; the record size is stored just before the gatherer.
 static uint64_t gather(int which, uint8_t *gatherer, InstanceBuffer *buffer, const uint32_t *ids) {
     uint32_t size = *(const uint32_t *)(gatherer - 8), offset = 0, lookup_slot = which ? 0 : 1, source_offset = which ? 0 : 8;
     void *lookup = *(void **)(gatherer + 0x10);
@@ -61,8 +57,7 @@ static uint64_t gather(int which, uint8_t *gatherer, InstanceBuffer *buffer, con
     return buffer->bytes / buffer->stride;
 }
 
-// Stats use plain increments: only the main thread gathers, and a locked instruction would stall until the records just
-// written to the mapped (write-combined) instance buffer drain, which cost ~0.6 ms/frame in a 12K-draw scene.
+// Plain increments: only main gathers, and a locked op would wait for the write-combined buffer's stores to drain.
 static uint64_t timed_gather(int which, GatherFn original, uint8_t *gatherer, InstanceBuffer *buffer, const uint32_t *ids) {
     if (!*fix_enabled) return original(gatherer, buffer, ids);
     static LONG64 call_number;

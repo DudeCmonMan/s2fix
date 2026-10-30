@@ -3,14 +3,8 @@
 #include <wchar.h>
 #include <wctype.h>
 
-// Before reading a file from its packs, the engine asks Windows whether a loose copy is in the data folder, and in each
-// mod's folder (mods can override pack files there): thousands of checks in a load and in an end turn, nearly all for
-// files that are not there, many asked again and again. Each "no such file" answer Windows gives for a path in the data
-// folder or a mod's folder (a folder the engine loads a pack file from) is remembered for the rest of the session, and
-// later checks of that path are answered from memory. The cache holds only what the engine has asked during play, never
-// a list or a scan of a folder, so a loose file that exists is always found on disk; it keeps filling on every load.
-// The game never writes into these folders; if the engine opens a file there for writing anyway, the cache is emptied.
-// A loose file added while the game runs is seen after a restart.
+// The engine asks Windows for a loose copy of each pack file in the data and mods' folders, nearly always in vain; each
+// "no such file" there is remembered for the session, filled only by the engine's own checks (no list or folder scan).
 #define GET_FILE_ATTRIBUTES_W_IAT_RVA 0x15a1270
 #define GET_FILE_ATTRIBUTES_EX_W_IAT_RVA 0x15a1058
 #define FIND_FIRST_FILE_W_IAT_RVA 0x15a114c
@@ -26,12 +20,11 @@ typedef struct {
     wchar_t text[];
 } Missing;
 
-// 0 asks Windows every time; exported, and a switch, so it can be A/B tested live. The counts are for the test and log.
 __declspec(dllexport) volatile LONG cache_enabled = 1;
 __declspec(dllexport) volatile LONG answered, remembered;
 
 static const S2Api *api;
-// The data folder first, then each mod's folder. Only added to: a folder is written before the count that publishes it.
+// Only added to: a folder is written before the count that publishes it.
 static wchar_t folders[MAX_FOLDERS][KEY_CHARS];
 static DWORD folder_lengths[MAX_FOLDERS];
 static volatile LONG folder_count;
@@ -59,7 +52,6 @@ static BOOL in_folders(const wchar_t *key, DWORD length) {
     return FALSE;
 }
 
-// The path in key form (full, lower case, backslashes) and its length; 0 when it has none.
 static DWORD normalize(LPCWSTR path, wchar_t *key) {
     if (!path || wcspbrk(path, L"*?")) return 0;
     DWORD length = GetFullPathNameW(path, KEY_CHARS, key, NULL);
@@ -68,7 +60,6 @@ static DWORD normalize(LPCWSTR path, wchar_t *key) {
     return length;
 }
 
-// The path as a key and its length; 0 when it is not in the data folder or a mod's folder.
 static DWORD make_key(LPCWSTR path, wchar_t *key) {
     DWORD length = normalize(path, key);
     return length && in_folders(key, length) ? length : 0;
@@ -194,6 +185,7 @@ static HANDLE WINAPI hook_FindFirstFileW(LPCWSTR path, LPWIN32_FIND_DATAW data) 
     return find;
 }
 
+// A write in the folders could create a remembered file, so it empties the cache.
 static HANDLE WINAPI hook_CreateFileW(LPCWSTR path, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES security, DWORD disposition, DWORD flags,
                                      HANDLE template_file) {
     wchar_t key[KEY_CHARS];
@@ -250,8 +242,7 @@ static BOOL find_data_folder(void) {
     return TRUE;
 }
 
-// The packs the engine opened before s2fix loaded, mods' included: every handle value is tried (the game holds a few
-// thousand handles, and an invalid value fails at once).
+// Finds the packs the engine opened before s2fix loaded by trying every handle value; an invalid one fails at once.
 static void find_open_packs(void) {
     for (ULONG_PTR value = 4; value < 0x40000; value += 4) {
         HANDLE file = (HANDLE)value;

@@ -1,16 +1,13 @@
 #include "../s2module.h"
 #include "../checks/scenelock.h"
 
-// The Variant node's locked add (sub_181b13060) holds the critical section at node + 0x338 for a soldier's whole
-// emission, and the main thread and up to 15 TBB workers call it from one parallel loop. With the engine's spin count
-// of 10000, waiters still fall asleep in the kernel and the main thread pays the wake-up; a longer spin keeps them
-// awake through the queue. What the lock protects and how it is taken are unchanged.
+// The Variant node's locked add holds its critical section for a soldier's whole emission, so waiters at the engine's
+// spin count fall asleep and the holder pays the wake-up; a longer spin keeps them awake. Otherwise unchanged.
 #define LOCKED_ADD_RVA 0x1b13060
 #define SCENE_LOCK_OFFSET 0x338
 
 typedef void (*LockedAddFn)(BYTE *scene, void *a2, void *a3, void *a4, void *a5, void *a6, void *a7, void *a8, void *a9, void *a10, void *a11);
 
-// 0 leaves the engine's spin count; exported so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG spin_count = 200000;
 __declspec(dllexport) CRITICAL_SECTION *volatile scene_lock;
 __declspec(dllexport) volatile ULONG_PTR engine_spin_count;

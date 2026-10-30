@@ -1,8 +1,7 @@
 #pragma once
 #include "radixsort.h"
 
-// Objects as the engine's per-entry std::sort sees them: a model pointer at +0x14 (32-bit key at +8, position at +0xd8)
-// and a 32-bit id at +0x1d0, ordered by key, then id, then squared distance to the camera.
+// The engine's per-entry std::sort orders by model key, then id, then squared distance to the camera.
 #define ENTRY_MODEL_OFFSET 0x14
 #define ENTRY_ID_OFFSET 0x1d0
 #define MODEL_KEY_OFFSET 0x8
@@ -16,8 +15,7 @@ static uint32_t model_key(const uint8_t *object) {
     return key;
 }
 
-// The comparator's operations: three differences, three squares, (x + y) + z, all in single precision. Built with SSE
-// float math and no contraction, equal inputs give bit-identical distances.
+// The comparator's operations in its order; with SSE math and no contraction, equal inputs give identical bits.
 static float entry_distance(const uint8_t *object, const float *camera) {
     const uint8_t *model;
     float position[3];

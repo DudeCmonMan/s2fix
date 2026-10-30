@@ -2,17 +2,13 @@
 #include "../checks/focuscache.h"
 #include <stdint.h>
 
-// The engine's "is key down" query (stdcall, 0x10bd12a0, 56 call sites) calls GetForegroundWindow, a system call, on
-// every query before reading its per-frame DirectInput key snapshot. This answers GetForegroundWindow once per frame, so
-// a focus change is seen at the next frame, the granularity the key snapshot already has. The import slot has no other
-// user in the engine.
+// The engine's "is key down" query calls GetForegroundWindow on every call; this answers it once per frame, the
+// granularity of the key snapshot it reads anyway. The import slot has no other engine user.
 #define GET_FOREGROUND_WINDOW_IAT_RVA 0x15a15e0
-// Low dword of the main tick's u64 frame stamp.
 #define FRAME_STAMP_RVA 0x17cc340
 
 typedef HWND(WINAPI *GetForegroundWindowFn)(void);
 
-// 0 always asks Windows; exported, and a switch, so it can be A/B tested while the game runs.
 __declspec(dllexport) volatile LONG cache_enabled = 1;
 
 static GetForegroundWindowFn real_get_foreground_window;

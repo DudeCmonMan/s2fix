@@ -1,13 +1,8 @@
 #include "../s2module.h"
 #include "../checks/packindex.h"
 
-// Each pack the engine opens gets a table of its files (0x181859f90), filled from the pack's index: a lookup, then an
-// insert (0x1818f67a0), per file. The table starts at 8 slots and probes linearly, two string compares per slot, and
-// grows (2n+1) only once a full scan finds no free slot, so the scans run longer and longer as it fills, and a big
-// pack's table can end almost full. Here a pack's first insert sizes the still-empty table to twice its file count, so
-// it never grows and stays at most half full. Lookups find the same entries at any size, and the engine's only walks
-// of the table (releasing the pack, listing its files at a reset) don't depend on which slot an entry is in. The insert
-// serves other tables too; only the pack open's call is sized.
+// A pack's file table starts at 8 slots, probes linearly and grows only when full, so big packs' inserts scan ever
+// longer; a pack's first insert sizes it to twice its file count. No engine walk depends on an entry's slot.
 #define INSERT_RVA 0x18f67a0
 #define PACK_OPEN_RETURN_RVA 0x185a515
 #define ALLOCATOR_RVA 0x2ead968
@@ -28,7 +23,6 @@ typedef void *(*InsertFn)(Table *table, void *const *key, void *const *value);
 typedef void *(*AllocFn)(size_t size, size_t alignment);
 typedef void (*FreeFn)(void *memory);
 
-// 0 leaves the engine's tables at 8 slots; read at each pack's first insert.
 __declspec(dllexport) volatile LONG sizing_enabled = 1;
 __declspec(dllexport) volatile LONG tables_sized;
 
@@ -48,7 +42,7 @@ static BOOL empty(const Table *table) {
     return TRUE;
 }
 
-// The engine's own allocation and release for these tables.
+// The engine's own allocator and release, since the engine frees the table later.
 static void resize(Table *table, size_t capacity) {
     AllocFn allocate = *allocator ? *allocator : aligned_malloc;
     void **slots = allocate(capacity * 16, 8);
@@ -59,6 +53,7 @@ static void resize(Table *table, size_t capacity) {
     table->capacity = capacity;
 }
 
+// The insert serves other tables too; only the pack open's call is sized.
 static void *insert_hook(Table *table, void *const *key, void *const *value) {
     if (__builtin_return_address(0) == pack_open_return && table->capacity == ENGINE_START_SLOTS && sizing_enabled && *api->fix_enabled) {
         DWORD files = *(DWORD *)(*(BYTE **)((BYTE *)table - PACK_TABLE) + PACK_FILE_COUNT);

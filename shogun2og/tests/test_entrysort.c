@@ -3,7 +3,7 @@
 #include <string.h>
 #include "entrysort.h"
 
-// Checks sort_entries against a stable sort with the engine's comparator (0x10237470): key, then id, then distance.
+// sort_entries must match a stable sort with the engine's comparator (0x10237470).
 #define OBJECT_BYTES 0x200
 #define MODEL_BYTES 0x100
 #define MAX_OBJECTS 2000
@@ -15,7 +15,7 @@ static float reference_distance(const uint8_t *object, const float *camera) {
     float position[3];
     memcpy(&model, object + ENTRY_MODEL_OFFSET, sizeof model);
     memcpy(position, model + MODEL_POSITION_OFFSET, sizeof position);
-    // The engine computes one side as (dy^2 + dx^2) + dz^2 and the other as (dx^2 + dy^2) + dz^2; IEEE addition commutes.
+    // The engine sums one side as (dy^2 + dx^2) + dz^2, the other as (dx^2 + dy^2) + dz^2; IEEE addition commutes.
     float dx = position[0] - camera[0], dy = position[1] - camera[1], dz = position[2] - camera[2];
     return (dy * dy + dx * dx) + dz * dz;
 }

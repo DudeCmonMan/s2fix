@@ -2,13 +2,8 @@
 #include "../checks/textequal.h"
 #include <stdint.h>
 
-// The engine compares a stored name (a wide string: length at +0, characters at +0x10) with text written in its code
-// (sub_18019b6d0: string, text): it copies the text into a new wide string from its locked memory pool, widening each
-// byte by sign extension (sub_1801990c0), compares the lengths and then the characters (sub_18019f950), and frees the
-// copy, even when the lengths differ. The campaign AI makes such comparisons constantly in an end turn, each copy taking
-// the pool's lock twice. This compares the text in place, character by character, with the same widening: the same
-// answer, without the copy. The switch textequalverify runs the engine's comparison beside each one and counts any
-// difference. Follows Apply Fixes.
+// The engine compares a name with literal text by copying the text into a new string from its locked pool, constantly
+// in an end turn; this compares in place with the same sign-extending widening: the same answer, without the copy.
 #define EQUALS_RVA 0x19b6d0
 #define STRING_LENGTH 0x0
 #define STRING_CHARACTERS 0x10

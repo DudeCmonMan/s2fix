@@ -4,13 +4,8 @@
 #include <stdint.h>
 #include <string.h>
 
-// Campaign map. Every frame each character's appearance pick (0x108e50c0, through 0x1068d6e0) walks its appearance set
-// for the entry that fits (0x10b67f60, thiscall set; age, season, rank, scale; ret 0x10), copying and comparing each
-// entry's season name: 1,643 walks a frame on an idle map. The walk reads only the set (flags at +0..3; a hash table with
-// bucket count +0xc, buckets +0x10, size +0x14) and its entries, which are database records, so its answer depends on
-// the set and the four arguments. This keeps the last answer per (set, arguments), on the main thread only, and returns
-// it while the set's flags and table are unchanged. The switch campappearanceverify runs the engine's walk beside every
-// cached answer and counts any difference, which would also show an entry changing. Follows Apply Fixes.
+// Campaign map: each character's appearance pick walks its appearance set every frame; the answer depends only on the
+// set and the four arguments, so the last answer is kept per (set, arguments) while the set is unchanged.
 #define WALK_RVA 0xb67f60
 #define SET_FLAGS 0x0
 #define SET_BUCKET_COUNT 0xc
