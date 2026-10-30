@@ -217,15 +217,12 @@ static HANDLE WINAPI hook_CreateFileW(LPCWSTR path, DWORD access, DWORD share, L
 
 static DWORD WINAPI reporter(LPVOID unused) {
     (void)unused;
-    LONG reported = 0;
+    BOOL full_logged = FALSE;
     for (;;) {
         Sleep(REPORT_SECONDS * 1000);
         if (emptied) emptied = 0, api->log_line("lookupcache: the engine opened a file in the data folder for writing; the remembered checks were dropped");
-        LONG now = answered;
-        if (now == reported) continue;
-        api->log_line("lookupcache: %ld checks for missing data files answered from memory so far, %ld files remembered%s", now, remembered,
-                      full ? " (full: later misses go to Windows)" : "");
-        reported = now;
+        if (full && !full_logged) api->log_line("lookupcache: %ld files remembered, as many as it holds; later misses go to Windows", remembered);
+        full_logged = full;
     }
     return 0;
 }

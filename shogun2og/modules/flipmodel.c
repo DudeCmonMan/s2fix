@@ -47,8 +47,6 @@
 #define MAX_LATENCY 16
 // Long enough for the slowest frames seen (~100 ms while the camera moves), short enough that a missed signal can't hang.
 #define LATENCY_WAIT_MS 250
-#define LONG_WAIT_MS 5.0
-#define LATENCY_REPORT_MS 10000
 #define CREATE_FAILED_MESSAGE                                                                                                 \
     L"Failed to initialize d3d11 device after settings change, please restart the game. This can happen when changing " \
     L"settings. Should be fine after restart."
@@ -80,10 +78,6 @@ __declspec(dllexport) volatile LONG frame_latency = 2;
 static IDXGISwapChain2 *latency_chain;
 static HANDLE latency_event;
 static UINT applied_latency;
-static struct {
-    LONGLONG since, waited, longest;
-    uint32_t frames, long_waits;
-} waits;
 
 HRESULT STDMETHODCALLTYPE create_swap_chain(IDXGIFactory *factory, IUnknown *device, DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **swap_chain);
 
@@ -158,18 +152,6 @@ static void setup_latency(IDXGISwapChain *swap_chain) {
                   DXGI_DEFAULT_LATENCY);
 }
 
-static LONGLONG now_ticks(void) {
-    LARGE_INTEGER counter;
-    QueryPerformanceCounter(&counter);
-    return counter.QuadPart;
-}
-
-static double ticks_ms(LONGLONG ticks) {
-    LARGE_INTEGER frequency;
-    QueryPerformanceFrequency(&frequency);
-    return 1000.0 * (double)ticks / (double)frequency.QuadPart;
-}
-
 // On main after each Present, so the next frame starts once the queue has room for it.
 static void wait_for_frame_room(void) {
     BOOL waiting = *api->fix_enabled && latency_enabled;
@@ -177,19 +159,7 @@ static void wait_for_frame_room(void) {
     UINT wanted = waiting ? (UINT)latency : DXGI_DEFAULT_LATENCY;
     if (wanted != applied_latency && SUCCEEDED(IDXGISwapChain2_SetMaximumFrameLatency(latency_chain, wanted))) applied_latency = wanted;
     if (!waiting) return;
-    LONGLONG before = now_ticks();
     WaitForSingleObject(latency_event, LATENCY_WAIT_MS);
-    LONGLONG after = now_ticks(), waited = after - before;
-    if (!waits.since) waits.since = after;
-    waits.frames++;
-    waits.waited += waited;
-    if (waited > waits.longest) waits.longest = waited;
-    if (ticks_ms(waited) > LONG_WAIT_MS) waits.long_waits++;
-    if (ticks_ms(after - waits.since) >= LATENCY_REPORT_MS) {
-        api->log_line("flipmodel: latency %u: waited %.3f ms a frame over %u frames; %u waits over %.0f ms, the longest %.1f ms", applied_latency,
-                      ticks_ms(waits.waited) / waits.frames, waits.frames, waits.long_waits, LONG_WAIT_MS, ticks_ms(waits.longest));
-        memset(&waits, 0, sizeof waits);
-    }
 }
 
 // The engine can't go on without its swap chain, and a restart makes a fresh device.

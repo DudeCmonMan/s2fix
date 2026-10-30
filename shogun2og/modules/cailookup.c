@@ -106,11 +106,10 @@ static DWORD WINAPI report_loop(LPVOID unused) {
     for (;; Sleep(REPORT_MS)) {
         Stats now = lookup_stats;
         LONG64 lookups = now.lookups - last.lookups, misses = now.misses - last.misses;
-        if (lookups)
-            api->log_line("cailookup: %lld lookups a second, %.1f%% from the cache; misses scanned %.1f records on average, %lld found nothing%s",
+        if (verify && lookups)
+            api->log_line("cailookup: %lld lookups a second, %.1f%% from the cache; misses scanned %.1f records on average, %lld found nothing",
                           lookups * 1000 / REPORT_MS, 100.0 * (double)(now.hits - last.hits) / (double)lookups,
-                          misses ? (double)(now.scanned - last.scanned) / (double)misses : 0.0, now.not_found - last.not_found,
-                          verify ? "" : "; verify off");
+                          misses ? (double)(now.scanned - last.scanned) / (double)misses : 0.0, now.not_found - last.not_found);
         if (verify && lookups) api->log_line("cailookup: %lld cached results differed from the engine's scan", now.mismatches - last.mismatches);
         last = now;
     }

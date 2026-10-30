@@ -47,8 +47,8 @@ static DWORD WINAPI report_loop(LPVOID unused) {
     for (;; Sleep(REPORT_MS)) {
         Stats now = equal_stats;
         LONG64 comparisons = now.comparisons - last.comparisons;
-        if (comparisons)
-            api->log_line("textequal: %lld comparisons a second without a copy%s", comparisons * 1000 / REPORT_MS, verify ? "" : "; verify off");
+        if (verify && comparisons)
+            api->log_line("textequal: %lld comparisons a second without a copy", comparisons * 1000 / REPORT_MS);
         if (verify && comparisons) api->log_line("textequal: %lld differed from the engine's comparison", now.mismatches - last.mismatches);
         last = now;
     }

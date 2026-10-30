@@ -139,11 +139,10 @@ static DWORD WINAPI report_loop(LPVOID unused) {
         uint64_t tsc_now = __rdtsc();
         double tsc_per_ms = (double)(tsc_now - tsc_then) / ((double)(now.QuadPart - then.QuadPart) * 1000.0 / (double)frequency.QuadPart);
         LONG64 ratings = stats.ratings - last.ratings, lookups = stats.lookups - last.lookups;
-        if (ratings)
-            api->log_line("cailookup: %lld ratings a second taking %.1f ms a second; %lld lookups a second, %.1f%% from the cache%s",
+        if (verify && ratings)
+            api->log_line("cailookup: %lld ratings a second taking %.1f ms a second; %lld lookups a second, %.1f%% from the cache",
                           ratings * 1000 / REPORT_MS, (double)(stats.ticks - last.ticks) / tsc_per_ms * 1000.0 / REPORT_MS,
-                          lookups * 1000 / REPORT_MS, lookups ? 100.0 * (double)(stats.hits - last.hits) / (double)lookups : 0.0,
-                          verify ? "" : "; verify off");
+                          lookups * 1000 / REPORT_MS, lookups ? 100.0 * (double)(stats.hits - last.hits) / (double)lookups : 0.0);
         if (verify && ratings) api->log_line("cailookup: %lld ratings differed from the engine's", stats.mismatches - last.mismatches);
         last = stats;
         then = now;

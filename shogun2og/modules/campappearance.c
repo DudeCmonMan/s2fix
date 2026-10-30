@@ -70,9 +70,8 @@ static DWORD WINAPI report_loop(LPVOID unused) {
     for (;; Sleep(REPORT_MS)) {
         Stats now = appearance_stats;
         LONG64 walks = now.walks - last.walks;
-        if (walks)
-            api->log_line("campappearance: %lld walks a second, %.1f%% from the cache%s", walks * 1000 / REPORT_MS, 100.0 * (double)(now.hits - last.hits) / (double)walks,
-                          verify ? "" : "; verify off");
+        if (verify && walks)
+            api->log_line("campappearance: %lld walks a second, %.1f%% from the cache", walks * 1000 / REPORT_MS, 100.0 * (double)(now.hits - last.hits) / (double)walks);
         if (verify && walks) api->log_line("campappearance: %lld cached answers differed from the engine's walk", now.mismatches - last.mismatches);
         last = now;
     }
