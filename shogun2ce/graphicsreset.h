@@ -19,7 +19,8 @@ const char *graphics_reset_init(const GraphicsResetHost *host, const char *unava
 // then: a string literal, or one that lives as long.
 void graphics_reset_request(const char *reason);
 // before runs on the main thread each time the engine releases GPU resources, after each time it creates them again,
-// whatever started it; a rebuild can release more than once before it creates, and a load creates without releasing.
+// whatever started it, but for a load's release (its creation is told); a rebuild can release more than once before it
+// creates.
 void graphics_reset_listen(void (*before)(void), void (*after)(void));
 // One line on the engine's view of its device, for the snapshot.
 void graphics_reset_describe(char *out, size_t size);

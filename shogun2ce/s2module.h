@@ -49,9 +49,9 @@ typedef struct {
     // The reason goes to the log, so it must outlive the request: a string literal.
     void (*request_graphics_reset)(const char *reason);
     // before runs on the main thread each time the engine releases GPU resources and after each time it creates them
-    // again, whatever started it: a requested reset, a lost device, the graphics options, a load (which creates without
-    // releasing). A rebuild can release more than once before it creates, and a device the engine can't use yet delays
-    // the after. Either may be NULL.
+    // again, whatever started it: a requested reset, a lost device, the graphics options; of a load, only its creation is
+    // told. A rebuild can release more than once before it creates, and a device the engine can't use yet delays the
+    // after. Either may be NULL.
     void (*on_graphics_reset)(void (*before)(void), void (*after)(void));
 } S2Api;
 

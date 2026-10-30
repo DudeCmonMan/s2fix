@@ -11,10 +11,10 @@
 // device), and shows the engine's loading screen while the rebuild runs, as its graphics options do when they apply a
 // change. The screen's own shown byte can't tell whether it is up: the options show it and never hide it. The call is
 // reached through a jump placed within rel32 reach of the engine. Listeners are told at the engine's releases of GPU
-// resources (all of them, 0x181a85a70, or by kind, 0x181a85b10) and at its creation (0x181a85950), which every rebuild
-// goes through: the recovery, the graphics options, a shadow, depth-of-field or distortion change; a load creates
-// without releasing. The release of all leaves no room for a jump before its first RIP-relative load, so it is replaced
-// by the same walk.
+// resources (all of them, 0x181a85a70, or by kind, 0x181a85b10) and at its creation (0x181a85950), which the recovery,
+// the graphics options and a shadow, depth-of-field or distortion change go through. A load's scene teardown releases
+// through its own copy of that walk (0x181a5d7c0), which isn't followed: listeners hear only the load's creation. The
+// release of all leaves no room for a jump before its first RIP-relative load, so it is replaced by the same walk.
 #define ENGINE_GLOBAL_RVA 0x3457888
 #define DEVICE_LOST 0x6995f
 #define SCENE_SLOT (0x138 / 8)
