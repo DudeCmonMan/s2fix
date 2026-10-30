@@ -15,6 +15,7 @@
 #include <tlhelp32.h>
 #include <wchar.h>
 #include <wincodec.h>
+#include <winevt.h>
 #include <winternl.h>
 
 // The original game's render device: the swap chain and the immediate context the screenshots and GPU times use.
@@ -39,6 +40,7 @@
 #define GPU_RING 8
 #define BURST 4
 #define JPEG_QUALITY 0.95f
+#define MAX_DISPLAY_EVENTS 20
 #define MAX_FIXES 64
 
 typedef struct {
@@ -135,7 +137,7 @@ static Shot shots[BURST];
 static volatile LONG shots_wanted;
 
 // Redaction: the user's profile folder, user name and computer name never leave in the report.
-static char profile_utf8[MAX_PATH * 3], user_utf8[256], computer_utf8[256];
+static char profile_utf8[MAX_PATH * 3], user_utf8[256], computer_utf8[256], dns_full_utf8[512], dns_host_utf8[256];
 
 static double ms(LONGLONG ticks) {
     return (double)ticks * 1000.0 / (double)frequency.QuadPart;
@@ -210,9 +212,12 @@ static void replace_all(Text *t, const char *needle, const char *replacement) {
     *t = out;
 }
 
+// The longer names first: the computer's DNS names can hold its NetBIOS name.
 static void redact(Text *t) {
     replace_all(t, profile_utf8, "%USERPROFILE%");
     replace_all(t, user_utf8, "<user>");
+    replace_all(t, dns_full_utf8, "<computer>");
+    replace_all(t, dns_host_utf8, "<computer>");
     replace_all(t, computer_utf8, "<computer>");
 }
 
@@ -1348,6 +1353,67 @@ static void remove_folder(const wchar_t *path) {
     RemoveDirectoryW(path);
 }
 
+// perf-logs\temp\<prefix>_<date-time>, where a report or a snapshot gathers its files.
+static BOOL make_folder(const char *prefix, const char *what) {
+    SYSTEMTIME local;
+    GetLocalTime(&local);
+    snprintf(stamp, sizeof stamp, "%04u%02u%02u-%02u%02u%02u", local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond);
+    swprintf(temp_root, MAX_PATH, L"%ls\\temp", host.output_dir);
+    swprintf(folder, MAX_PATH, L"%ls\\%hs_%hs", temp_root, prefix, stamp);
+    CreateDirectoryW(host.output_dir, NULL);
+    CreateDirectoryW(temp_root, NULL);
+    if (!CreateDirectoryW(folder, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        host.log_line("%s: cannot create perf-logs\\temp\\%s_%s (error %lu)", what, prefix, stamp, GetLastError());
+        return FALSE;
+    }
+    return TRUE;
+}
+
+// The text with names replaced, the host's and the proxy's logs and any crash reports join the folder's other files, which
+// are packed into perf-logs\<prefix>_<date-time>.zip; the folder goes once they are.
+static BOOL pack(Text *text, const char *text_name, const char *prefix, const char *what, LONGLONG started) {
+    redact(text);
+    wchar_t path[MAX_PATH];
+    temp_path(path, text_name);
+    write_file(path, text->data, text->length);
+    host.output_path(path, "s2prof.log");
+    copy_text_file(path, "s2prof.log");
+    swprintf(path, MAX_PATH, L"%ls\\proxy.log", host.output_dir);
+    copy_text_file(path, "proxy.log");
+    wchar_t pattern[MAX_PATH];
+    swprintf(pattern, MAX_PATH, L"%ls\\*crash*", host.output_dir);
+    WIN32_FIND_DATAW found;
+    HANDLE search = FindFirstFileW(pattern, &found);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            char name[MAX_PATH * 3];
+            to_utf8(found.cFileName, name, sizeof name);
+            swprintf(path, MAX_PATH, L"%ls\\%ls", host.output_dir, found.cFileName);
+            copy_text_file(path, name);
+        } while (FindNextFileW(search, &found));
+        FindClose(search);
+    }
+    wchar_t zip[MAX_PATH];
+    swprintf(zip, MAX_PATH, L"%ls\\%hs_%hs.zip", host.output_dir, prefix, stamp);
+    int files = 0;
+    BOOL zipped = write_zip(zip, folder, &files);
+    if (zipped) remove_folder(folder);
+    RemoveDirectoryW(temp_root);
+    if (zipped)
+        host.log_line("%s: done in %.0f s -> perf-logs\\%s_%s.zip (%d files)", what, ms(now() - started) / 1000.0, prefix, stamp, files);
+    else
+        host.log_line("%s: FAILED to write perf-logs\\%s_%s.zip; the files stay in perf-logs\\temp", what, prefix, stamp);
+    return zipped;
+}
+
+// The open GPU query is ended on main before the present hooks stop working; main then lets its objects go.
+static void stop_main_work(void) {
+    gpu_stop = 1;
+    for (int waited = 0; !gpu_stopped && waited < 500; waited += 10) Sleep(10);
+    running = 0;
+    release_wanted = 1;
+}
+
 // ---- the sequence ----
 
 static void set_flag(volatile LONG *flag, LONG value) {
@@ -1526,45 +1592,125 @@ static DWORD WINAPI report_thread(LPVOID unused) {
     text_printf(&report, "\nReport took %.0f s.\n", ms(now() - started) / 1000.0);
 
     progress("packing the report");
-    redact(&report);
-    wchar_t path[MAX_PATH];
-    temp_path(path, "report.txt");
-    write_file(path, report.data, report.length);
+    BOOL zipped = pack(&report, "report.txt", "report", "debug report", started);
     free(report.data);
     free(shot_list.data);
-    host.output_path(path, "s2prof.log");
-    copy_text_file(path, "s2prof.log");
-    swprintf(path, MAX_PATH, L"%ls\\proxy.log", host.output_dir);
-    copy_text_file(path, "proxy.log");
-    wchar_t pattern[MAX_PATH];
-    swprintf(pattern, MAX_PATH, L"%ls\\*crash*", host.output_dir);
-    WIN32_FIND_DATAW found;
-    HANDLE search = FindFirstFileW(pattern, &found);
-    if (search != INVALID_HANDLE_VALUE) {
-        do {
-            char name[MAX_PATH * 3];
-            to_utf8(found.cFileName, name, sizeof name);
-            swprintf(path, MAX_PATH, L"%ls\\%ls", host.output_dir, found.cFileName);
-            copy_text_file(path, name);
-        } while (FindNextFileW(search, &found));
-        FindClose(search);
-    }
-
-    wchar_t zip[MAX_PATH];
-    swprintf(zip, MAX_PATH, L"%ls\\report_%hs.zip", host.output_dir, stamp);
-    int files = 0;
-    BOOL zipped = write_zip(zip, folder, &files);
-    if (zipped) remove_folder(folder);
-    RemoveDirectoryW(temp_root);
-    host.log_line(zipped ? "debug report: done in %.0f s -> perf-logs\\report_%s.zip (%d files)" : "debug report: FAILED to write perf-logs\\report_%s.zip; the files stay in perf-logs\\temp",
-                  ms(now() - started) / 1000.0, stamp, files);
     CoUninitialize();
-    // The open GPU query is ended on main before the hooks stop running.
-    gpu_stop = 1;
-    for (int waited = 0; !gpu_stopped && waited < 500; waited += 10) Sleep(10);
+    stop_main_work();
     MessageBeep(zipped ? MB_ICONASTERISK : MB_ICONHAND);
-    running = 0;
-    release_wanted = 1;
+    return 0;
+}
+
+// ---- the snapshot ----
+
+static const char *snapshot_reason;
+static void (*snapshot_done)(const char *reason);
+
+// An event's XML without the elements naming the computer and the account it ran under.
+static void strip_element(wchar_t *xml, const wchar_t *open, const wchar_t *close) {
+    wchar_t *start = wcsstr(xml, open);
+    wchar_t *end = start ? wcsstr(start, close) : NULL;
+    if (end) memmove(start, end + wcslen(close), (wcslen(end + wcslen(close)) + 1) * sizeof *xml);
+}
+
+static void append_wide(Text *t, const wchar_t *text) {
+    int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
+    char *utf8 = size > 0 ? malloc((size_t)size) : NULL;
+    if (!utf8) return;
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8, size, NULL, NULL);
+    text_append(t, utf8, (size_t)size - 1);
+    free(utf8);
+}
+
+// The display drivers' events in Windows' System log since the game started (a driver that stopped responding and
+// recovered, a reset of the graphics kernel), newest first, as Windows records them less the computer and the account.
+static void section_display_events(Text *t) {
+    heading(t, "Display driver events since the game started (Windows' System log, newest first)");
+    FILETIME created, exited, kernel, user, current;
+    GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
+    GetSystemTimeAsFileTime(&current);
+    ULONGLONG since_start_ms = (((ULONGLONG)current.dwHighDateTime << 32 | current.dwLowDateTime) - ((ULONGLONG)created.dwHighDateTime << 32 | created.dwLowDateTime)) / 10000;
+    wchar_t query[512];
+    swprintf(query, 512,
+             L"*[System[Provider[@Name='Display' or @Name='nvlddmkm' or @Name='amdkmdag' or @Name='amdwddmg' or @Name='igfx' or @Name='igfxn' or "
+             L"@Name='Microsoft-Windows-DxgKrnl'] and TimeCreated[timediff(@SystemTime) <= %llu]]]",
+             since_start_ms + 60000);
+    EVT_HANDLE results = EvtQuery(NULL, L"System", query, EvtQueryChannelPath | EvtQueryReverseDirection);
+    if (!results) {
+        text_printf(t, "  not read (error %lu)\n", GetLastError());
+        return;
+    }
+    int shown = 0;
+    EVT_HANDLE events[8];
+    DWORD returned;
+    while (shown < MAX_DISPLAY_EVENTS && EvtNext(results, 8, events, 1000, 0, &returned)) {
+        for (DWORD i = 0; i < returned; i++) {
+            DWORD used = 0, properties = 0;
+            if (shown < MAX_DISPLAY_EVENTS) {
+                EvtRender(NULL, events[i], EvtRenderEventXml, 0, NULL, &used, &properties);
+                wchar_t *xml = used ? malloc(used) : NULL;
+                if (xml && EvtRender(NULL, events[i], EvtRenderEventXml, used, xml, &used, &properties)) {
+                    strip_element(xml, L"<Computer>", L"</Computer>");
+                    strip_element(xml, L"<Security", L"/>");
+                    text_printf(t, "  ");
+                    append_wide(t, xml);
+                    text_printf(t, "\n");
+                    shown++;
+                }
+                free(xml);
+            }
+            EvtClose(events[i]);
+        }
+    }
+    if (!shown) text_printf(t, "  none\n");
+    EvtClose(results);
+}
+
+static DWORD WINAPI snapshot_thread(LPVOID unused) {
+    (void)unused;
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    LONGLONG started = now();
+    set_overlay("saving", 0);
+    host.log_line("snapshot: %s: started", snapshot_reason);
+    Text snapshot = {0}, shot_list = {0};
+    // First, before anything changes: the frame on screen.
+    take_burst(&shot_list, "on_screen", 1, TRUE);
+    SYSTEMTIME local;
+    GetLocalTime(&local);
+    text_printf(&snapshot, "s2fix snapshot, Total War: Shogun 2 (2011)\n%04u-%02u-%02u %02u:%02u:%02u, s2fix %s, run %s; taken for: %s\n", local.wYear, local.wMonth,
+                local.wDay, local.wHour, local.wMinute, local.wSecond, host.version, host.run_id, snapshot_reason);
+    heading(&snapshot, "Graphics state");
+    char state[384] = "not known";
+    if (host.graphics_state) host.graphics_state(state, sizeof state);
+    text_printf(&snapshot, "  %s\n", state);
+    ID3D11Device *device = d3d_device;
+    if (device) text_printf(&snapshot, "  D3D11's device removed reason: 0x%08lx (0 when the device works)\n", (unsigned long)ID3D11Device_GetDeviceRemovedReason(device));
+
+    static FixResult fixes[MAX_FIXES];
+    static LONG initial_states[64];
+    int fix_count = 0;
+    Text log = {0};
+    wchar_t log_path[MAX_PATH];
+    host.output_path(log_path, "s2prof.log");
+    read_file(log_path, &log);
+    section_system(&snapshot);
+    section_gpu(&snapshot);
+    section_game(&snapshot);
+    section_s2fix(&snapshot, log.data ? log.data : "", fixes, &fix_count, initial_states);
+    section_process(&snapshot);
+    section_modules(&snapshot);
+    section_threads(&snapshot);
+    section_folder(&snapshot);
+    section_display_events(&snapshot);
+    free(log.data);
+    heading(&snapshot, "Screenshot (the game's own image, taken before Present)");
+    if (shot_list.data) text_append(&snapshot, shot_list.data, shot_list.length);
+    pack(&snapshot, "snapshot.txt", "snapshot", "snapshot", started);
+    free(snapshot.data);
+    free(shot_list.data);
+    CoUninitialize();
+    stop_main_work();
+    if (snapshot_done) snapshot_done(snapshot_reason);
     return 0;
 }
 
@@ -1578,10 +1724,33 @@ void report_init(const ReportHost *report_host) {
     if (GetUserNameW(wide, &size)) to_utf8(wide, user_utf8, sizeof user_utf8);
     size = MAX_PATH;
     if (GetComputerNameW(wide, &size)) to_utf8(wide, computer_utf8, sizeof computer_utf8);
+    size = MAX_PATH;
+    if (GetComputerNameExW(ComputerNameDnsFullyQualified, wide, &size)) to_utf8(wide, dns_full_utf8, sizeof dns_full_utf8);
+    size = MAX_PATH;
+    if (GetComputerNameExW(ComputerNameDnsHostname, wide, &size)) to_utf8(wide, dns_host_utf8, sizeof dns_host_utf8);
 }
 
 BOOL report_running(void) {
     return running != 0;
+}
+
+// With running already set: the main thread's part starts afresh, then the work's own thread.
+static BOOL start_work(const char *prefix, const char *what, LPTHREAD_START_ROUTINE work) {
+    overlay_version = 0;
+    gpu_stop = gpu_stopped = 0;
+    current_gpu_set = -1;
+    if (!make_folder(prefix, what)) {
+        running = 0;
+        return FALSE;
+    }
+    HANDLE thread = CreateThread(NULL, 0, work, NULL, 0, NULL);
+    if (!thread) {
+        host.log_line("%s: CreateThread failed", what);
+        running = 0;
+        return FALSE;
+    }
+    CloseHandle(thread);
+    return TRUE;
 }
 
 void report_start(void) {
@@ -1592,26 +1761,15 @@ void report_start(void) {
         return;
     }
     frame_count = 0;
-    overlay_version = 0;
-    gpu_stop = gpu_stopped = 0;
-    current_gpu_set = -1;
-    SYSTEMTIME local;
-    GetLocalTime(&local);
-    snprintf(stamp, sizeof stamp, "%04u%02u%02u-%02u%02u%02u", local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond);
-    swprintf(temp_root, MAX_PATH, L"%ls\\temp", host.output_dir);
-    swprintf(folder, MAX_PATH, L"%ls\\report_%hs", temp_root, stamp);
-    CreateDirectoryW(host.output_dir, NULL);
-    CreateDirectoryW(temp_root, NULL);
-    if (!CreateDirectoryW(folder, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
-        host.log_line("debug report: cannot create perf-logs\\temp\\report_%s (error %lu)", stamp, GetLastError());
-        running = 0;
-        return;
+    start_work("report", "debug report", report_thread);
+}
+
+BOOL report_snapshot(const char *reason, void (*done)(const char *reason)) {
+    if (InterlockedCompareExchange(&running, 1, 0)) {
+        host.log_line("snapshot: %s: not taken, the debug report is running", reason);
+        return FALSE;
     }
-    HANDLE thread = CreateThread(NULL, 0, report_thread, NULL, 0, NULL);
-    if (!thread) {
-        host.log_line("debug report: CreateThread failed");
-        running = 0;
-        return;
-    }
-    CloseHandle(thread);
+    snapshot_reason = reason;
+    snapshot_done = done;
+    return start_work("snapshot", "snapshot", snapshot_thread);
 }

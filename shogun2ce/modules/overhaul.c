@@ -860,6 +860,8 @@ static uint32_t main_view_type = VIEW_TYPES, main_view_cascade;
 static void *original_draws[DRAW_SLOTS];
 static Worker *workers[MAX_WORKERS];
 static int worker_count;
+// The workers' contexts were let go at a rebuild; the next split makes them again.
+static BOOL contexts_released;
 static const char *worker_error;
 static ID3D11Device *device;
 static volatile LONG generation;
@@ -1494,22 +1496,29 @@ WRITER_WRAPPER(2)
 WRITER_WRAPPER(3)
 static void *const writer_wrappers[WRITER_SLOTS] = {(void *)writer_wrapper_0, (void *)writer_wrapper_1, (void *)writer_wrapper_2, (void *)writer_wrapper_3};
 
-// A load replaces SCENE (0x1819f2080 deletes it and allocates another), and with it the buffers the writers were seen
-// writing; one allocated where the old one was holds the same buffers at the same addresses.
-static void forget_replaced_scene(void) {
-    BYTE *scene = *(BYTE **)(*(BYTE **)(engine + ENGINE_RVA) + 0x30);
-    if (scene == writers_scene) return;
+// The buffers the writers were seen writing and the unlocked slots' reference copies; returns how many buffers.
+static int forget_writers(void) {
     int learned = 0;
     for (int i = 0; i < WRAPPED_CLASSES; i++) {
         for (int s = 0; s < WRITER_SLOTS; s++)
             for (int k = 0; k < LEARNED_BUFFERS && wrapped_classes[i].learned[s][k]; k++) learned++;
         memset(wrapped_classes[i].learned, 0, sizeof wrapped_classes[i].learned);
     }
-    if (writers_scene)
-        api->log_line("overhaul: a load replaced the scene; %d buffers the writers wrote and %ld reference copies are forgotten", learned, binding_info_count);
     for (int i = 0; i < BINDING_INFOS; i++) free(binding_infos[i].reference);
     memset(binding_infos, 0, sizeof binding_infos);
     binding_info_count = 0;
+    return learned;
+}
+
+// A load replaces SCENE (0x1819f2080 deletes it and allocates another), and with it the buffers the writers were seen
+// writing; one allocated where the old one was holds the same buffers at the same addresses.
+static void forget_replaced_scene(void) {
+    BYTE *scene = *(BYTE **)(*(BYTE **)(engine + ENGINE_RVA) + 0x30);
+    if (scene == writers_scene) return;
+    LONG references = binding_info_count;
+    int learned = forget_writers();
+    if (writers_scene)
+        api->log_line("overhaul: a load replaced the scene; %d buffers the writers wrote and %ld reference copies are forgotten", learned, references);
     writers_scene = scene;
 }
 
@@ -3087,6 +3096,19 @@ static BOOL start_workers(int wanted, ID3D11DeviceContext *immediate) {
             return FALSE;
         }
     }
+    if (contexts_released) {
+        for (int i = 0; i < worker_count; i++) {
+            HRESULT result = ID3D11Device_CreateDeferredContext(device, 0, &workers[i]->context);
+            if (FAILED(result)) {
+                static char error[160];
+                snprintf(error, sizeof error, "CreateDeferredContext after a rebuild failed: 0x%08lx", (unsigned long)result);
+                worker_error = error;
+                api->log_line("overhaul: no more workers: %s", worker_error);
+                return FALSE;
+            }
+        }
+        contexts_released = FALSE;
+    }
     SetThreadDescriptionFn describe = (SetThreadDescriptionFn)(void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription");
     while (worker_count < wanted) {
         Worker *worker = _aligned_malloc(sizeof *worker, 64);
@@ -3359,7 +3381,7 @@ static void battle_view_update_hook(BYTE *battle_view, BYTE *frame_argument) {
     // prepare's own condition: instancing active and rows dirty.
     if (!node[0x2e0] || node[0x2e2] || !*(uint32_t *)(node + 0x2d4) || !node[0x2e1]) return;
     int needed = EARLY_PREPARE_WORKERS + FILL_HELPERS;
-    if (worker_count < needed && !start_workers(needed, engine_immediate_context())) return;
+    if ((worker_count < needed || contexts_released) && !start_workers(needed, engine_immediate_context())) return;
     early.node = node;
     early.pending = TRUE;
     early.poses_merged = 0;
@@ -3414,7 +3436,7 @@ static void prepare_hook(BYTE *prepare_interface, BYTE *renderer) {
         node[0x2e1] = 1;
     }
     int split = overhaul_prepare_split && overhaul_enabled;
-    prepare_split_active = split && !overlap_active && (worker_count >= PREPARE_WORKERS || start_workers(PREPARE_WORKERS, engine_immediate_context()));
+    prepare_split_active = split && !overlap_active && ((worker_count >= PREPARE_WORKERS && !contexts_released) || start_workers(PREPARE_WORKERS, engine_immediate_context()));
     original_prepare(prepare_interface, renderer);
     LONGLONG joined = now_ticks();
     if (prepare_split_active) {
@@ -4356,7 +4378,7 @@ static void kick_early_effects(BYTE *context) {
         found[n++] = view;
     }
     int first = (overhaul_workers < 0 ? 0 : overhaul_workers) + (overhaul_record_worker ? 1 : 0);
-    if (!n || first + n > MAX_WORKERS || (worker_count < first + n && !start_workers(first + n, engine_immediate_context()))) return;
+    if (!n || first + n > MAX_WORKERS || ((worker_count < first + n || contexts_released) && !start_workers(first + n, engine_immediate_context()))) return;
     for (int e = 0; e < n; e++)
         if (workers[first + e]->task) return;
     for (int e = 0; e < n; e++) {
@@ -4454,6 +4476,99 @@ static BYTE end_frame_hook(BYTE *render_device) {
     render_thread = GetCurrentThreadId();
     overlap_frame = overhaul_overlap && overhaul_enabled;
     return original_end_frame(render_device);
+}
+
+static void release_copies(UploadTracker *uploads) {
+    for (uint32_t i = 0; i < uploads->copy_capacity; i++)
+        if (uploads->copies[i].buffer) ID3D11Buffer_Release(uploads->copies[i].copy);
+    free(uploads->copies);
+    uploads->copies = NULL;
+    uploads->copy_capacity = uploads->copy_count = 0;
+}
+
+static void release_clone(BYTE *copy) {
+    CloneBuffers *buffers = clone_buffers(copy + RING_HOLDER_SIZE);
+    ID3D11Buffer_Release(buffers->small);
+    ID3D11Buffer_Release(buffers->dynamic);
+    for (int i = 0; i < DEVICE_LOCAL_COPIES; i++) ID3D11Buffer_Release(buffers->device_local[i]);
+    free(buffers->staging);
+    _aligned_free(copy);
+}
+
+static void release_queries(ID3D11Query **queries, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (queries[i]) ID3D11Query_Release(queries[i]);
+        queries[i] = NULL;
+    }
+}
+
+// Everything made on the device or copied from the engine's GPU objects: the workers' contexts, constant buffer copies
+// and ring clones (their copies of the engine's rings go stale when the rings are made again), main's deferred context
+// and the wrapper it was taken from, the probe lists' context, the immediate context's lock, the GPU timing queries and
+// the device. Each split makes what it needs again, on the device the engine has then.
+static void release_device_objects(void) {
+    for (int i = 0; i < worker_count; i++) {
+        Worker *worker = workers[i];
+        if (worker->context) ID3D11DeviceContext_Release(worker->context);
+        worker->context = NULL;
+        release_copies(&worker->uploads);
+        for (int c = 0; c < worker->clone_count; c++) release_clone(worker->clones[c].copy);
+        worker->clone_count = 0;
+    }
+    contexts_released = worker_count > 0;
+    release_copies(&main_uploads);
+    if (main_deferred) ID3D11DeviceContext_Release(main_deferred);
+    main_deferred = NULL;
+    wrapper = NULL;
+    overlap_checked = FALSE;
+    if (probe_context) ID3D11DeviceContext_Release(probe_context);
+    probe_context = NULL;
+    if (context_lock) ID3D11Multithread_Release(context_lock);
+    context_lock = NULL;
+    for (int f = 0; f < GPU_TIMING_FRAMES; f++) {
+        GpuFrame *frame = &gpu_frames[f];
+        release_queries(&frame->disjoint, 1);
+        release_queries(frame->start, MAX_TIMED_VIEWS);
+        release_queries(frame->middle, MAX_TIMED_VIEWS);
+        release_queries(frame->end, MAX_TIMED_VIEWS);
+        release_queries(&frame->list_begin[0][0], MAX_TIMED_VIEWS * (MAX_WORKERS + 1));
+        release_queries(&frame->inside_begin[0][0], MAX_TIMED_VIEWS * (MAX_WORKERS + 1));
+        release_queries(&frame->inside_end[0][0], MAX_TIMED_VIEWS * (MAX_WORKERS + 1));
+        release_queries(frame->lists_end, MAX_TIMED_VIEWS);
+        release_queries(frame->main_statistics, MAX_TIMED_VIEWS);
+        release_queries(frame->list_statistics, MAX_TIMED_VIEWS);
+        frame->mode = -1;
+    }
+    gpu_timing_ready = gpu_detail_ready = FALSE;
+    gpu_last_stamp = 0;
+    immediate_context = NULL;
+    if (device) ID3D11Device_Release(device);
+    device = NULL;
+}
+
+// The engine releases GPU resources, on the device it has or before it makes another: the buffers the writers were seen
+// writing, the reference copies, the library's buffers and the rings may all be freed or made again, and everything this
+// module made on the device goes too. A release runs on main outside the scene's drawing (a lost device's recovery as
+// the frame starts, the graphics options, a shadow or post-effect change), where no list or record is pending once
+// end_frame's flush has run, and only an early prepare can still be on the workers: it is joined, and its rows marked
+// dirty so the engine fills them again.
+static void graphics_rebuild_starts(void) {
+    wait_record();
+    finish_early_effects();
+    finish_all_cascade_records();
+    drain();
+    if (early.pending) {
+        BYTE *node = early.node;
+        join_early_prepare();
+        node[0x2e1] = 1;
+    }
+    release_device_objects();
+    int learned = forget_writers();
+    // A library rebuilt at the next split starts a new epoch, which drops each thread's library and program copies.
+    contexts.record_count = 0;
+    api->log_line("overhaul: the engine releases its graphics resources; %d buffers the writers wrote, the workers' contexts and copies and the "
+                  "shader library's copies are made again",
+                  learned);
 }
 
 static BYTE split_execute(BYTE *context, BYTE *renderer, BYTE *view, int timed_view, int64_t groups, const CascadeRecord *packets);
@@ -4978,6 +5093,8 @@ static void start_call_counts(void) {
     swap_vtable(counted_vtables[0], immediate_thunks, original_immediate_methods);
     counted_vtable_count = 1;
     for (int i = 0; i < worker_count; i++) {
+        // Let go at a rebuild, made again at the next split.
+        if (!workers[i]->context) continue;
         void **vtable = *(void ***)workers[i]->context;
         if (counted(vtable)) continue;
         if (counted_vtable_count > 1 && memcmp(vtable, original_deferred_methods, sizeof original_deferred_methods)) {
@@ -4992,7 +5109,7 @@ static void start_call_counts(void) {
 static void stop_call_counts(double frames_off, double frames_on, const double *engine_draws) {
     if (!counted_vtable_count) return;
     for (int i = 0; i < worker_count; i++)
-        if (!counted(*(void ***)workers[i]->context))
+        if (workers[i]->context && !counted(*(void ***)workers[i]->context))
             api->log_line("  D3D call counts: worker %d started during the run; its calls went uncounted", workers[i]->number);
     for (int c = 0; c < counted_vtable_count; c++) {
         int replaced = restore_vtable(counted_vtables[c], c ? deferred_thunks : immediate_thunks, c ? original_deferred_methods : original_immediate_methods);
@@ -5685,5 +5802,6 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
     api->register_switch("parallelsort", &overhaul_parallel_sort, parallel_sort_report);
     api->register_switch("earlyeffects", &overhaul_early_effects, early_effects_report);
     api->register_switch("effectsverify", &overhaul_effects_verify, effects_verify_report);
+    api->on_graphics_reset(graphics_rebuild_starts, NULL);
     return NULL;
 }

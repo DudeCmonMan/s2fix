@@ -3,7 +3,8 @@
 
 // The debug report (Ctrl+Shift+F6): a fixed, timed sequence with the camera kept still that records the system, the
 // process and every fix, A/B captures and screenshots, written to perf-logs\temp and packed into
-// perf-logs\report_<date-time>.zip. Shared verbatim by the development and the release host.
+// perf-logs\report_<date-time>.zip. The snapshot (Ctrl+Shift+F5, before a graphics reset) records the same system, process
+// and fix sections at once, without the sequence. Shared verbatim by the development and the release host.
 
 typedef struct {
     const char *name;
@@ -27,12 +28,19 @@ typedef struct {
     int (*capture)(int seconds, int switch_index);
     // perf-logs\<run>_<name>, where the host writes its log and capture files.
     void (*output_path)(wchar_t *path, const char *name);
+    // One line on the engine's graphics state (its device-lost flag, the device's status), for the snapshot; may be NULL.
+    void (*graphics_state)(char *out, size_t size);
 } ReportHost;
 
 void report_init(const ReportHost *host);
 BOOL report_running(void);
 // From the hotkey: runs the sequence on a thread of its own.
 void report_start(void);
+// A snapshot for a problem on screen: the frame being shown, then the graphics state, the system, the process, s2fix
+// and the display driver's recent events, packed into perf-logs\snapshot_<date-time>.zip on a thread of its own, which
+// then calls done(reason) if given. FALSE when it could not start (the report is running, the folder or the thread could
+// not be made): done is not called then.
+BOOL report_snapshot(const char *reason, void (*done)(const char *reason));
 // On the main thread, around the render device's present.
 void report_before_present(void);
 void report_after_present(void);

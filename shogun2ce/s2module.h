@@ -44,6 +44,15 @@ typedef struct {
     void (*begin_fix)(const char *name);
     // NULL when every check holds, else which engine code differs; fixes call it before installing anything.
     const char *(*check_engine)(const S2Check *checks, int count);
+    // Asks the engine to release and rebuild every GPU resource it holds, through its own recovery, at the start of the
+    // next frame, with its loading screen shown; any thread may ask.
+    // The reason goes to the log, so it must outlive the request: a string literal.
+    void (*request_graphics_reset)(const char *reason);
+    // before runs on the main thread each time the engine releases GPU resources and after each time it creates them
+    // again, whatever started it: a requested reset, a lost device, the graphics options, a load (which creates without
+    // releasing). A rebuild can release more than once before it creates, and a device the engine can't use yet delays
+    // the after. Either may be NULL.
+    void (*on_graphics_reset)(void (*before)(void), void (*after)(void));
 } S2Api;
 
 typedef const char *(*S2ModuleMain)(const S2Api *api);

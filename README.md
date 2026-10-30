@@ -27,7 +27,8 @@ To uninstall, delete the proxy DLL, `s2prof.dll`, `s2prof.ini`, the `fixes\` fol
 
 ## In game
 
-You don't need any hotkeys to play. They exist to compare the game with the fixes off and on.
+You don't need any hotkeys to play. Most exist to compare the game with the fixes off and on; Ctrl+Shift+F5 is for a
+picture gone wrong.
 
 | Hotkey | Does |
 |---|---|
@@ -35,6 +36,7 @@ You don't need any hotkeys to play. They exist to compare the game with the fixe
 | Ctrl+Shift+F9 | 20-second A/B capture: all fixes switch off and on every 2 s; the summary goes to the log |
 | Ctrl+Shift+F8 | 20-second capture without switching anything |
 | Ctrl+Shift+F6 | debug report (see "Reporting a problem" below) |
+| Ctrl+Shift+F5 | a snapshot, then the game rebuilds its graphics (see "When the picture goes wrong" below) |
 
 A few settings apply when the game starts (marked "at start" below). The hotkeys don't switch those.
 
@@ -65,6 +67,18 @@ installed, every program module loaded into the game, its threads, and timings w
 each fix on and off. It also takes screenshots of the game (only the game's own picture, never your desktop) with the
 fixes on and off. While it works, files go to `perf-logs\temp`; it packs them into the zip and removes them. Your user
 name and computer name are replaced in everything it writes. Nothing is sent anywhere: you decide what to share.
+
+### When the picture goes wrong
+
+If textures, shadows or other graphics look broken and stay that way, press Ctrl+Shift+F5. s2fix first saves
+`perf-logs\snapshot_<date-time>.zip`: a screenshot of what the game showed, the state of the graphics card as the game
+sees it, and the display driver's recent events, with the same system details and name replacement as the debug
+report. Then the game releases and rebuilds all of its graphics, the way it recovers when the graphics card drops out:
+the loading screen shows for a moment (longer with the fixes off) and the game carries on. If the problem comes back,
+attach the snapshot to your issue.
+
+On the Complete Edition, after several resets in quick succession, shadows can flicker as the camera moves over an
+area. Leave a few seconds between resets.
 
 ## Shogun 2 — Complete Edition
 
@@ -140,6 +154,7 @@ When loading:
 | Fix | What it does |
 |---|---|
 | `packcache` | keeps the game's pack files in Windows' file cache between starts: the game reopened them in a way that bypasses the cache, so every start read all its data from disk again |
+| `packindex` | gives each pack's list of files its full size from the start: the game started every list small and enlarged it only once it was completely full, so the big packs took longer and longer to list (the files found are the same) |
 | `lookupcache` | remembers, for the rest of the session, each loose file in `data\` or a mod's folder that Windows said is not there, so the game's repeated checks for it, in loads and end turns, are answered from memory; loose files that exist (mods) are always found |
 | `pathsplit` | builds a battle's pathfinding map on several threads: its searches over the map's triangles are split across helper threads, and the game's second and third tries run alongside the first (the result is the same) |
 
@@ -247,6 +262,9 @@ When loading:
 |---|---|
 | `texdirect` | creates the game's compressed textures straight from their files instead of having D3DX decompress and recompress every block, which took most of a load; the textures show the artwork's own blocks |
 | `packcache` | keeps the game's pack files and loose data files in Windows' file cache between starts: the game opened them in a way that bypasses the cache, so every start read all its data from disk again |
+| `packindex` | gives each pack's list of files its full size from the start: the game started every list small and enlarged it only once it was completely full, so the big packs took longer and longer to list (the files found are the same) |
+| `randseed` | starts the game's 2009 network encryption library without its slowest step: to gather randomness it read through every block of memory the game had allocated, twice during start-up, which took seconds and longer with mods; it keeps every other source, Windows' own random generator included |
+| `soundprobe` | lets the sound system test which speaker layouts work on a helper thread while the game goes on loading, instead of the game waiting for twelve audio device tests at start-up; the game still opens the audio device itself, as before |
 | `lookupcache` | remembers, for the rest of the session, each loose file in `data\` or a mod's folder that Windows said is not there, so the game's repeated checks for it, in loads and end turns, are answered from memory; loose files that exist (mods) are always found |
 | `pathsplit` | builds a battle's pathfinding map on several threads: its searches over the map's triangles are split across helper threads, and the game's second and third tries run alongside the first (the result is the same) |
 

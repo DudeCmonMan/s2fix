@@ -1221,22 +1221,29 @@ static void *const writer_wrappers[WRITER_SLOTS] = {(void *)group_writer_wrapper
 
 static BYTE *job_item(const Job *job);
 
-// A load replaces SCENE (0x1140b6f0 deletes it and allocates another), and with it the buffers the writers were seen
-// writing; one allocated where the old one was holds the same buffers at the same addresses.
-static void forget_replaced_scene(void) {
-    BYTE *scene = *(BYTE **)(*(BYTE **)(engine + ENGINE_RVA) + SCENE_OFFSET);
-    if (scene == writers_scene) return;
+// The buffers the writers were seen writing and the unlocked slots' reference copies; returns how many buffers.
+static int forget_writers(void) {
     int learned = 0;
     for (int i = 0; i < WRAPPED_CLASSES; i++) {
         for (int s = 0; s < WRITER_SLOTS; s++)
             for (int k = 0; k < LEARNED_BUFFERS && wrapped_classes[i].learned[s][k]; k++) learned++;
         memset(wrapped_classes[i].learned, 0, sizeof wrapped_classes[i].learned);
     }
-    if (writers_scene)
-        api->log_line("overhaul: a load replaced the scene; %d buffers the writers wrote and %ld reference copies are forgotten", learned, binding_info_count);
     for (int i = 0; i < BINDING_INFOS; i++) free(binding_infos[i].reference);
     memset(binding_infos, 0, sizeof binding_infos);
     binding_info_count = 0;
+    return learned;
+}
+
+// A load replaces SCENE (0x1140b6f0 deletes it and allocates another), and with it the buffers the writers were seen
+// writing; one allocated where the old one was holds the same buffers at the same addresses.
+static void forget_replaced_scene(void) {
+    BYTE *scene = *(BYTE **)(*(BYTE **)(engine + ENGINE_RVA) + SCENE_OFFSET);
+    if (scene == writers_scene) return;
+    LONG references = binding_info_count;
+    int learned = forget_writers();
+    if (writers_scene)
+        api->log_line("overhaul: a load replaced the scene; %d buffers the writers wrote and %ld reference copies are forgotten", learned, references);
     writers_scene = scene;
 }
 
@@ -2328,10 +2335,8 @@ static BOOL start_workers(int wanted, ID3D11DeviceContext *immediate) {
     return TRUE;
 }
 
-// A display change creates the engine's device again (0x114011e0 calls the creation 0x1145fdb0). Everything made on
-// the old one goes first: contexts of the old device can't record for the new one's resources. The next split makes them
-// again on the new one. The workers are idle: the change runs on main between frames.
-static BYTE __attribute__((thiscall)) create_device_hook(BYTE *render_device, DWORD a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f) {
+// The workers' contexts, upload copies and ring clones; each split makes what it needs again.
+static void release_worker_objects(void) {
     for (int i = 0; i < worker_count; i++) {
         Worker *worker = workers[i];
         if (worker->context) ID3D11DeviceContext_Release(worker->context);
@@ -2348,15 +2353,42 @@ static BYTE __attribute__((thiscall)) create_device_hook(BYTE *render_device, DW
         }
         worker->clone_count = 0;
     }
+}
+
+// With the device let go too, the next split takes the game's device again and makes the workers' contexts on it.
+static void release_device_objects(void) {
+    release_worker_objects();
     if (immediate_lock) IUnknown_Release((IUnknown *)immediate_lock);
     immediate_lock = NULL;
     protection_logged = FALSE;
-    if (device) {
-        ID3D11Device_Release(device);
-        api->log_line("overhaul: the game creates its device again; the workers' contexts and copies are made again on the new one");
-    }
+    if (device) ID3D11Device_Release(device);
     device = NULL;
+}
+
+// A display change creates the engine's device again (0x114011e0 calls the creation 0x1145fdb0). Everything made on
+// the old one goes first: contexts of the old device can't record for the new one's resources. The next split makes them
+// again on the new one. The workers are idle: the change runs on main between frames.
+static BYTE __attribute__((thiscall)) create_device_hook(BYTE *render_device, DWORD a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f) {
+    if (device) api->log_line("overhaul: the game creates its device again; the workers' contexts and copies are made again on the new one");
+    release_device_objects();
     return original_create_device(render_device, a, b, c, d, e, f);
+}
+
+// The engine releases and rebuilds every GPU resource on the same device: the buffers the writers were seen writing,
+// the reference copies, the library's buffers and the programs may all be new or freed, and the workers' contexts, copies
+// and clones were made from the old ones. All of it is made again. Releases run on main outside the scene's drawing (a
+// reset as the frame starts, the graphics options, a load), where only an early prepare can still be on the workers:
+// it is joined first, and its result redone.
+static void graphics_rebuild_starts(void) {
+    join_early();
+    early.disturbed = 1;
+    release_device_objects();
+    int learned = forget_writers();
+    // A library rebuilt at the next split starts a new epoch, which drops each thread's library and program copies.
+    contexts.record_count = 0;
+    api->log_line("overhaul: the engine rebuilds its graphics resources; %d buffers the writers wrote, the workers' contexts and copies and the "
+                  "shader library's copies are made again",
+                  learned);
 }
 
 static void wake_workers(void) {
@@ -3114,6 +3146,7 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
     for (int i = 0; i < DRAW_SLOTS && !error; i++) error = patch_slot(&draw_slots[i], draw_hooks[i], &original_draws[i]);
     if (!error) error = patch_slot(get_renderer_slot, (void *)get_renderer_hook, NULL);
     if (error) return error;
+    api->on_graphics_reset(graphics_rebuild_starts, NULL);
     api->register_switch("overhaul", &overhaul_enabled, overhaul_report);
     api->register_switch("autobalance", &overhaul_autobalance, overhaul_report);
     api->register_switch("texturecopies", &overhaul_texture_copies, overhaul_report);

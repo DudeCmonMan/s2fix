@@ -17,6 +17,7 @@
 #include "s2module.h"
 #include "hook.h"
 #include "report.h"
+#include "graphicsreset.h"
 #include "checks/s2prof.h"
 
 #ifndef S2FIX_VERSION
@@ -909,8 +910,7 @@ static int report_capture(int seconds, int switch_index) {
     return number;
 }
 
-static void start_report(void) {
-    if (refused_in_dx9("the debug report")) return;
+static void init_report(void) {
     static BOOL initialised;
     if (!initialised) {
         report_init(&(ReportHost){.engine = engine,
@@ -924,15 +924,30 @@ static void start_report(void) {
                                   .switch_count = report_switch_count,
                                   .switch_at = report_switch_at,
                                   .capture = report_capture,
-                                  .output_path = output_path});
+                                  .output_path = output_path,
+                                  .graphics_state = graphics_reset_describe});
         initialised = TRUE;
     }
+}
+
+static void start_report(void) {
+    if (refused_in_dx9("the debug report")) return;
+    init_report();
     report_start();
+}
+
+// The escape hatch for a picture gone wrong: the snapshot records the frame on screen and the state, then the engine
+// rebuilds its graphics resources. Without a snapshot (the debug report is running, or perf-logs can't be written) the
+// reset still runs.
+static void snapshot_and_reset(const char *reason) {
+    if (refused_in_dx9("the graphics reset")) return;
+    init_report();
+    if (!report_snapshot(reason, graphics_reset_request)) graphics_reset_request(reason);
 }
 
 static void log_help(void) {
     log_line("Hotkeys (in game): Ctrl+Shift+F9 A/B capture %d s (Apply Fixes alternates every %d s) | Ctrl+Shift+F10 toggle Apply Fixes | Ctrl+Shift+F8 plain capture"
-             " | Ctrl+Shift+F6 debug report (keep the camera still, about 3 minutes)",
+             " | Ctrl+Shift+F6 debug report (keep the camera still, about 3 minutes) | Ctrl+Shift+F5 snapshot, then a graphics reset",
              CAPTURE_SECONDS, AB_SEGMENT_SECONDS);
 }
 
@@ -1148,7 +1163,9 @@ static S2Api module_api = {.fix_enabled = &fixes_enabled,
                            .main_thread = &main_thread_id,
                            .end_fix = end_fix,
                            .begin_fix = begin_fix,
-                           .check_engine = check_engine};
+                           .check_engine = check_engine,
+                           .request_graphics_reset = graphics_reset_request,
+                           .on_graphics_reset = graphics_reset_listen};
 
 static void load_module(const char *utf8_path) {
     wchar_t path[MAX_PATH];
@@ -1305,6 +1322,10 @@ static DWORD WINAPI controller(LPVOID unused) {
     else
         log_line("device creation: held for the fixes; multithreaded device %s", engine[DEVICE_FLAGS_RVA + 1] ? "off (multithreaded_device=0)" : "on");
     install_present_hook();
+    // Before the fixes load, so they can listen for rebuilds.
+    const char *reset_error = S2_CHECK_ENGINE(&module_api, reset_checks);
+    reset_error = graphics_reset_init(&(GraphicsResetHost){engine, log_line, hook_function}, reset_error);
+    if (reset_error) log_line("graphics reset unavailable: %s", reset_error);
     BYTE *device = NULL;
     if (device_readable)
         device = wait_for_renderer();
@@ -1330,6 +1351,7 @@ static DWORD WINAPI controller(LPVOID unused) {
         if (hotkey_pressed(VK_F9) && !busy) capture(CAPTURE_SECONDS, &switches[0]);
         if (hotkey_pressed(VK_F8) && !busy) capture(CAPTURE_SECONDS, NULL);
         if (hotkey_pressed(VK_F6)) start_report();
+        if (hotkey_pressed(VK_F5)) snapshot_and_reset("Ctrl+Shift+F5");
     }
     return 0;
 }
