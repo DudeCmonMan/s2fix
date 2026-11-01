@@ -25,6 +25,20 @@ original game's borderless windowed mode (`[window] borderless=1`, see its setti
 
 To uninstall, delete the proxy DLL, `s2prof.dll`, `s2prof.ini`, the `fixes\` folder and the `perf-logs\` folder.
 
+### Linux with Proton
+
+It should work out of the box.
+
+Proton/Wine loads `s2prof.dll` automatically. It should also ordinarily load the mod's `d3d11.dll` over
+Proton/Wine's own builtin version.
+
+However, in order to ensure that it does load the correct files, you may want to add `d3d11` to the
+`WINEDLLOVERRIDES` option in the game's launcher options just for peace of mind:
+
+```sh
+WINEDLLOVERRIDES=d3d11=n,b %command%
+```
+
 ## In game
 
 You don't need any hotkeys to play. Most exist to compare the game with the fixes off and on; Ctrl+Shift+F5 is for a
