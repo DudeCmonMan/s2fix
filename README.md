@@ -36,7 +36,7 @@ However, in order to ensure that it does load the correct files, you may want to
 `WINEDLLOVERRIDES` option in the game's launcher options just for peace of mind:
 
 ```sh
-WINEDLLOVERRIDES=d3d11=n,b %command%
+WINEDLLOVERRIDES="d3d11=n,b" %command%
 ```
 
 ## In game
