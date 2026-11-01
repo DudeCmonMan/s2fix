@@ -1,0 +1,31 @@
+// Generated from the targeted engine by the development tools; regenerated there, not edited.
+#pragma once
+#include "../s2module.h"
+
+static const S2Check campeffects_checks[] = {
+    {0x7818d0, 0x68, 0x04b056492cc488a3ull, 0, "build check"},
+    {0x7cb850, 0x3b, 0x92f6b0b509b9ce20ull, 0, "build list"},
+    {0x85be10, 0x79, 0x09dbbcfae52ced1full, 0, "effect sum"},
+    {0x5a23d0, 0xa4, 0xd902fa1d6ddf1fa9ull, 0, "effect sum's faction lists"},
+    {0x786ca0, 0x48, 0x8222ecba4683f3a1ull, 0, "table list copy"},
+    {0x7e06f0, 0x10, 0x0aedc8c13a4f3880ull, 0, "list table lookup"},
+    {0x5c4530, 0xb, 0x41e1cf1f9d12f76eull, 0, "linked object"},
+    {0x95730, 0x4, 0x08a8e2c2862ac7e2ull, 0, "holder sub-object"},
+    {0x3e5960, 0xd, 0x7995c03ec25d1e5bull, 0, "handle target"},
+    {0x8ee510, 0x7, 0xc3ca0bb917e59c59ull, 0, "owner flag"},
+    {0xbb1c50, 0x47b, 0x370dae5f41411c8eull, 0, "effect merge-sum"},
+    {0xbbc410, 0x97, 0xb522a60e40ab42bcull, 0, "effect merge count"},
+    {0xbb17f0, 0x35, 0x5d82067375377938ull, 0, "effect order"},
+    {0xbb1780, 0x2c, 0x5319d48b0423aee5ull, 0, "effect key equality"},
+    {0x55fae0, 0x79, 0xaa1070c505bde753ull, 0, "effect list copy"},
+    {0x7cb0b0, 0x791, 0x75961e717667d88full, 0, "building candidates"},
+    {0xbd5e70, 0x66, 0x70be483f0cc24f65ull, 0, "effect value lookup"},
+    {0xbcf200, 0x14, 0x8c8e8eb8f1c5a178ull, 0, "effect value by key"},
+    {0xbcf300, 0x12, 0x296a049c020d2a19ull, 0, "effect value by id"},
+    {0xb9e5c0, 0x55, 0x7fe5be45ea0d4bb4ull, 0, "effect lower bound"},
+    {0x7f4ae0, 0x8, 0x32843abedb1c7560ull, 1, "effect owner"},
+    {0x600470, 0x10, 0x5dde2ca99b0ac57eull, 1, "branch value"},
+    {0x5d7510, 0x10, 0x89867f518435abe0ull, 1, "tier list"},
+    {0x4ad200, 0x10, 0x38bb39b7d35e03ffull, 1, "effect list free"},
+    {0xf04d0, 0x10, 0xbec768ffb3278145ull, 1, "engine free"},
+};

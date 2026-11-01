@@ -111,6 +111,7 @@ are off for that session.
 | `[device] multithreaded_device` | 1 | at start: creates the D3D11 device without the single-thread flag; the overhaul's worker threads need it |
 | `[device] wrap_context` | 1 | at start: gives the game forwarding wrappers of the device and context |
 | `[cpu] ccd` | auto | which CPUs the game's threads use: `auto` gives the main thread the best core of the CPU's largest cache group (the 3D V-Cache CCD of an X3D chip, the P-cores of an Intel chip) and keeps the other threads on that group when it leaves them 10 CPUs, else on every CPU; a number picks a cache group (0 holds CPU 0); `off` leaves the other threads to Windows, and the main thread still gets its core. `cache`, the old default, means `auto` |
+| `[campthrottle] hz` | 30 | at start: how many times a second each of your settlements on the campaign map checks whether it can build something; a whole number, 1 or more (anything else keeps 30). Lower gives more frames on a large empire, and the answer can be up to that fraction of a second old. 0 turns this off and checks every frame, as the game does |
 | `[s2prof] console` | 0 | 1 opens a window that shows the log live |
 | `[s2prof] ignore_build_check` | 0 | 1 skips the warning shown when `empire.retail.x64.dll` is a different build or another mod's copy of it; each fix still checks the engine code it depends on |
 
@@ -146,6 +147,8 @@ On the campaign map:
 |---|---|
 | `camprelations` | remembers where each faction's record is: every character on the map searched the whole faction list for it several times a frame |
 | `campappearance` | remembers which appearance entry each character's model uses instead of searching the character's appearance set again every frame |
+| `campeffects` | keeps each region's list of effects between frames: every building slot of your settlements on screen rebuilt the whole list every frame to ask whether it could build something. A list is reused only while everything it is made from is unchanged, byte for byte |
+| `campthrottle` | each of those slots asks whether it can build something at most `[campthrottle] hz` times a second (30 by default) and reuses its last answer in between, so the answer can be up to that fraction of a second old |
 | `cailookup` | in the end turn, remembers where the AI finds each faction's value for another faction: rating how two factions stand, it averages over every other faction and searched two faction tables for each, so the end turn's cost grew with the cube of the faction count (the result is the same) |
 | `textequal` | in the end turn, compares the AI's names with fixed text in place, instead of copying the text through the engine's locked memory pool for every comparison (the answer is the same) |
 
@@ -212,6 +215,7 @@ Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 | `[window] borderless` | 0 | at start: 1 runs the game's windowed mode in a borderless window that covers its monitor, at the resolution set in the game's options, scaled to fit; set the game to windowed, not fullscreen |
 | `[window] clip_cursor` | 1 | with borderless: keeps the cursor on the game's monitor while the game has focus, so edge scrolling works with several monitors |
 | `[vram] enabled` | 1 | at start: gives the game the graphics card's video memory, up to the 4095 MB it can count, instead of the 2.9 GB a 32-bit game is told; 0 keeps the game's figure |
+| `[campthrottle] hz` | 30 | at start: how many times a second each of your settlements on the campaign map checks whether it can build something; a whole number, 1 or more (anything else keeps 30). Lower gives more frames on a large empire, and the answer can be up to that fraction of a second old. 0 turns this off and checks every frame, as the game does |
 | `[s2prof] console` | 0 | 1 opens a window that shows the log live |
 | `[s2prof] ignore_build_check` | 0 | 1 skips the warning shown when `empire.retail.dll` is a different build or another mod's copy of it; each fix still checks the engine code it depends on |
 
@@ -253,6 +257,8 @@ On the campaign map:
 |---|---|
 | `camprelations` | remembers where each faction's record is: every character on the map searched the whole faction list for it several times a frame |
 | `campappearance` | remembers which appearance entry each character's model uses instead of searching the character's appearance set again every frame |
+| `campeffects` | keeps each region's list of effects between frames: every building slot of your settlements on screen rebuilt the whole list every frame to ask whether it could build something. A list is reused only while everything it is made from is unchanged, byte for byte |
+| `campthrottle` | each of those slots asks whether it can build something at most `[campthrottle] hz` times a second (30 by default) and reuses its last answer in between, so the answer can be up to that fraction of a second old |
 | `cailookup` | in the end turn, remembers where the AI finds each faction's value for another faction: rating how two factions stand, it averages over every other faction and searched two faction tables for each, so the end turn's cost grew with the cube of the faction count (the result is the same) |
 | `textequal` | in the end turn, compares the AI's names with fixed text in place, instead of copying the text through the engine's locked memory pool for every comparison (the answer is the same) |
 

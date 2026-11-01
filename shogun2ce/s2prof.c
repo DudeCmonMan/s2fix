@@ -38,7 +38,7 @@
 #define THREAD_BASIC_INFORMATION_CLASS 0
 #define THREAD_WIN32_START_ADDRESS_CLASS 9
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
-#define MAX_SWITCHES 64
+#define MAX_SWITCHES 96
 #define MAX_FIXES 64
 #define MAX_FIX_NAME 32
 // The render overhaul is one of the fixes: its switch follows Apply Fixes.
