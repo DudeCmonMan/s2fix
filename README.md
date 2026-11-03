@@ -288,6 +288,12 @@ When loading:
 | `lookupcache` | remembers, for the rest of the session, each loose file in `data\` or a mod's folder that Windows said is not there, so the game's repeated checks for it, in loads and end turns, are answered from memory; loose files that exist (mods) are always found |
 | `pathsplit` | builds a battle's pathfinding map on several threads: its searches over the map's triangles are split across helper threads, and the game's second and third tries run alongside the first (the result is the same) |
 
+Crashes in the game's own code:
+
+| Fix | What it does |
+|---|---|
+| `soundfilter` | stops the crash at `mss32.dll+0x16eb9`, in the game's sound library: asked to filter a block with no samples while a sound's filter is changing, the library runs off the end of its buffer. That empty block is now skipped; it has nothing to filter, so the sound is the same |
+
 ## Privacy and safety
 
 The fixes make no network connections and have no remote access. They read `s2prof.ini` and the game's own memory, and
