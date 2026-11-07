@@ -75,6 +75,15 @@ jobs:
           (cd shogun2og && "$RUNNER_TEMP/test_soundfilter_og.exe")
           x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -D__USE_MINGW_ANSI_STDIO=1 -static -Ishogun2ce -o "$RUNNER_TEMP/test_campthrottle_ce.exe" shogun2ce/tests/test_campthrottle.c
           (cd shogun2ce && "$RUNNER_TEMP/test_campthrottle_ce.exe")
+          i686-w64-mingw32-gcc $OG_FLAGS -o "$RUNNER_TEMP/test_camplabels_og.exe" shogun2og/tests/test_camplabels.c
+          (cd shogun2og && "$RUNNER_TEMP/test_camplabels_og.exe")
+          # Both include shogun2og/tests/test_effectlists.h, the engine's effect lists.
+          i686-w64-mingw32-gcc $OG_FLAGS -o "$RUNNER_TEMP/test_camphonour_og.exe" shogun2og/tests/test_camphonour.c
+          (cd shogun2og && "$RUNNER_TEMP/test_camphonour_og.exe")
+          i686-w64-mingw32-gcc $OG_FLAGS -o "$RUNNER_TEMP/test_campeffects_og.exe" shogun2og/tests/test_campeffects.c
+          (cd shogun2og && "$RUNNER_TEMP/test_campeffects_og.exe")
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -D__USE_MINGW_ANSI_STDIO=1 -static -Ishogun2ce -o "$RUNNER_TEMP/test_camplabels_ce.exe" shogun2ce/tests/test_camplabels.c
+          (cd shogun2ce && "$RUNNER_TEMP/test_camplabels_ce.exe")
           i686-w64-mingw32-gcc $OG_FLAGS -municode -o "$RUNNER_TEMP/test_borderless_og.exe" shogun2og/tests/test_borderless.c
           mkdir -p "$RUNNER_TEMP/borderless/fixes"
           cp shogun2og/modules/borderless.dll "$RUNNER_TEMP/borderless/fixes/"

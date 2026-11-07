@@ -10,6 +10,8 @@
 // something now, and each ask rebuilds its region's whole effect list, merging and summing up to seven stored lists.
 // The sum depends only on those lists' contents, so it is kept per region and reused while every list is byte for byte
 // what it was when the engine built it. The candidate check that reads it (treasury, requirements) still runs each time.
+// Every settlement's map marker and label also project the settlement's figures from the same sum, once per model step
+// and label; on those two display paths the projection takes a copy of the cached sum, and the rest of it runs as is.
 #define ACTION_CHECK_RVA 0x7818d0
 #define EFFECT_OWNER_RVA 0x7f4ae0
 #define EFFECT_SUM_RVA 0x85be10
@@ -18,6 +20,12 @@
 #define TIER_LIST_RVA 0x5d7510
 #define FREE_EFFECTS_RVA 0x4ad200
 #define ENGINE_FREE_RVA 0x0f04d0
+#define STATUS_RVA 0x8b3920
+#define UNREST_TEST_RVA 0x8b9cd0
+#define PROJECTION_RVA 0x87cbe0
+#define RECORD_COPY_RVA 0x764090
+#define APPLY_RVA 0x8e4960
+#define LIST_COPY_RVA 0x55fae0
 
 #define OWNER_LISTS_A 0x144
 #define OWNER_LISTS_B 0x184
@@ -33,12 +41,22 @@
 #define FACTION_BRANCH_VALUE 0x6e8
 #define LINKED_TIER 0x26c
 #define LINKED_LIST 0x498
+#define ECONOMY_OWNER 0x4
+#define ECONOMY_RECORD 0x24
+
+#define PROJECTION_BYTES 0x5c
+#define PROJECTION_ENTRY_COUNT 0x24
+#define PROJECTION_ENTRIES 0x28
+#define PROJECTION_ENTRY_BYTES 0x98
+#define PROJECTION_PAIR_COUNT 0x48
+#define PROJECTION_PAIRS 0x4c
+#define PROJECTION_PAIR_BYTES 8
 
 #define ENTRY_BYTES 20
 #define CANDIDATE_BYTES 24
 #define CANDIDATE_DIFFERS 0x14
 #define MAX_SOURCES 7
-#define SLOTS 128
+#define SLOTS 256
 // Rounding, flush-to-zero and denormals-are-zero: the sums' float additions depend on them.
 #define MXCSR_ROUNDING 0xe040
 #define REPORT_MS 10000
@@ -51,6 +69,12 @@ typedef const BYTE *(__attribute__((thiscall)) *TierListFn)(BYTE *tier);
 typedef void(__attribute__((thiscall)) *FreeEffectsFn)(BYTE *list);
 typedef void(__cdecl *EngineFreeFn)(void *block);
 typedef uintptr_t(__attribute__((thiscall)) *CheckFn)(BYTE *context);
+typedef uintptr_t(__attribute__((thiscall)) *StatusFn)(BYTE *self, BYTE *settlement);
+typedef uintptr_t(__attribute__((thiscall)) *UnrestFn)(BYTE *settlement);
+typedef BYTE *(__attribute__((thiscall)) *ProjectionFn)(BYTE *economy, BYTE *projection);
+typedef void(__attribute__((thiscall)) *RecordCopyFn)(BYTE *projection, const BYTE *record);
+typedef void(__attribute__((thiscall)) *ApplyFn)(BYTE *projection, const BYTE *effects, uint32_t first, uint32_t second, uint32_t third);
+typedef BYTE *(__attribute__((thiscall)) *ListCopyFn)(BYTE *out, const BYTE *list);
 
 typedef struct {
     const BYTE *lists[MAX_SOURCES];
@@ -70,7 +94,7 @@ typedef struct {
 
 // Plain counters: they are only written on the main thread.
 typedef struct {
-    LONG64 checks, hits, rebuilds, mismatches, answer_mismatches;
+    LONG64 checks, projections, hits, rebuilds, mismatches, answer_mismatches, projection_mismatches;
 } Stats;
 
 __declspec(dllexport) volatile LONG effects_enabled = 1;
@@ -78,6 +102,13 @@ __declspec(dllexport) volatile LONG verify;
 __declspec(dllexport) volatile Stats effects_stats;
 
 static const BYTE check_prologue[] = {0x83, 0xec, 0x0c, 0x53, 0x56};
+static const BYTE status_prologue[] = {0x83, 0xec, 0x5c, 0x56, 0x8b, 0x74, 0x24, 0x64};
+static const BYTE unrest_prologue[] = {0x56, 0x8b, 0xf1, 0x57, 0x8d, 0x7e, 0x24};
+static const BYTE projection_prologue[] = {0x83, 0xec, 0x0c, 0x56, 0x8b, 0xf1};
+// The projection without the two arrays' pointers and the padding after its byte at +0x40.
+static const struct {
+    BYTE offset, size;
+} projection_fields[] = {{0x00, 0x28}, {0x2c, 0x15}, {0x44, 0x08}, {0x50, 0x0c}};
 static const BYTE empty_list[12];
 static const S2Api *api;
 static CheckFn original_check;
@@ -88,6 +119,13 @@ static BranchValueFn branch_value;
 static TierListFn tier_list;
 static FreeEffectsFn free_effects;
 static EngineFreeFn engine_free;
+static StatusFn original_status;
+static UnrestFn original_unrest;
+static ProjectionFn original_projection;
+static RecordCopyFn copy_record;
+static ApplyFn apply_effects;
+static ListCopyFn copy_list;
+static int display_depth;
 static Entry entries[SLOTS];
 static uint64_t use_clock;
 
@@ -242,16 +280,77 @@ static uintptr_t __attribute__((thiscall)) check_hook(BYTE *context) {
     return any;
 }
 
+static BOOL on_main(void) {
+    return __readfsdword(0x24) == *api->main_thread;
+}
+
+static uintptr_t __attribute__((thiscall)) status_hook(BYTE *self, BYTE *settlement) {
+    BOOL main = on_main();
+    display_depth += main;
+    uintptr_t status = original_status(self, settlement);
+    display_depth -= main;
+    return status;
+}
+
+static uintptr_t __attribute__((thiscall)) unrest_hook(BYTE *settlement) {
+    BOOL main = on_main();
+    display_depth += main;
+    uintptr_t answer = original_unrest(settlement);
+    display_depth -= main;
+    return answer;
+}
+
+static BOOL same_array(const BYTE *a, const BYTE *b, uint32_t count_at, uint32_t data_at, size_t entry_bytes) {
+    size_t size = (size_t)*(const uint32_t *)(a + count_at) * entry_bytes;
+    return !size || equal_bytes(*(BYTE *const *)(a + data_at), *(BYTE *const *)(b + data_at), size);
+}
+
+static void compare_projection(BYTE *economy, const BYTE *projection) {
+    BYTE fresh[PROJECTION_BYTES] = {0};
+    original_projection(economy, fresh);
+    BOOL same = TRUE;
+    for (size_t i = 0; i < sizeof projection_fields / sizeof *projection_fields; i++)
+        same &= !memcmp(fresh + projection_fields[i].offset, projection + projection_fields[i].offset, projection_fields[i].size);
+    same = same && same_array(fresh, projection, PROJECTION_ENTRY_COUNT, PROJECTION_ENTRIES, PROJECTION_ENTRY_BYTES) &&
+           same_array(fresh, projection, PROJECTION_PAIR_COUNT, PROJECTION_PAIRS, PROJECTION_PAIR_BYTES);
+    if (!same) effects_stats.projection_mismatches++;
+    void *entry_data = *(void **)(fresh + PROJECTION_ENTRIES), *pair_data = *(void **)(fresh + PROJECTION_PAIRS);
+    if (pair_data) engine_free(pair_data);
+    if (entry_data) engine_free(entry_data);
+}
+
+// The engine's projection: the settlement's record, the region's effect sum, then the sum applied to the record. The
+// sum is a copy of the cached one, so whatever the rest does with its list, the cache keeps the engine's.
+static BYTE *__attribute__((thiscall)) projection_hook(BYTE *economy, BYTE *projection) {
+    if (!on_main() || !display_depth || !*api->fix_enabled || !effects_enabled) return original_projection(economy, projection);
+    effects_stats.projections++;
+    BYTE *owner = *(BYTE **)(economy + ECONOMY_OWNER);
+    copy_record(projection, economy + ECONOMY_RECORD);
+    const BYTE *cached = cached_effects(owner);
+    BYTE effects[12];
+    if (cached)
+        copy_list(effects, cached);
+    else
+        effect_sum(owner, effects);
+    apply_effects(projection, effects, 0, 0xffffffffu, 0);
+    free_effects(effects);
+    if (verify) compare_projection(economy, projection);
+    return projection;
+}
+
 static DWORD WINAPI report_loop(LPVOID unused) {
     (void)unused;
     Stats last = {0};
     for (;; Sleep(REPORT_MS)) {
         Stats now = effects_stats;
-        LONG64 checks = now.checks - last.checks;
-        if (verify && checks)
-            api->log_line("campeffects: %lld checks a second, %.1f%% of their effect lists from the cache, %lld rebuilt; %lld cached lists differed from the engine's sum, %lld answers from the engine's check",
-                          checks * 1000 / REPORT_MS, 100.0 * (double)(now.hits - last.hits) / (double)checks, now.rebuilds - last.rebuilds,
-                          now.mismatches - last.mismatches, now.answer_mismatches - last.answer_mismatches);
+        LONG64 checks = now.checks - last.checks, projections = now.projections - last.projections;
+        if (verify && (checks || projections))
+            api->log_line("campeffects: %lld build checks and %lld projections a second, %.1f%% of their effect lists from the cache, %lld rebuilt; "
+                          "%lld cached lists differed from the engine's sum, %lld answers from the engine's check, %lld projections from the engine's",
+                          checks * 1000 / REPORT_MS, projections * 1000 / REPORT_MS,
+                          100.0 * (double)(now.hits - last.hits) / (double)(checks + projections), now.rebuilds - last.rebuilds,
+                          now.mismatches - last.mismatches, now.answer_mismatches - last.answer_mismatches,
+                          now.projection_mismatches - last.projection_mismatches);
         last = now;
     }
     return 0;
@@ -269,7 +368,17 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     tier_list = (TierListFn)(api->engine + TIER_LIST_RVA);
     free_effects = (FreeEffectsFn)(api->engine + FREE_EFFECTS_RVA);
     engine_free = (EngineFreeFn)(api->engine + ENGINE_FREE_RVA);
+    copy_record = (RecordCopyFn)(void *)(api->engine + RECORD_COPY_RVA);
+    apply_effects = (ApplyFn)(void *)(api->engine + APPLY_RVA);
+    copy_list = (ListCopyFn)(void *)(api->engine + LIST_COPY_RVA);
     const char *error = api->hook(api->engine + ACTION_CHECK_RVA, check_prologue, sizeof check_prologue, (const void *)check_hook, (void **)&original_check);
+    if (!error)
+        error = api->hook(api->engine + PROJECTION_RVA, projection_prologue, sizeof projection_prologue, (const void *)projection_hook,
+                          (void **)&original_projection);
+    if (!error)
+        error = api->hook(api->engine + STATUS_RVA, status_prologue, sizeof status_prologue, (const void *)status_hook, (void **)&original_status);
+    if (!error)
+        error = api->hook(api->engine + UNREST_TEST_RVA, unrest_prologue, sizeof unrest_prologue, (const void *)unrest_hook, (void **)&original_unrest);
     if (error) return error;
     HANDLE thread = CreateThread(NULL, 0, report_loop, NULL, 0, NULL);
     if (thread) CloseHandle(thread);

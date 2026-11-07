@@ -28,4 +28,9 @@ static const S2Check campeffects_checks[] = {
     {0x5d7510, 0x10, 0x89867f518435abe0ull, 1, "tier list"},
     {0x4ad200, 0x10, 0x38bb39b7d35e03ffull, 1, "effect list free"},
     {0xf04d0, 0x10, 0xbec768ffb3278145ull, 1, "engine free"},
+    {0x87cbe0, 0x44, 0x3a47e4e5287252ccull, 0, "settlement projection"},
+    {0x8b3920, 0xaf, 0xf2e9d61249930d4dull, 0, "settlement map status: its projection call"},
+    {0x8b9cd0, 0x65, 0xf02d2ddfe989ade5ull, 0, "settlement unrest test"},
+    {0x764090, 0x10, 0x23a5f04924086108ull, 1, "projection record copy"},
+    {0x8e4960, 0x10, 0x4aa95677818da30eull, 1, "projection effects applied"},
 };
