@@ -1,5 +1,6 @@
 # Built by build.sh and package.sh.
 *.dll
+*.version.o
 /dist/
 shogun2ce/proxy/d3d11.def
 shogun2og/proxy/d3d11.def

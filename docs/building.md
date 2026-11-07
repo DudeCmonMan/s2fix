@@ -11,4 +11,6 @@ To build yourself, put both MinGW-w64 compilers on the path (`x86_64-w64-mingw32
                  (VERSION=v0.2.1 names them; a local build gets a timestamp)
 ```
 
+Every DLL gets Windows version info (`versioninfo.sh`, with the windres beside each compiler), filled from VERSION: a tag such as v0.5.0 gives 0.5.0.0, a `-pre-release` tag is marked pre-release, and any other build gets 0.0.0.0.
+
 Each game's folder also has its own `build.sh` and `package.sh`. The unit tests are in `shogun2ce/tests/` and `shogun2og/tests/`; `.github/workflows/build.yml` shows how to build and run them.
