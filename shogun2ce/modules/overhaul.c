@@ -49,6 +49,16 @@
 // The target record, saved targets and topology survive a cold reset (save/restore pairs can span an execute).
 #define RENDERER_TARGETS_END 0x23c4
 #define DRAW_ITEM_SIZE 0x48
+// The pass execute's queries (call [rax+slot]) for an effect that draws with another mesh's latest item's vertex streams
+// (effect+0x80, its item at +0x58, the streams at +0x20) or index stream (effect+0x88, +0x58, +0x28).
+#define BORROW_STREAMS_CALL_RVA 0x19f2b29
+#define BORROW_INDEX_CALL_RVA 0x19f2b5f
+#define BORROW_STREAMS_SLOT 0xe8
+#define BORROW_INDEX_SLOT 0xf0
+#define BORROWED_STREAMS_SOURCE 0x80
+#define BORROWED_INDEX_SOURCE 0x88
+#define SOURCE_ITEM 0x58
+#define NEAR_BYTES 0x1000
 #define CHUNKER_VTABLE_RVA 0x23aa9b8
 #define CHUNKER_SIZE 0x28
 // Group-instance mesh chunkers add their mesh (+0x28) and a count to the base chunker.
@@ -2348,6 +2358,36 @@ static BOOL bind_group_view(BYTE *view, BYTE *chunker, const Job *job) {
     return TRUE;
 }
 
+typedef BYTE (*BorrowQueryFn)(BYTE *effect);
+
+// The engine's own choice, so the private item carries copies of whatever the effect would have drawn with.
+static BYTE *drawn_with(BYTE *item, int slot, int source_offset, int field) {
+    BYTE *effect = *(BYTE **)(item + 0x10), *source;
+    if (!((BorrowQueryFn)method(effect, slot))(effect) || !(source = *(BYTE **)(effect + source_offset)) || !(source = *(BYTE **)(source + SOURCE_ITEM)))
+        return *(BYTE **)(item + field);
+    return *(BYTE **)(source + field);
+}
+
+// A worker's private item already carries the borrowed streams; the engine's borrow would map the shared rings.
+static BYTE borrow_query(BYTE *effect, BorrowQueryFn query) {
+    return current_worker() ? 0 : query(effect);
+}
+
+BYTE (*overhaul_borrow_query)(BYTE *effect, BorrowQueryFn query) = borrow_query;
+
+void overhaul_borrow_streams_stub(void);
+void overhaul_borrow_index_stub(void);
+__asm__(".text\n.intel_syntax noprefix\n"
+        ".globl overhaul_borrow_streams_stub\n"
+        "overhaul_borrow_streams_stub:\n"
+        "  mov rdx, qword ptr [rax + 0xe8]\n"
+        "  jmp qword ptr [rip + overhaul_borrow_query]\n"
+        ".globl overhaul_borrow_index_stub\n"
+        "overhaul_borrow_index_stub:\n"
+        "  mov rdx, qword ptr [rax + 0xf0]\n"
+        "  jmp qword ptr [rip + overhaul_borrow_query]\n"
+        ".att_syntax\n");
+
 static void prepare_private_item(Worker *worker, const Job *job) {
     BYTE *item = job_item(job);
     memcpy(worker->item, item, DRAW_ITEM_SIZE);
@@ -2355,7 +2395,8 @@ static void prepare_private_item(Worker *worker, const Job *job) {
     memcpy(worker->chunker, chunker, chunker_size(chunker));
     *(BYTE **)(worker->item + 0x18) = worker->chunker;
     worker->group_mesh_of = bind_group_view(worker->group_mesh, worker->chunker, job) ? *(BYTE **)(item + 0x10) : NULL;
-    BYTE *streams = *(BYTE **)(item + 0x20);
+    BYTE *streams = drawn_with(item, BORROW_STREAMS_SLOT, BORROWED_STREAMS_SOURCE, 0x20);
+    *(BYTE **)(worker->item + 0x20) = streams ? worker->streams : NULL;
     if (streams) {
         memcpy(worker->streams, streams, STREAMS_SIZE);
         uint32_t count = *(uint32_t *)(streams + 0x08);
@@ -2371,13 +2412,10 @@ static void prepare_private_item(Worker *worker, const Job *job) {
         *(BYTE **)worker->streams = worker->stream_entries;
         BYTE **instance_holder = (BYTE **)(worker->streams + 0x10);
         if (*instance_holder) *instance_holder = clone_holder(worker, *instance_holder);
-        *(BYTE **)(worker->item + 0x20) = worker->streams;
     }
-    BYTE *index_stream = *(BYTE **)(item + 0x28);
-    if (index_stream) {
-        memcpy(worker->index_stream, index_stream, INDEX_STREAM_SIZE);
-        *(BYTE **)(worker->item + 0x28) = worker->index_stream;
-    }
+    BYTE *index_stream = drawn_with(item, BORROW_INDEX_SLOT, BORROWED_INDEX_SOURCE, 0x28);
+    *(BYTE **)(worker->item + 0x28) = index_stream ? worker->index_stream : NULL;
+    if (index_stream) memcpy(worker->index_stream, index_stream, INDEX_STREAM_SIZE);
 }
 
 // Main's range draws the engine's items, except a group-instance job, which gets a private item and chunker.
@@ -5507,6 +5545,38 @@ static const char *patch_slots(void **slots, int count, const uint32_t *function
     return NULL;
 }
 
+// A call's 32-bit offset can't reach this module, so the engine's calls go through jumps above its image.
+static BYTE *near_jumps_to(const void *first, const void *second) {
+    IMAGE_NT_HEADERS64 *headers = (IMAGE_NT_HEADERS64 *)(engine + ((IMAGE_DOS_HEADER *)engine)->e_lfanew);
+    uintptr_t at = ((uintptr_t)engine + headers->OptionalHeader.SizeOfImage + 0xffff) & ~(uintptr_t)0xffff;
+    for (; at < (uintptr_t)engine + 0x7f000000; at += 0x10000) {
+        MEMORY_BASIC_INFORMATION info;
+        if (!VirtualQuery((void *)at, &info, sizeof info)) break;
+        if (info.State != MEM_FREE || info.RegionSize < NEAR_BYTES) continue;
+        BYTE *code = VirtualAlloc((void *)at, NEAR_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (!code) continue;
+        static const BYTE jump[6] = {0xff, 0x25, 0, 0, 0, 0};
+        memcpy(code, jump, sizeof jump);
+        *(const void **)(code + sizeof jump) = first;
+        memcpy(code + 16, jump, sizeof jump);
+        *(const void **)(code + 16 + sizeof jump) = second;
+        DWORD old;
+        VirtualProtect(code, NEAR_BYTES, PAGE_EXECUTE_READ, &old);
+        FlushInstructionCache(GetCurrentProcess(), code, NEAR_BYTES);
+        return code;
+    }
+    return NULL;
+}
+
+// call [rax+slot] (6 bytes) becomes a call to the jump, then a nop.
+static const char *patch_borrow_query(uint32_t rva, uint32_t slot, const BYTE *jump) {
+    BYTE *site = engine + rva, expected[6] = {0xff, 0x90}, replacement[6] = {0xe8, 0, 0, 0, 0, 0x90};
+    memcpy(expected + 2, &slot, 4);
+    LONG offset = (LONG)(jump - (site + 5));
+    memcpy(replacement + 1, &offset, 4);
+    return api->patch(site, expected, replacement, sizeof expected);
+}
+
 __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
     const char *mismatch = S2_CHECK_ENGINE(s2, overhaul_checks);
     if (mismatch) return mismatch;
@@ -5593,6 +5663,10 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
     void *const renderer_hook[1] = {(void *)get_renderer_hook};
     if (!error) error = patch_slots(draw_slots, DRAW_SLOTS, expected_draw_rvas, draw_hooks, original_draws);
     if (!error) error = patch_slots(get_renderer_slot, 1, get_renderer_rva, renderer_hook, NULL);
+    BYTE *jumps = error ? NULL : near_jumps_to((const void *)overhaul_borrow_streams_stub, (const void *)overhaul_borrow_index_stub);
+    if (!error && !jumps) error = "no memory free within reach of the engine";
+    if (!error) error = patch_borrow_query(BORROW_STREAMS_CALL_RVA, BORROW_STREAMS_SLOT, jumps);
+    if (!error) error = patch_borrow_query(BORROW_INDEX_CALL_RVA, BORROW_INDEX_SLOT, jumps + 16);
     if (error) return error;
     api->register_switch("overhaul", &overhaul_enabled, overhaul_report);
     api->register_switch("prepare", &overhaul_prepare_split, prepare_report);

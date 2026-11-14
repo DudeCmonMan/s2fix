@@ -70,6 +70,15 @@
 #define CHUNKER_VTABLE_RVA 0x1749eb0
 #define CONTEXT_SIZE 0x64
 #define DRAW_ITEM_SIZE 0x24
+// The pass execute's queries (mov eax,[eax+slot]; call eax) for an effect that draws with another item's vertex streams
+// (effect+0x50, its item at +0x38, the streams at +0x10) or index stream (effect+0x54, +0x38, +0x14).
+#define BORROW_STREAMS_CALL_RVA 0x140c185
+#define BORROW_INDEX_CALL_RVA 0x140c1ab
+#define BORROW_STREAMS_SLOT 0x70
+#define BORROW_INDEX_SLOT 0x74
+#define BORROWED_STREAMS_SOURCE 0x50
+#define BORROWED_INDEX_SOURCE 0x54
+#define SOURCE_ITEM 0x38
 #define MAX_CHUNKER_SIZE 0x24
 #define STREAMS_SIZE 0x1c
 #define INDEX_STREAM_SIZE 0x10
@@ -1711,6 +1720,40 @@ static BOOL bind_group_view(BYTE *view, BYTE *chunker, const Job *job) {
     return TRUE;
 }
 
+typedef BYTE(__attribute__((thiscall)) *BorrowQueryFn)(BYTE *effect);
+
+// The engine's own choice, so the private item carries copies of whatever the effect would have drawn with.
+static BYTE *drawn_with(BYTE *item, int slot, int source_offset, int field) {
+    BYTE *effect = *(BYTE **)(item + 0x8), *source;
+    if (!((BorrowQueryFn)method(effect, slot))(effect) || !(source = *(BYTE **)(effect + source_offset)) || !(source = *(BYTE **)(source + SOURCE_ITEM)))
+        return *(BYTE **)(item + field);
+    return *(BYTE **)(source + field);
+}
+
+// A worker's private item already carries the borrowed streams; the engine's borrow would map the shared rings.
+static BYTE __attribute__((thiscall)) borrow_query(BYTE *effect, BorrowQueryFn query) {
+    return current_worker() ? 0 : query(effect);
+}
+
+BYTE(__attribute__((thiscall)) * overhaul_borrow_query)(BYTE *effect, BorrowQueryFn query) = borrow_query;
+
+void overhaul_borrow_streams_stub(void);
+void overhaul_borrow_index_stub(void);
+__asm__(".text\n.intel_syntax noprefix\n"
+        ".globl _overhaul_borrow_streams_stub\n"
+        "_overhaul_borrow_streams_stub:\n"
+        "  mov eax, dword ptr [eax + 0x70]\n"
+        "  jmp 1f\n"
+        ".globl _overhaul_borrow_index_stub\n"
+        "_overhaul_borrow_index_stub:\n"
+        "  mov eax, dword ptr [eax + 0x74]\n"
+        "1:\n"
+        "  pop edx\n"
+        "  push eax\n"
+        "  push edx\n"
+        "  jmp dword ptr [_overhaul_borrow_query]\n"
+        ".att_syntax\n");
+
 static void prepare_private_item(Worker *worker, const Job *job) {
     BYTE *item = job_item(job);
     memcpy(worker->item, item, DRAW_ITEM_SIZE);
@@ -1718,7 +1761,8 @@ static void prepare_private_item(Worker *worker, const Job *job) {
     memcpy(worker->chunker, chunker, chunker_size(chunker));
     *(BYTE **)(worker->item + 0xc) = worker->chunker;
     worker->group_mesh_of = bind_group_view(worker->group_mesh, worker->chunker, job) ? *(BYTE **)(item + 0x8) : NULL;
-    BYTE *streams = *(BYTE **)(item + 0x10);
+    BYTE *streams = drawn_with(item, BORROW_STREAMS_SLOT, BORROWED_STREAMS_SOURCE, 0x10);
+    *(BYTE **)(worker->item + 0x10) = streams ? worker->streams : NULL;
     if (streams) {
         memcpy(worker->streams, streams, STREAMS_SIZE);
         uint32_t count = *(uint32_t *)(streams + 0x4);
@@ -1734,13 +1778,10 @@ static void prepare_private_item(Worker *worker, const Job *job) {
         *(BYTE **)worker->streams = worker->stream_entries;
         BYTE **instance_holder = (BYTE **)(worker->streams + 0x8);
         if (*instance_holder) *instance_holder = clone_holder(worker, *instance_holder);
-        *(BYTE **)(worker->item + 0x10) = worker->streams;
     }
-    BYTE *index_stream = *(BYTE **)(item + 0x14);
-    if (index_stream) {
-        memcpy(worker->index_stream, index_stream, INDEX_STREAM_SIZE);
-        *(BYTE **)(worker->item + 0x14) = worker->index_stream;
-    }
+    BYTE *index_stream = drawn_with(item, BORROW_INDEX_SLOT, BORROWED_INDEX_SOURCE, 0x14);
+    *(BYTE **)(worker->item + 0x14) = index_stream ? worker->index_stream : NULL;
+    if (index_stream) memcpy(worker->index_stream, index_stream, INDEX_STREAM_SIZE);
 }
 
 // A group-instance job gets a private item and chunker pointing at its mesh copy; others draw the engine's items.
@@ -2976,6 +3017,13 @@ static const char *patch_slot(void **slot, void *replacement, void **original) {
     return api->patch((BYTE *)slot, file_bytes, wanted, 4);
 }
 
+static const char *patch_borrow_query(uint32_t rva, BYTE slot, void (*stub)(void)) {
+    BYTE *site = engine + rva, expected[5] = {0x8b, 0x40, slot, 0xff, 0xd0}, replacement[5] = {0xe8};
+    LONG offset = (LONG)((BYTE *)(void *)stub - (site + 5));
+    memcpy(replacement + 1, &offset, 4);
+    return api->patch(site, expected, replacement, 5);
+}
+
 __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
     const char *mismatch = S2_CHECK_ENGINE(s2, overhaul_checks);
     if (mismatch) return mismatch;
@@ -3050,6 +3098,8 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *s2) {
         error = api->hook(engine + BEGIN_BUCKET_RVA, begin_bucket_prologue, sizeof begin_bucket_prologue, (const void *)begin_bucket_hook,
                           (void **)&original_begin_bucket);
     if (!error) error = api->patch(kick_call, expected_call, wanted_call, 5);
+    if (!error) error = patch_borrow_query(BORROW_STREAMS_CALL_RVA, BORROW_STREAMS_SLOT, overhaul_borrow_streams_stub);
+    if (!error) error = patch_borrow_query(BORROW_INDEX_CALL_RVA, BORROW_INDEX_SLOT, overhaul_borrow_index_stub);
     void *const draw_hooks[DRAW_SLOTS] = {(void *)draw_hook, (void *)draw_indexed_hook, (void *)draw_indexed_instanced_hook, (void *)draw_instanced_hook};
     for (int i = 0; i < DRAW_SLOTS && !error; i++) error = patch_slot(&draw_slots[i], draw_hooks[i], &original_draws[i]);
     if (!error) error = patch_slot(get_renderer_slot, (void *)get_renderer_hook, NULL);

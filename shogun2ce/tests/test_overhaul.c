@@ -189,6 +189,85 @@ static void lookalike_parameter(void) {
           "the snapshot holds the shadows' values");
 }
 
+static BYTE borrows_flag;
+
+static BYTE borrows(BYTE *object) {
+    (void)object;
+    return borrows_flag;
+}
+
+// As the pass execute calls it: rax the effect's vtable, rcx the effect.
+static BYTE call_query_stub(void (*stub)(void), void **vtable, BYTE *object) {
+    uint64_t result;
+    __asm__ volatile("mov %%rsp, %%r12\n\tand $-16, %%rsp\n\tsub $32, %%rsp\n\tcall *%3\n\tmov %%r12, %%rsp"
+                     : "=a"(result), "+c"(object)
+                     : "0"(vtable), "r"(stub)
+                     : "rdx", "r8", "r9", "r10", "r11", "r12", "memory", "cc");
+    return (BYTE)result;
+}
+
+static BYTE *fake_streams(uint64_t offset, BYTE *holder) {
+    BYTE *streams = calloc(1, STREAMS_SIZE), *entries = calloc(1, STREAM_ENTRY_SIZE);
+    *(BYTE **)entries = holder;
+    *(BYTE **)streams = entries;
+    *(uint32_t *)(streams + 0x08) = 1;
+    *(uint64_t *)(streams + 0x18) = offset;
+    return streams;
+}
+
+static BYTE *fake_index_stream(uint32_t start) {
+    BYTE *index_stream = calloc(1, INDEX_STREAM_SIZE);
+    *(uint32_t *)(index_stream + 0x8) = start;
+    return index_stream;
+}
+
+// An effect that borrows draws with another item's streams, which on a worker were the engine's shared rings (s2fix
+// issue 12): the private item carries the source's streams instead, and the engine's query then says no on workers.
+static void borrowed_streams(void) {
+    running = "a worker's item whose effect borrows streams";
+    static void *borrowing_vtable[0xf8 / 8];
+    borrowing_vtable[BORROW_STREAMS_SLOT / 8] = borrowing_vtable[BORROW_INDEX_SLOT / 8] = (void *)borrows;
+    BYTE *effect = calloc(1, 0xa0), *source = calloc(1, 0x80), *chunker = calloc(1, CHUNKER_SIZE), *own_holder = calloc(1, 0x10), *their_holder = calloc(1, 0x10);
+    BYTE *item = calloc(1, DRAW_ITEM_SIZE), *source_item = calloc(1, DRAW_ITEM_SIZE);
+    *(void ***)effect = borrowing_vtable;
+    *(BYTE **)(effect + BORROWED_STREAMS_SOURCE) = *(BYTE **)(effect + BORROWED_INDEX_SOURCE) = source;
+    *(BYTE **)(source + SOURCE_ITEM) = source_item;
+    *(BYTE **)chunker = engine + CHUNKER_VTABLE_RVA;
+    *(BYTE **)(item + 0x10) = effect;
+    *(BYTE **)(item + 0x18) = chunker;
+    *(BYTE **)(item + 0x20) = fake_streams(1, own_holder);
+    *(BYTE **)(item + 0x28) = fake_index_stream(10);
+    *(BYTE **)(source_item + 0x20) = fake_streams(2, their_holder);
+    *(BYTE **)(source_item + 0x28) = fake_index_stream(20);
+    Worker *worker = calloc(1, sizeof *worker);
+    BYTE *group = item;
+    Job job = {.object = (BYTE *)&group, .kind = JOB_BATCH};
+
+    borrows_flag = 1;
+    prepare_private_item(worker, &job);
+    BYTE *streams = *(BYTE **)(worker->item + 0x20), *index_stream = *(BYTE **)(worker->item + 0x28);
+    check(streams == worker->streams && *(uint64_t *)(streams + 0x18) == 2 && **(BYTE ***)streams == their_holder,
+          "a borrowing item's private copy carries the source item's vertex streams");
+    check(index_stream == worker->index_stream && *(uint32_t *)(index_stream + 0x8) == 20, "and the source item's index stream");
+
+    borrows_flag = 0;
+    prepare_private_item(worker, &job);
+    check(*(uint64_t *)(worker->streams + 0x18) == 1 && *(BYTE **)worker->stream_entries == own_holder && *(uint32_t *)(worker->index_stream + 0x8) == 10,
+          "an item that doesn't borrow keeps its own streams");
+
+    borrows_flag = 1;
+    *(BYTE **)(source + SOURCE_ITEM) = NULL;
+    prepare_private_item(worker, &job);
+    check(*(uint64_t *)(worker->streams + 0x18) == 1 && *(uint32_t *)(worker->index_stream + 0x8) == 10, "a source with no draw item yet leaves its own, as the engine does");
+
+    TlsSetValue(tls_index, worker);
+    check(!call_query_stub(overhaul_borrow_streams_stub, borrowing_vtable, effect) && !call_query_stub(overhaul_borrow_index_stub, borrowing_vtable, effect),
+          "on a worker both borrow queries answer no");
+    TlsSetValue(tls_index, NULL);
+    check(call_query_stub(overhaul_borrow_streams_stub, borrowing_vtable, effect) && call_query_stub(overhaul_borrow_index_stub, borrowing_vtable, effect),
+          "elsewhere they are the effect's own answer");
+}
+
 int main(int argc, char **argv) {
     int only = argc > 1 ? atoi(argv[1]) : 0;
     AddVectoredExceptionHandler(1, fault);
@@ -205,6 +284,7 @@ int main(int argc, char **argv) {
     if (!only || only == 1) stale_learned();
     if (!only || only == 2) stale_reference();
     if (!only || only == 3) lookalike_parameter();
+    if (!only || only == 4) borrowed_streams();
     printf("test_overhaul: %d checks, %d failures\n", checks, failures);
     return failures != 0;
 }
