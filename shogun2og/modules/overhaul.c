@@ -1771,7 +1771,8 @@ static void prepare_private_item(Worker *worker, const Job *job) {
             __builtin_trap();
         }
         memcpy(worker->stream_entries, *(BYTE **)streams, count * STREAM_ENTRY_SIZE);
-        for (uint32_t i = 0; i < count; i++) {
+        // A borrower only binds the source's vertices, as they are in the engine's buffers; its instances are its own.
+        for (uint32_t i = 0; streams == *(BYTE **)(item + 0x10) && i < count; i++) {
             BYTE **holder = (BYTE **)(worker->stream_entries + i * STREAM_ENTRY_SIZE);
             if (*holder) *holder = clone_holder(worker, *holder);
         }

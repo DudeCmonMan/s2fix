@@ -215,6 +215,11 @@ static BYTE __attribute__((thiscall)) borrows(BYTE *object) {
     return borrows_flag;
 }
 
+static BYTE __attribute__((thiscall)) answers_two(BYTE *object) {
+    (void)object;
+    return 2;
+}
+
 // As the pass execute calls it: eax the effect's vtable, ecx the effect.
 static BYTE call_query_stub(void (*stub)(void), void **vtable, BYTE *object) {
     uint32_t result;
@@ -222,13 +227,20 @@ static BYTE call_query_stub(void (*stub)(void), void **vtable, BYTE *object) {
     return (BYTE)result;
 }
 
-static BYTE *fake_streams(uint32_t offset, BYTE *holder) {
+static BYTE *fake_streams(uint32_t offset, BYTE *holder, BYTE *instances) {
     BYTE *streams = calloc(1, STREAMS_SIZE), *entries = calloc(1, STREAM_ENTRY_SIZE);
     *(BYTE **)entries = holder;
     *(BYTE **)streams = entries;
     *(uint32_t *)(streams + 0x4) = 1;
+    *(BYTE **)(streams + 0x8) = instances;
     *(uint32_t *)(streams + 0xc) = offset;
     return streams;
+}
+
+static BYTE *fake_ring(uint32_t vtable_rva) {
+    BYTE *ring = calloc(1, 0x10);
+    *(BYTE **)ring = engine + vtable_rva;
+    return ring;
 }
 
 static BYTE *fake_index_stream(uint32_t start) {
@@ -243,7 +255,9 @@ static void borrowed_streams(void) {
     running = "a worker's item whose effect borrows streams";
     static void *borrowing_vtable[0x78 / 4];
     borrowing_vtable[BORROW_STREAMS_SLOT / 4] = borrowing_vtable[BORROW_INDEX_SLOT / 4] = (void *)borrows;
-    BYTE *effect = calloc(1, 0x60), *source = calloc(1, 0x40), *chunker = calloc(1, 0x18), *own_holder = calloc(1, 0x10), *their_holder = calloc(1, 0x10);
+    BYTE *effect = calloc(1, 0x60), *source = calloc(1, 0x40), *chunker = calloc(1, 0x18);
+    BYTE *own_holder = fake_ring(GEOMETRY_RING_VTABLE_RVA), *their_holder = fake_ring(GEOMETRY_RING_VTABLE_RVA), *instances = fake_ring(INSTANCE_RING_VTABLE_RVA);
+    BYTE *own_copy = calloc(1, 0x10), *their_copy = calloc(1, 0x10), *instances_copy = calloc(1, 0x10);
     BYTE *item = calloc(1, DRAW_ITEM_SIZE), *source_item = calloc(1, DRAW_ITEM_SIZE);
     *(void ***)effect = borrowing_vtable;
     *(BYTE **)(effect + BORROWED_STREAMS_SOURCE) = *(BYTE **)(effect + BORROWED_INDEX_SOURCE) = source;
@@ -251,25 +265,30 @@ static void borrowed_streams(void) {
     *(BYTE **)chunker = engine + CHUNKER_VTABLE_RVA;
     *(BYTE **)(item + 0x8) = effect;
     *(BYTE **)(item + 0xc) = chunker;
-    *(BYTE **)(item + 0x10) = fake_streams(1, own_holder);
+    *(BYTE **)(item + 0x10) = fake_streams(1, own_holder, instances);
     *(BYTE **)(item + 0x14) = fake_index_stream(10);
-    *(BYTE **)(source_item + 0x10) = fake_streams(2, their_holder);
+    *(BYTE **)(source_item + 0x10) = fake_streams(2, their_holder, instances);
     *(BYTE **)(source_item + 0x14) = fake_index_stream(20);
     Worker *worker = calloc(1, sizeof *worker);
+    worker->clones[0] = (Clone){.original = own_holder, .copy = own_copy};
+    worker->clones[1] = (Clone){.original = their_holder, .copy = their_copy};
+    worker->clones[2] = (Clone){.original = instances, .copy = instances_copy};
+    worker->clone_count = 3;
     BYTE *group = item;
     Job job = {.object = (BYTE *)&group, .kind = JOB_BATCH};
 
     borrows_flag = 1;
     prepare_private_item(worker, &job);
     BYTE *streams = *(BYTE **)(worker->item + 0x10), *index_stream = *(BYTE **)(worker->item + 0x14);
-    check(streams == worker->streams && *(uint32_t *)(streams + 0xc) == 2 && **(BYTE ***)streams == their_holder,
-          "a borrowing item's private copy carries the source item's vertex streams");
+    check(streams == worker->streams && *(uint32_t *)(streams + 0xc) == 2 && **(BYTE ***)streams == their_holder && *(BYTE **)(streams + 0x8) == instances_copy,
+          "a borrowing item's private copy carries the source item's vertex streams: its vertices as they are, its instances in the worker's ring");
     check(index_stream == worker->index_stream && *(uint32_t *)(index_stream + 0x4) == 20, "and the source item's index stream");
 
     borrows_flag = 0;
     prepare_private_item(worker, &job);
-    check(*(uint32_t *)(worker->streams + 0xc) == 1 && *(BYTE **)worker->stream_entries == own_holder && *(uint32_t *)(worker->index_stream + 0x4) == 10,
-          "an item that doesn't borrow keeps its own streams");
+    check(*(uint32_t *)(worker->streams + 0xc) == 1 && *(BYTE **)worker->stream_entries == own_copy && *(BYTE **)(worker->streams + 0x8) == instances_copy &&
+              *(uint32_t *)(worker->index_stream + 0x4) == 10,
+          "an item that doesn't borrow keeps its own streams, its rings the worker's");
 
     borrows_flag = 1;
     *(BYTE **)(source + SOURCE_ITEM) = NULL;
@@ -285,6 +304,9 @@ static void borrowed_streams(void) {
     ranges_running = 0;
     check(call_query_stub(overhaul_borrow_streams_stub, borrowing_vtable, effect) && call_query_stub(overhaul_borrow_index_stub, borrowing_vtable, effect),
           "elsewhere they are the effect's own answer");
+    borrowing_vtable[BORROW_INDEX_SLOT / 4] = (void *)answers_two;
+    check(call_query_stub(overhaul_borrow_streams_stub, borrowing_vtable, effect) == 1 && call_query_stub(overhaul_borrow_index_stub, borrowing_vtable, effect) == 2,
+          "each stub asks its own slot");
     worker_count = 0;
     workers[0] = NULL;
 }
