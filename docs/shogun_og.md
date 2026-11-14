@@ -18,13 +18,11 @@ fixes\           one DLL per fix
 
 The game loads `d3d11.dll` only in DirectX 11 mode, as it creates its device. It loads `s2prof.dll`, which holds the game's device creation until the fixes are installed. If s2fix is loaded later (injected while the game runs), a message says that some fixes are off for that session.
 
-## Borderless windowed
+## Borderless fullscreen
 
-The game itself only has a framed window or exclusive fullscreen. s2fix can run it borderless instead, covering the whole monitor. The game renders at the resolution set in its options and is scaled to fill the screen, and a resolution change applies at once. A resolution with another aspect ratio than the monitor's is stretched:
+The game itself only has a framed window or exclusive fullscreen, and exclusive fullscreen can't use the flip-model swap chain s2fix gives the game. So s2fix runs it borderless, covering the whole monitor, whether the game's options say fullscreen or windowed. The game renders at the resolution set in its options and is scaled to fill the screen, and a resolution change applies at once. A resolution with another aspect ratio than the monitor's is stretched. The game's own fullscreen setting is left as it is, so its options may still show fullscreen.
 
-1. In the game's options, choose windowed mode.
-2. In `s2prof.ini`, set `borderless=1` under `[window]`.
-3. Restart the game.
+To turn it off, set `borderless_fullscreen=0` under `[window]` in `s2prof.ini` and restart the game. With it off, `borderless=1` still makes only the game's windowed mode borderless, as in earlier versions.
 
 The cursor stays on the game's monitor while the game has focus, so edge scrolling works with several monitors. Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
 
@@ -40,7 +38,8 @@ Settings marked "at start" apply when the game starts. The hotkeys don't switch 
 | `[flipmodel] buffers` | 3 | at start: flip-model back buffers, 2 to 4 |
 | `[flipmodel] tearing` | 1 | at start: allows tearing (an uncapped frame rate, variable refresh in a window) when Windows supports it |
 | `[flipmodel] latency` | 2 | at start: at most this many frames queued, waiting for room after each Present instead of blocking inside it; 0 keeps Windows' 3 |
-| `[window] borderless` | 0 | at start: 1 runs the game's windowed mode in a borderless window that covers its monitor, at the resolution set in the game's options, scaled to fit; set the game to windowed, not fullscreen |
+| `[window] borderless_fullscreen` | 1 | at start: runs the game in a borderless window that covers its monitor whatever its fullscreen setting, at the resolution set in the game's options, scaled to fit; 0 gives the game its own fullscreen and framed window back |
+| `[window] borderless` | 0 | at start, with `borderless_fullscreen=0`: 1 runs only the game's windowed mode in a borderless window, as above |
 | `[window] clip_cursor` | 1 | with borderless: keeps the cursor on the game's monitor while the game has focus, so edge scrolling works with several monitors |
 | `[vram] enabled` | 1 | at start: gives the game the graphics card's video memory, up to the 4095 MB it can count, instead of the 2.9 GB a 32-bit game is told; 0 keeps the game's figure |
 | `[campthrottle] hz` | 30 | at start: how many times a second each of your settlements on the campaign map checks whether it can build something; a whole number, 1 or more (anything else keeps 30). Lower gives more frames on a large empire, and the answer can be up to that fraction of a second old. 0 turns this off and checks every frame, as the game does |
@@ -75,7 +74,7 @@ Settings marked "at start" apply when the game starts. The hotkeys don't switch 
 | `scenelock` | spins longer on the unit emission lock instead of sleeping in the kernel |
 | `flipmodel` | replaces the game's 2011 swap chain, which copies every frame through the desktop compositor and stalls now and then, with a flip-model one: no stalls, tearing allowed (an uncapped frame rate, variable refresh in a window), and at most two frames queued for lower input lag |
 | `vram` | By default, Windows tells Shogun 2 to use a maximum of 3GB (which Shogun 2 uses 95% of), this patch pushes it to as much as your GPU can give (up to 4GB, engine limitation). |
-| `borderless` | with `[window] borderless=1`: borderless windowed mode at the resolution set in the game's options, scaled to the monitor, with the mouse scaled to match (the game itself has only a framed window or exclusive fullscreen) |
+| `borderless` | borderless fullscreen (`[window] borderless_fullscreen`, on by default): the game in a borderless window over its monitor whatever its fullscreen setting, at the resolution set in its options, scaled to the monitor, with the mouse scaled to match (the game itself has only a framed window or exclusive fullscreen, which can't use the flip model) |
 | `cpuplace` | keeps the game's other threads on the main thread's CCD or P-cores, as `[cpu] ccd` sets |
 | `maincore` | gives the main thread the best CPU core and keeps the game's other threads off it |
 | `timerperiod` | holds Windows' 1 ms timer period, which the game otherwise switches on and off around every timestamp |

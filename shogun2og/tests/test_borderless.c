@@ -1,5 +1,5 @@
 // The borderless module against a stand-in engine, on a desktop of its own as the window covers the monitor.
-// Usage: test_borderless.exe <folder holding fixes\borderless.dll and s2prof.ini with [window] borderless=1>
+// Usage: test_borderless.exe <folder holding fixes\borderless.dll>; it writes the folder's s2prof.ini for each run.
 #define _WIN32_WINNT 0x0A00
 #include <windows.h>
 #include <windowsx.h>
@@ -16,14 +16,32 @@
 #define MOVE_WINDOW_IAT_RVA 0x15a1530
 #define PEEK_MESSAGE_IAT_RVA 0x15a163c
 #define GET_CLIENT_RECT_IAT_RVA 0x15a1578
+#define SET_WINDOWED_RVA 0x1424d10
+#define DEVICE_WINDOWED_RVA 0x145fdc8
 #define WINDOWED_STYLE 0x14c20000
 #define FULLSCREEN_STYLE 0x90000000
 #define DESKTOP L"s2fix_borderless_check"
 
 typedef LONG(WINAPI *SetWindowLongFn)(HWND window, int index, LONG value);
+typedef BOOL(WINAPI *SetWindowPosFn)(HWND window, HWND after, int x, int y, int width, int height, UINT flags);
 typedef BOOL(WINAPI *MoveWindowFn)(HWND window, int x, int y, int width, int height, BOOL repaint);
 typedef BOOL(WINAPI *PeekMessageFn)(MSG *message, HWND window, UINT first, UINT last, UINT remove);
 typedef BOOL(WINAPI *GetClientRectFn)(HWND window, RECT *rect);
+typedef void(__attribute__((thiscall)) *SetWindowedFn)(BYTE *settings, DWORD windowed);
+typedef BYTE (*DeviceWindowedFn)(DWORD, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD);
+
+// The engine's windowed setter up to its call into the device, then a return; device creation's windowed argument.
+static const BYTE setter_code[] = {0x8b, 0x54, 0x24, 0x04, 0x38, 0x51, 0x1c, 0x74, 0x07, 0xc6, 0x41,
+                                   0x18, 0x01, 0x88, 0x51, 0x1c, 0xc2, 0x04, 0x00};
+static const BYTE device_code[] = {0x8a, 0x44, 0x24, 0x20, 0xc3};
+
+static const struct {
+    const wchar_t *mode;
+    const char *ini;
+} runs[] = {{L"windowed", "[window]\r\nborderless_fullscreen=0\r\nborderless=1\r\nclip_cursor=0\r\n"},
+            // An ini from before borderless_fullscreen.
+            {L"fullscreen", "[window]\r\nborderless=0\r\nclip_cursor=0\r\n"},
+            {L"late", "[window]\r\nborderless_fullscreen=1\r\nclip_cursor=0\r\n"}};
 
 static BYTE *engine;
 static volatile LONG fix_enabled = 1;
@@ -94,17 +112,27 @@ static LPARAM mouse_through_engine(HWND window, UINT message, int x, int y) {
     return received.lParam;
 }
 
-// The engine's windowed display change, in its order.
-static void change_resolution(HWND window, LONG width, LONG height) {
-    ((SetWindowLongFn)slot(SET_WINDOW_LONG_IAT_RVA))(window, GWL_STYLE, WINDOWED_STYLE);
+static BYTE set_windowed(BYTE windowed) {
+    ((SetWindowedFn)(void *)(engine + SET_WINDOWED_RVA))(settings, windowed);
+    return settings[0x1c];
+}
+
+static BYTE device_windowed(void) {
+    return ((DeviceWindowedFn)(void *)(engine + DEVICE_WINDOWED_RVA))(0, 0, 0, 0, 0, 0, 0, 0);
+}
+
+// The engine's display change, in its order: restyle, then the window sized for the resolution plus the style's frame.
+static void change_resolution(HWND window, LONG style, LONG width, LONG height) {
+    ((SetWindowLongFn)slot(SET_WINDOW_LONG_IAT_RVA))(window, GWL_STYLE, style);
     RECT rect = {0, 0, width, height};
-    AdjustWindowRect(&rect, WINDOWED_STYLE, FALSE);
+    AdjustWindowRect(&rect, style, FALSE);
     ((MoveWindowFn)slot(MOVE_WINDOW_IAT_RVA))(window, 100, 100, rect.right - rect.left, rect.bottom - rect.top, TRUE);
 }
 
-static int child(const wchar_t *folder) {
+static int child(const wchar_t *folder, const wchar_t *mode) {
+    BOOL windowed = !wcscmp(mode, L"windowed"), late = !wcscmp(mode, L"late");
     main_thread = GetCurrentThreadId();
-    engine = VirtualAlloc(NULL, ENGINE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    engine = VirtualAlloc(NULL, ENGINE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     const struct {
         DWORD rva;
@@ -112,8 +140,11 @@ static int child(const wchar_t *folder) {
     } imports[] = {{SET_WINDOW_LONG_IAT_RVA, "SetWindowLongW"}, {SET_WINDOW_POS_IAT_RVA, "SetWindowPos"}, {MOVE_WINDOW_IAT_RVA, "MoveWindow"},
                    {PEEK_MESSAGE_IAT_RVA, "PeekMessageW"}, {GET_CLIENT_RECT_IAT_RVA, "GetClientRect"}};
     for (size_t i = 0; i < sizeof imports / sizeof *imports; i++) *(FARPROC *)(engine + imports[i].rva) = GetProcAddress(user32, imports[i].name);
-    settings[0x1c] = 1;
-    *(void **)(device + 0xbc) = device;
+    memcpy(engine + SET_WINDOWED_RVA, setter_code, sizeof setter_code);
+    memcpy(engine + DEVICE_WINDOWED_RVA, device_code, sizeof device_code);
+    settings[0x1c] = (BYTE)windowed;
+    // Fixes install while the engine holds its first device creation, before the swap chain exists.
+    if (windowed || late) *(void **)(device + 0xbc) = device;
     *(BYTE **)(engine + SETTINGS_RVA) = settings;
     *(BYTE **)(engine + RENDER_DEVICE_RVA) = device;
 
@@ -122,10 +153,11 @@ static int child(const wchar_t *folder) {
     LONG first_width = GetSystemMetrics(SM_CXVIRTUALSCREEN) + 256, first_height = 720;
     *(LONG *)(settings + 0x20) = first_width;
     *(LONG *)(settings + 0x24) = first_height;
+    LONG first_style = windowed ? WINDOWED_STYLE : (LONG)FULLSCREEN_STYLE;
     RECT rect = {0, 0, first_width, first_height};
-    AdjustWindowRect(&rect, WINDOWED_STYLE, FALSE);
-    HWND window = CreateWindowExW(0, window_class.lpszClassName, L"Shogun 2", WINDOWED_STYLE, 50, 50, rect.right - rect.left, rect.bottom - rect.top,
-                                  NULL, NULL, window_class.hInstance, NULL);
+    AdjustWindowRect(&rect, first_style, FALSE);
+    HWND window = CreateWindowExW(0, window_class.lpszClassName, L"Shogun 2", first_style, windowed ? 50 : 0, windowed ? 50 : 0,
+                                  rect.right - rect.left, rect.bottom - rect.top, NULL, NULL, window_class.hInstance, NULL);
     *(HWND *)(engine + WINDOW_RVA) = window;
 
     wchar_t path[MAX_PATH];
@@ -149,37 +181,63 @@ static int child(const wchar_t *folder) {
     LONG monitor_width = monitor.right - monitor.left, monitor_height = monitor.bottom - monitor.top;
     printf("monitor %ldx%ld\n", monitor_width, monitor_height);
 
-    pump(300);
-    expect(covers_monitor(window, monitor), "the window lost its frame and covers its monitor");
-    printf("  the engine made the window for %ldx%ld\n", first_width, first_height);
-    expect(client_is(window, first_width, first_height), "GetClientRect reports the resolution the engine made the window for, wider than the desktop");
-    LPARAM corner = mouse_through_engine(window, WM_MOUSEMOVE, monitor_width - 1, monitor_height - 1);
-    printf("  mouse at %ld,%ld arrives at %d,%d\n", monitor_width - 1, monitor_height - 1, GET_X_LPARAM(corner), GET_Y_LPARAM(corner));
-    expect(GET_X_LPARAM(corner) == first_width - 1 && GET_Y_LPARAM(corner) == first_height - 1,
-           "a mouse message's position is scaled to the resolution: the last pixel to the last");
-    LPARAM wheel = mouse_through_engine(window, WM_MOUSEWHEEL, 900, 500);
-    expect(GET_X_LPARAM(wheel) == 900 && GET_Y_LPARAM(wheel) == 500, "the wheel's screen position is left alone");
+    if (late) {
+        RECT before, after;
+        GetWindowRect(window, &before);
+        expect(settings[0x1c] == 0 && set_windowed(0) == 0 && device_windowed() == 0,
+               "loaded after the game made its display, its fullscreen setting stays until the next start");
+        pump(300);
+        GetWindowRect(window, &after);
+        expect(EqualRect(&before, &after), "and its fullscreen window is left alone");
+    } else if (!windowed) {
+        expect(settings[0x1c] == 1, "with no borderless_fullscreen key, the game's fullscreen setting reads windowed from the start");
+        expect(set_windowed(0) == 1, "the options' fullscreen is taken as windowed");
+        expect(device_windowed() == 1, "device creation takes its windowed argument as windowed");
+        *(void **)(device + 0xbc) = device;
+        pump(300);
+        expect(covers_monitor(window, monitor), "the fullscreen window covers its monitor");
+        expect(client_is(window, first_width, first_height), "GetClientRect reports the resolution the engine made the window for");
+        change_resolution(window, (LONG)FULLSCREEN_STYLE, 1600, 900);
+        ((SetWindowPosFn)slot(SET_WINDOW_POS_IAT_RVA))(window, HWND_TOP, 0, 0, 1600, 900, SWP_SHOWWINDOW);
+        pump(300);
+        expect(covers_monitor(window, monitor), "the engine's fullscreen display change keeps it covering its monitor");
+        expect(client_is(window, 1600, 900), "GetClientRect reports 1600x900");
+        LPARAM corner = mouse_through_engine(window, WM_MOUSEMOVE, monitor_width - 1, monitor_height - 1);
+        expect(GET_X_LPARAM(corner) == 1599 && GET_Y_LPARAM(corner) == 899, "the mouse is scaled to 1600x900");
+    } else {
+        pump(300);
+        expect(covers_monitor(window, monitor), "the window lost its frame and covers its monitor");
+        printf("  the engine made the window for %ldx%ld\n", first_width, first_height);
+        expect(client_is(window, first_width, first_height), "GetClientRect reports the resolution the engine made the window for, wider than the desktop");
+        LPARAM corner = mouse_through_engine(window, WM_MOUSEMOVE, monitor_width - 1, monitor_height - 1);
+        printf("  mouse at %ld,%ld arrives at %d,%d\n", monitor_width - 1, monitor_height - 1, GET_X_LPARAM(corner), GET_Y_LPARAM(corner));
+        expect(GET_X_LPARAM(corner) == first_width - 1 && GET_Y_LPARAM(corner) == first_height - 1,
+               "a mouse message's position is scaled to the resolution: the last pixel to the last");
+        LPARAM wheel = mouse_through_engine(window, WM_MOUSEWHEEL, 900, 500);
+        expect(GET_X_LPARAM(wheel) == 900 && GET_Y_LPARAM(wheel) == 500, "the wheel's screen position is left alone");
 
-    change_resolution(window, 1600, 900);
-    pump(300);
-    expect(covers_monitor(window, monitor), "after a change to 1600x900 the window still covers its monitor");
-    expect(client_is(window, 1600, 900), "GetClientRect reports 1600x900, so the engine takes it as its resolution");
-    LPARAM middle = mouse_through_engine(window, WM_LBUTTONDOWN, monitor_width / 2, monitor_height / 2);
-    expect(GET_X_LPARAM(middle) == monitor_width / 2 * 1600 / monitor_width && GET_Y_LPARAM(middle) == monitor_height / 2 * 900 / monitor_height,
-           "a click is scaled to 1600x900");
-    corner = mouse_through_engine(window, WM_MOUSEMOVE, monitor_width - 1, monitor_height - 1);
-    expect(GET_X_LPARAM(corner) == 1599 && GET_Y_LPARAM(corner) == 899, "at 1600x900 the last pixel goes to the last too");
+        change_resolution(window, WINDOWED_STYLE, 1600, 900);
+        pump(300);
+        expect(covers_monitor(window, monitor), "after a change to 1600x900 the window still covers its monitor");
+        expect(client_is(window, 1600, 900), "GetClientRect reports 1600x900, so the engine takes it as its resolution");
+        LPARAM middle = mouse_through_engine(window, WM_LBUTTONDOWN, monitor_width / 2, monitor_height / 2);
+        expect(GET_X_LPARAM(middle) == monitor_width / 2 * 1600 / monitor_width && GET_Y_LPARAM(middle) == monitor_height / 2 * 900 / monitor_height,
+               "a click is scaled to 1600x900");
+        corner = mouse_through_engine(window, WM_MOUSEMOVE, monitor_width - 1, monitor_height - 1);
+        expect(GET_X_LPARAM(corner) == 1599 && GET_Y_LPARAM(corner) == 899, "at 1600x900 the last pixel goes to the last too");
 
-    change_resolution(window, monitor_width, monitor_height);
-    pump(300);
-    expect(client_is(window, monitor_width, monitor_height), "a change to the monitor's resolution is taken too");
-    LPARAM same = mouse_through_engine(window, WM_MOUSEMOVE, 123, 456);
-    expect(GET_X_LPARAM(same) == 123 && GET_Y_LPARAM(same) == 456, "at the monitor's resolution a position is unchanged");
+        change_resolution(window, WINDOWED_STYLE, monitor_width, monitor_height);
+        pump(300);
+        expect(client_is(window, monitor_width, monitor_height), "a change to the monitor's resolution is taken too");
+        LPARAM same = mouse_through_engine(window, WM_MOUSEMOVE, 123, 456);
+        expect(GET_X_LPARAM(same) == 123 && GET_Y_LPARAM(same) == 456, "at the monitor's resolution a position is unchanged");
 
-    ((SetWindowLongFn)slot(SET_WINDOW_LONG_IAT_RVA))(window, GWL_STYLE, (LONG)FULLSCREEN_STYLE);
-    RECT real;
-    GetClientRect(window, &real);
-    expect(client_is(window, real.right, real.bottom), "fullscreen hands the window back: GetClientRect is the real one");
+        ((SetWindowLongFn)slot(SET_WINDOW_LONG_IAT_RVA))(window, GWL_STYLE, (LONG)FULLSCREEN_STYLE);
+        RECT real;
+        GetClientRect(window, &real);
+        expect(client_is(window, real.right, real.bottom), "fullscreen hands the window back: GetClientRect is the real one");
+        expect(set_windowed(0) == 0 && device_windowed() == 0, "with borderless_fullscreen=0 the game's fullscreen setting is its own");
+    }
 
     DestroyWindow(window);
     printf("%d borderless checks failed\n", failures);
@@ -187,26 +245,42 @@ static int child(const wchar_t *folder) {
 }
 
 int wmain(int argc, wchar_t **argv) {
-    if (argc == 3 && !wcscmp(argv[2], L"--child")) return child(argv[1]);
+    if (argc == 4 && !wcscmp(argv[2], L"--child")) return child(argv[1], argv[3]);
     if (argc != 2) {
-        fwprintf(stderr, L"usage: test_borderless <folder holding fixes\\borderless.dll and s2prof.ini>\n");
+        fwprintf(stderr, L"usage: test_borderless <folder holding fixes\\borderless.dll>\n");
         return 2;
     }
     HDESK desktop = CreateDesktopW(DESKTOP, NULL, NULL, 0, GENERIC_ALL, NULL);
-    wchar_t self[MAX_PATH], command[3 * MAX_PATH];
-    GetModuleFileNameW(NULL, self, MAX_PATH);
-    swprintf(command, sizeof command / sizeof *command, L"\"%ls\" \"%ls\" --child", self, argv[1]);
-    STARTUPINFOW startup = {.cb = sizeof startup, .lpDesktop = DESKTOP};
-    PROCESS_INFORMATION process;
-    if (!desktop || !CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process)) {
-        wprintf(L"FAIL: cannot run the check on a desktop of its own: error %lu\n", GetLastError());
+    if (!desktop) {
+        wprintf(L"FAIL: cannot make a desktop of its own: error %lu\n", GetLastError());
         return 1;
     }
-    DWORD code = 1;
-    if (WaitForSingleObject(process.hProcess, 60000) != WAIT_OBJECT_0) TerminateProcess(process.hProcess, 1);
-    GetExitCodeProcess(process.hProcess, &code);
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
+    wchar_t self[MAX_PATH], ini[MAX_PATH], command[3 * MAX_PATH];
+    GetModuleFileNameW(NULL, self, MAX_PATH);
+    swprintf(ini, MAX_PATH, L"%ls\\s2prof.ini", argv[1]);
+    int failed = 0;
+    for (size_t i = 0; i < sizeof runs / sizeof *runs; i++) {
+        wprintf(L"== %ls\n", runs[i].mode);
+        fflush(stdout);
+        FILE *file = _wfopen(ini, L"wb");
+        if (!file || fputs(runs[i].ini, file) < 0 || fclose(file)) {
+            wprintf(L"FAIL: cannot write %ls\n", ini);
+            return 1;
+        }
+        swprintf(command, sizeof command / sizeof *command, L"\"%ls\" \"%ls\" --child %ls", self, argv[1], runs[i].mode);
+        STARTUPINFOW startup = {.cb = sizeof startup, .lpDesktop = DESKTOP};
+        PROCESS_INFORMATION process;
+        if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process)) {
+            wprintf(L"FAIL: cannot run the check on its desktop: error %lu\n", GetLastError());
+            return 1;
+        }
+        DWORD code = 1;
+        if (WaitForSingleObject(process.hProcess, 60000) != WAIT_OBJECT_0) TerminateProcess(process.hProcess, 1);
+        GetExitCodeProcess(process.hProcess, &code);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        failed |= code != 0;
+    }
     CloseDesktop(desktop);
-    return (int)code;
+    return failed;
 }

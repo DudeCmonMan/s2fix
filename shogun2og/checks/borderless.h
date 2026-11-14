@@ -8,4 +8,6 @@ static const S2Check borderless_checks[] = {
     {0x9d2e0, 0x860, 0xafac83ff0b82c34cull, 0, "window procedure (mouse messages in client coordinates)"},
     {0x1401650, 0xde, 0x575956d67af36efaull, 0, "WM_SIZE handler (client size as resolution)"},
     {0x13fd720, 0x106, 0x57e41392c27ce065ull, 0, "settings refresh (client size as resolution)"},
+    {0x1424d10, 0x1f, 0x3d136bd452484c3aull, 0, "windowed setter (game start, options, display changes)"},
+    {0x145fdb0, 0x140, 0x7852f0f2776cb3fbull, 0, "device creation (its windowed argument)"},
 };

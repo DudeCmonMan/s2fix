@@ -36,11 +36,11 @@ However, in order to ensure that it does load the correct files, you may want to
 WINEDLLOVERRIDES="d3d11=n,b" %command%
 ```
 
-### Borderless windowed (original game)
+### Borderless fullscreen (original game)
 
-1. In the game's options, choose windowed mode.
-2. In `s2prof.ini`, set `borderless=1` under `[window]`.
-3. Restart the game.
+s2fix runs the original game in a borderless window that covers the monitor, whether the game's options say fullscreen or windowed.
+
+To get the game's own fullscreen or framed window back, set `borderless_fullscreen=0` under `[window]` in `s2prof.ini` and restart the game.
 
 ## Hotkeys
 
@@ -77,7 +77,7 @@ The fixes make no network connections and have no remote access. They read `s2pr
 The `docs` folder of [the source repository](https://github.com/DudeCmonMan/s2fix) has the details:
 
 - [docs/shogun_ce.md](docs/shogun_ce.md): the Complete Edition's requirements, settings and every fix.
-- [docs/shogun_og.md](docs/shogun_og.md): the same for the original game, with borderless windowed in full.
+- [docs/shogun_og.md](docs/shogun_og.md): the same for the original game, with borderless fullscreen in full.
 - [docs/building.md](docs/building.md): building s2fix yourself.
 
 ## License
