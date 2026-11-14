@@ -5,9 +5,9 @@
 #include <wchar.h>
 #include <windowsx.h>
 
-// Borderless windowed: the game's windowed mode in a frameless window covering its monitor, rendering at the chosen
-// resolution scaled by DXGI; clip_cursor keeps edge scrolling from pushing the cursor onto another monitor.
-// borderless_fullscreen runs the game windowed whatever its display setting: exclusive fullscreen keeps the blt model.
+// Borderless: the game windowed whatever its display setting (exclusive fullscreen keeps the blt model), in a frameless
+// window covering its monitor, rendering at the chosen resolution scaled by DXGI; clip_cursor keeps edge scrolling from
+// pushing the cursor onto another monitor.
 #define WINDOW_RVA 0x1c9a938
 #define SETTINGS_RVA 0x1c9a924
 #define SETTINGS_WINDOWED_OFFSET 0x1c
@@ -42,7 +42,7 @@ static SetWindowPosFn real_set_window_pos;
 static MoveWindowFn real_move_window;
 static PeekMessageFn real_peek_message;
 static GetClientRectFn real_get_client_rect;
-static BOOL borderless_wanted, fullscreen_wanted, clip_wanted, cursor_clipped;
+static BOOL borderless_wanted, force_windowed, clip_wanted, cursor_clipped;
 static volatile HWND borderless_window;
 static LONG engine_style;
 static SIZE game_resolution;
@@ -152,10 +152,10 @@ static BOOL WINAPI get_client_rect_hook(HWND window, RECT *rect) {
 }
 
 // The engine restyles its window at mode changes; its own popup style is fullscreen, which hands the window back
-// unless borderless fullscreen keeps it.
+// unless the game is forced windowed.
 static LONG WINAPI set_window_long_hook(HWND window, int index, LONG value) {
     if (window == game_window()) {
-        if (index == GWL_STYLE && (fullscreen_wanted || (value & WS_CAPTION))) {
+        if (index == GWL_STYLE && (force_windowed || (value & WS_CAPTION))) {
             take_window(window);
             engine_style = value;
             value = (value & ~FRAME_STYLES) | WS_POPUP;
@@ -211,15 +211,14 @@ static void read_settings(void) {
         if (slash) *slash = 0;
     }
     wcscat(path, L"\\s2prof.ini");
-    fullscreen_wanted = GetPrivateProfileIntW(L"window", L"borderless_fullscreen", 1, path) != 0;
-    borderless_wanted = fullscreen_wanted || GetPrivateProfileIntW(L"window", L"borderless", 0, path) != 0;
+    borderless_wanted = GetPrivateProfileIntW(L"window", L"borderless", 1, path) != 0;
     clip_wanted = GetPrivateProfileIntW(L"window", L"clip_cursor", 0, path) != 0;
 }
 
 __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     api = host;
     read_settings();
-    if (!borderless_wanted) return "off ([window] borderless_fullscreen=0 and borderless=0 in s2prof.ini)";
+    if (!borderless_wanted) return "off ([window] borderless=0 in s2prof.ini)";
     const char *mismatch = S2_CHECK_ENGINE(host, borderless_checks);
     if (mismatch) return mismatch;
     if (!api->main_thread) return "the host is older than this module (no main_thread)";
@@ -237,11 +236,8 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
         if (patch_error) return patch_error;
     }
     // Loaded after the game made its display, the mode it chose stays until the next start.
-    if (fullscreen_wanted && swap_chain_exists()) {
-        fullscreen_wanted = FALSE;
-        api->log_line("borderless: s2fix loaded after the game made its display; borderless fullscreen from the next start");
-    }
-    if (fullscreen_wanted) {
+    force_windowed = !swap_chain_exists();
+    if (force_windowed) {
         const char *patch_error = api->patch(api->engine + SET_WINDOWED_RVA, setter_argument, setter_windowed, sizeof setter_windowed);
         if (!patch_error) patch_error = api->patch(api->engine + DEVICE_WINDOWED_RVA, device_argument, device_windowed, sizeof device_windowed);
         if (patch_error) return patch_error;
@@ -250,7 +246,8 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
         if (settings) settings[SETTINGS_WINDOWED_OFFSET] = 1;
     }
     api->log_line("borderless: on, cursor clip %s; %s", clip_wanted ? "on" : "off",
-                  fullscreen_wanted ? "the game runs windowed whatever its display setting" : "applied once the swap chain exists (windowed mode only)");
+                  force_windowed ? "the game runs windowed whatever its display setting"
+                                 : "s2fix loaded after the game made its display, so its fullscreen setting holds until the next start");
     return NULL;
 }
 

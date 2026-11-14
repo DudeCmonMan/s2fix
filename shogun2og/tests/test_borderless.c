@@ -38,10 +38,11 @@ static const BYTE device_code[] = {0x8a, 0x44, 0x24, 0x20, 0xc3};
 static const struct {
     const wchar_t *mode;
     const char *ini;
-} runs[] = {{L"windowed", "[window]\r\nborderless_fullscreen=0\r\nborderless=1\r\nclip_cursor=0\r\n"},
-            // An ini from before borderless_fullscreen.
-            {L"fullscreen", "[window]\r\nborderless=0\r\nclip_cursor=0\r\n"},
-            {L"late", "[window]\r\nborderless_fullscreen=1\r\nclip_cursor=0\r\n"}};
+} runs[] = {{L"windowed", "[window]\r\nborderless=1\r\nclip_cursor=0\r\n"},
+            // An ini from before the borderless key.
+            {L"fullscreen", "[window]\r\nclip_cursor=0\r\n"},
+            {L"off", "[window]\r\nborderless=0\r\nclip_cursor=0\r\n"},
+            {L"late", "[window]\r\nborderless=1\r\nclip_cursor=0\r\n"}};
 
 static BYTE *engine;
 static volatile LONG fix_enabled = 1;
@@ -130,7 +131,7 @@ static void change_resolution(HWND window, LONG style, LONG width, LONG height) 
 }
 
 static int child(const wchar_t *folder, const wchar_t *mode) {
-    BOOL windowed = !wcscmp(mode, L"windowed"), late = !wcscmp(mode, L"late");
+    BOOL windowed = !wcscmp(mode, L"windowed"), late = !wcscmp(mode, L"late"), off = !wcscmp(mode, L"off");
     main_thread = GetCurrentThreadId();
     engine = VirtualAlloc(NULL, ENGINE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
@@ -144,7 +145,7 @@ static int child(const wchar_t *folder, const wchar_t *mode) {
     memcpy(engine + DEVICE_WINDOWED_RVA, device_code, sizeof device_code);
     settings[0x1c] = (BYTE)windowed;
     // Fixes install while the engine holds its first device creation, before the swap chain exists.
-    if (windowed || late) *(void **)(device + 0xbc) = device;
+    if (late) *(void **)(device + 0xbc) = device;
     *(BYTE **)(engine + SETTINGS_RVA) = settings;
     *(BYTE **)(engine + RENDER_DEVICE_RVA) = device;
 
@@ -173,7 +174,8 @@ static int child(const wchar_t *folder, const wchar_t *mode) {
                  .check_engine = check_engine};
     const char *error = module_main ? module_main(&api) : "cannot load the module";
     printf("module: %s\n", error ? error : "installed");
-    if (error) return 1;
+    if (off) expect(error && !strncmp(error, "off", 3), "borderless=0 turns it off");
+    else if (error) return 1;
 
     MONITORINFO info = {.cbSize = sizeof info};
     GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &info);
@@ -181,16 +183,17 @@ static int child(const wchar_t *folder, const wchar_t *mode) {
     LONG monitor_width = monitor.right - monitor.left, monitor_height = monitor.bottom - monitor.top;
     printf("monitor %ldx%ld\n", monitor_width, monitor_height);
 
-    if (late) {
+    if (late || off) {
         RECT before, after;
         GetWindowRect(window, &before);
+        *(void **)(device + 0xbc) = device;
         expect(settings[0x1c] == 0 && set_windowed(0) == 0 && device_windowed() == 0,
-               "loaded after the game made its display, its fullscreen setting stays until the next start");
+               off ? "the game's fullscreen setting is its own" : "loaded after the game made its display, its fullscreen setting stays until the next start");
         pump(300);
         GetWindowRect(window, &after);
         expect(EqualRect(&before, &after), "and its fullscreen window is left alone");
     } else if (!windowed) {
-        expect(settings[0x1c] == 1, "with no borderless_fullscreen key, the game's fullscreen setting reads windowed from the start");
+        expect(settings[0x1c] == 1, "with no borderless key, the game's fullscreen setting reads windowed from the start");
         expect(set_windowed(0) == 1, "the options' fullscreen is taken as windowed");
         expect(device_windowed() == 1, "device creation takes its windowed argument as windowed");
         *(void **)(device + 0xbc) = device;
@@ -205,6 +208,7 @@ static int child(const wchar_t *folder, const wchar_t *mode) {
         LPARAM corner = mouse_through_engine(window, WM_MOUSEMOVE, monitor_width - 1, monitor_height - 1);
         expect(GET_X_LPARAM(corner) == 1599 && GET_Y_LPARAM(corner) == 899, "the mouse is scaled to 1600x900");
     } else {
+        *(void **)(device + 0xbc) = device;
         pump(300);
         expect(covers_monitor(window, monitor), "the window lost its frame and covers its monitor");
         printf("  the engine made the window for %ldx%ld\n", first_width, first_height);
@@ -232,11 +236,11 @@ static int child(const wchar_t *folder, const wchar_t *mode) {
         LPARAM same = mouse_through_engine(window, WM_MOUSEMOVE, 123, 456);
         expect(GET_X_LPARAM(same) == 123 && GET_Y_LPARAM(same) == 456, "at the monitor's resolution a position is unchanged");
 
+        expect(set_windowed(0) == 1 && device_windowed() == 1, "fullscreen chosen in the options is taken as windowed");
         ((SetWindowLongFn)slot(SET_WINDOW_LONG_IAT_RVA))(window, GWL_STYLE, (LONG)FULLSCREEN_STYLE);
-        RECT real;
-        GetClientRect(window, &real);
-        expect(client_is(window, real.right, real.bottom), "fullscreen hands the window back: GetClientRect is the real one");
-        expect(set_windowed(0) == 0 && device_windowed() == 0, "with borderless_fullscreen=0 the game's fullscreen setting is its own");
+        pump(300);
+        expect(covers_monitor(window, monitor) && client_is(window, monitor_width, monitor_height),
+               "the engine's fullscreen restyle keeps the window borderless at its resolution");
     }
 
     DestroyWindow(window);

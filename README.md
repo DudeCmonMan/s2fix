@@ -40,7 +40,7 @@ WINEDLLOVERRIDES="d3d11=n,b" %command%
 
 s2fix runs the original game in a borderless window that covers the monitor, whether the game's options say fullscreen or windowed.
 
-To get the game's own fullscreen or framed window back, set `borderless_fullscreen=0` under `[window]` in `s2prof.ini` and restart the game.
+To get the game's own fullscreen or framed window back, set `borderless=0` under `[window]` in `s2prof.ini` and restart the game.
 
 ## Hotkeys
 
