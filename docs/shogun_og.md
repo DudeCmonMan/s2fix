@@ -6,6 +6,7 @@
 - The Steam version with the May 2023 update: `empire.retail.dll` with PE timestamp `0x645e92bb` (SHA-256 starting `022fae2e2da92b59`). If `empire.retail.dll` is a different build, or another mod's copy of it, a warning asks whether to launch. Either way, each fix checks the engine code it depends on and stays off if it was changed; the log lists which.
 - DirectX 11 mode. The fixes are for DirectX 11 only: in DirectX 9 mode they don't load, and the game runs unchanged. If the game falls back to DirectX 9 on its own, a message says so and the fixes stay off.
 - Tested with an NVIDIA driver.
+- AMD FSR 3.1 needs a graphics card with Direct3D feature level 11.1 (NVIDIA GeForce GTX 900 series, AMD Radeon HD 7000 series, Intel 4th-generation Core graphics, or newer). Without one, the FSR entries don't appear and everything else works as before.
 
 ## Files
 
@@ -14,6 +15,7 @@ d3d11.dll        loads s2prof.dll and passes everything else to Windows' own d3d
 s2prof.dll       loads the fixes and provides the hotkeys and the log
 s2prof.ini       settings
 fixes\           one DLL per fix
+fixes\fsr\       AMD FSR 3.1 (s2fsr.dll) for the fsr fix, with AMD's FidelityFX licence
 ```
 
 The game loads `d3d11.dll` only in DirectX 11 mode, as it creates its device. It loads `s2prof.dll`, which holds the game's device creation until the fixes are installed. If s2fix is loaded later (injected while the game runs), a message says that some fixes are off for that session.
@@ -25,6 +27,28 @@ The game itself only has a framed window or exclusive fullscreen, and exclusive 
 To turn it off, set `borderless=0` under `[window]` in `s2prof.ini` and restart the game.
 
 The cursor stays on the game's monitor while the game has focus, so edge scrolling works with several monitors. Alt+Tab releases it. To let it move freely, set `clip_cursor=0`.
+
+## AMD FSR 3.1
+
+s2fix adds AMD FSR 3.1 to the game's own anti-aliasing options, after the game's entries:
+
+| Entry | Renders at | Use |
+|---|---|---|
+| FSR 3.1 (AA) | the full resolution | anti-aliasing |
+| FSR 3.1 (Quality) | 67% of the resolution, each side | upscaling: more frames, close to the full picture |
+| FSR 3.1 (Balanced) | 59% | upscaling |
+| FSR 3.1 (Performance) | 50% | upscaling |
+| FSR 3.1 (Ultra Performance) | 33% | upscaling: the most frames, the softest picture |
+
+Pick one like any anti-aliasing setting and apply. The game keeps your choice for the next start. Switching back to the game's own anti-aliasing works the same way, at any time.
+
+FSR builds each frame from several earlier ones, so it needs to know how everything on screen moved. s2fix gives it the camera's motion and each moving object's own: soldiers (near and far, the far ones drawn as flat imposters too), severed limbs, banners, flags, vegetation in the wind, and projectiles. Smoke, fire, other particles and projectile trails are marked as see-through effects, so FSR doesn't smear them. Like FSR in other games, fast motion can leave a little softness or ghosting.
+
+If FSR can't start (for example after a driver problem), a message says so and the game's own anti-aliasing is used for the rest of that session.
+
+To remove the FSR entries, set `enabled=0` under `[fsr]` in `s2prof.ini` and restart the game; that's only needed if FSR causes a problem.
+
+FSR's sharpening is `sharpness` under `[fsr]`, from 0 (off) to 1; the default is 0.5.
 
 ## Settings (`s2prof.ini`)
 
@@ -40,6 +64,8 @@ Settings marked "at start" apply when the game starts. The hotkeys don't switch 
 | `[flipmodel] latency` | 2 | at start: at most this many frames queued, waiting for room after each Present instead of blocking inside it; 0 keeps Windows' 3 |
 | `[window] borderless` | 1 | at start: runs the game in a borderless window that covers its monitor whatever its fullscreen setting, at the resolution set in the game's options, scaled to fit; 0 gives the game its own fullscreen and framed window back |
 | `[window] clip_cursor` | 1 | with borderless: keeps the cursor on the game's monitor while the game has focus, so edge scrolling works with several monitors |
+| `[fsr] enabled` | 1 | at start: adds AMD FSR 3.1 to the game's anti-aliasing options (needs Direct3D feature level 11.1); 0 leaves them out, only if FSR causes a problem |
+| `[fsr] sharpness` | 0.5 | at start: FSR's sharpening, from 0 (off) to 1 |
 | `[vram] enabled` | 1 | at start: gives the game the graphics card's video memory, up to the 4095 MB it can count, instead of the 2.9 GB a 32-bit game is told; 0 keeps the game's figure |
 | `[campthrottle] hz` | 30 | at start: how many times a second each of your settlements on the campaign map checks whether it can build something; a whole number, 1 or more (anything else keeps 30). Lower gives more frames on a large empire, and the answer can be up to that fraction of a second old. 0 turns this off and checks every frame, as the game does |
 | `[camplabels] hz` | 30 | at start: how many times a second the label of each of your settlements on the campaign map checks whether a rebellion is imminent while the camera moves; a whole number, 1 or more (anything else keeps 30), and the answer can be up to that fraction of a second old. 0 checks every time, as the game does. Other factions' labels skip the check either way, since the game discards its answer for them |
@@ -77,6 +103,7 @@ Settings marked "at start" apply when the game starts. The hotkeys don't switch 
 | `cpuplace` | keeps the game's other threads on the main thread's CCD or P-cores, as `[cpu] ccd` sets |
 | `maincore` | gives the main thread the best CPU core and keeps the game's other threads off it |
 | `timerperiod` | holds Windows' 1 ms timer period, which the game otherwise switches on and off around every timestamp |
+| `fsr` | AMD FSR 3.1 as anti-aliasing or upscaling, picked in the game's anti-aliasing options (see "AMD FSR 3.1" above); uses AMD's FidelityFX SDK, MIT licence |
 
 On the campaign map:
 

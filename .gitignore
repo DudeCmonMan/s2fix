@@ -4,3 +4,6 @@
 /dist/
 shogun2ce/proxy/d3d11.def
 shogun2og/proxy/d3d11.def
+# The fsr fix's FidelityFX SDK (fetched by get_fsr_sdk.py) and its library's build output.
+shogun2og/fsr-sdk/
+shogun2og/fsr/build/

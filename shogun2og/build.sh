@@ -21,3 +21,6 @@ for module in modules/*.c; do
     versioninfo "${module%.c}.dll" "s2fix $(basename "$module" .c) fix for $GAME"
     $CC $CFLAGS -shared -o "${module%.c}.dll" "$module" "${module%.c}.version.o" -lntdll -lsynchronization
 done
+# The fsr fix's FSR 3.1 library is MSVC-built: AMD's backend needs C++ exceptions and its static runtime. The build
+# fetches AMD's SDK at a fixed commit, each file checked against its hash.
+cmd //c "$(cygpath -w fsr/build.cmd)"
