@@ -253,13 +253,19 @@ static void log_line(const char *format, ...) {
     va_end(args);
     wchar_t path[MAX_PATH];
     output_path(path, "s2prof.log");
-    FILE *file = _wfopen(path, L"a");
-    if (file) {
-        fwrite(line, 1, length, file);
-        fclose(file);
-    } else {
-        MessageBeep(MB_ICONHAND);
+    // CRLF, as stdio's text mode wrote it.
+    char text[2 * sizeof line];
+    int text_length = 0;
+    for (int i = 0; i < length; i++) {
+        if (line[i] == '\n') text[text_length++] = '\r';
+        text[text_length++] = line[i];
     }
+    // An append-only handle writes each line whole at the end; stdio's "a" seeks, then writes, so threads logging at
+    // once overwrote each other's lines.
+    HANDLE file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD written;
+    if (file == INVALID_HANDLE_VALUE || !WriteFile(file, text, text_length, &written, NULL)) MessageBeep(MB_ICONHAND);
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
     console_line(line, length);
 }
 
