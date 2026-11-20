@@ -6,13 +6,22 @@ GAME="Total War: Shogun 2 (Complete Edition)"
 . ../versioninfo.sh
 # -static: a POSIX-threads MinGW (WinLibs) implements __thread through libwinpthread, a DLL the game folder doesn't have.
 CFLAGS="-O2 -Wall -Wextra -Werror -D__USE_MINGW_ANSI_STDIO=1 -static -s"
-versioninfo s2prof.dll "s2fix loader for $GAME"
-$CC $CFLAGS -DS2FIX_VERSION="\"${VERSION:-local build}\"" -shared -o s2prof.dll s2prof.c sortfix.c hook.c wrap.c report.c graphicsreset.c s2prof.version.o -lpsapi -lntdll -lversion -lole32 -lgdi32 -limm32 -lwevtapi
+PIDS=""
+build() { { "$@" || { echo "build: FAILED: $*"; false; }; } & PIDS="$PIDS $!"; }
+build_wait() {
+    failed=0
+    for pid in $PIDS; do wait "$pid" || failed=$((failed + 1)); done
+    PIDS=""
+    # The other jobs keep printing after a failure, so the count comes last.
+    [ $failed = 0 ] || { echo "build: FAILED jobs: $failed, each named above"; return 1; }
+}
 # The proxy's export table comes from its export list.
 { echo "LIBRARY d3d11"; echo "EXPORTS"; sed -nE 's/^ *(STUB|OWN)\(([A-Za-z0-9_]+), ([0-9]+)\).*/    \2=proxy_\2 @\3/p' proxy/exports.h; } > proxy/d3d11.def
-versioninfo proxy/d3d11.dll "s2fix Direct3D 11 proxy for $GAME"
-$CC $CFLAGS -shared -o proxy/d3d11.dll proxy/d3d11.c proxy/d3d11.def proxy/d3d11.version.o
-for module in modules/*.c; do
-    versioninfo "${module%.c}.dll" "s2fix $(basename "$module" .c) fix for $GAME"
-    $CC $CFLAGS -shared -o "${module%.c}.dll" "$module" "${module%.c}.version.o" -lntdll -lsynchronization
-done
+build versioninfo s2prof.dll "s2fix loader for $GAME"
+build versioninfo proxy/d3d11.dll "s2fix Direct3D 11 proxy for $GAME"
+for module in modules/*.c; do build versioninfo "${module%.c}.dll" "s2fix $(basename "$module" .c) fix for $GAME"; done
+build_wait
+build $CC $CFLAGS -DS2FIX_VERSION="\"${VERSION:-local build}\"" -shared -o s2prof.dll s2prof.c sortfix.c hook.c wrap.c report.c graphicsreset.c s2prof.version.o -lpsapi -lntdll -lversion -lole32 -lgdi32 -limm32 -lwevtapi
+build $CC $CFLAGS -shared -o proxy/d3d11.dll proxy/d3d11.c proxy/d3d11.def proxy/d3d11.version.o
+for module in modules/*.c; do build $CC $CFLAGS -shared -o "${module%.c}.dll" "$module" "${module%.c}.version.o" -lntdll -lsynchronization; done
+build_wait
