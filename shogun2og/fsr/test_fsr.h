@@ -231,8 +231,14 @@ struct Camera {
 };
 
 // A checker of 3-unit cells turned 20 degrees, two levels.
-inline float checker(double u, double v) {
+static const float checker_levels[2] = {0.05f, 0.8f};
+
+inline int checker_cell(double u, double v) {
     static const double c = cos(0.349), s = sin(0.349);
     double a = (u * c - v * s) / 3, b = (u * s + v * c) / 3;
-    return ((long long)floor(a) + (long long)floor(b)) & 1 ? 0.8f : 0.05f;
+    return ((long long)floor(a) + (long long)floor(b)) & 1;
+}
+
+inline float checker(double u, double v) {
+    return checker_levels[checker_cell(u, v)];
 }

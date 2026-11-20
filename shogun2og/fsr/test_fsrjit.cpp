@@ -22,15 +22,43 @@ static void camera_at(int frame, float *m) {
     camera.view_projection(frame * pan * pixel_on_plane, -frame * pan * pixel_on_plane, 0, m);
 }
 
-// The checker on the plane where a rasterizer drawing it through m samples at (x, y) in pixels: the plane's point p
-// with (row 0 - ndc.x row 3) . p = 0 and (row 1 - ndc.y row 3) . p = 0.
-static float sample(const float *m, double x, double y) {
+// The checker's cell on the plane where a rasterizer drawing it through m samples at (x, y) in pixels: the plane's point
+// p with (row 0 - ndc.x row 3) . p = 0 and (row 1 - ndc.y row 3) . p = 0.
+static int sample(const float *m, double x, double y) {
     double ndc[2] = {x / width * 2 - 1, 1 - y / height * 2}, c[2][4];
     for (int r = 0; r < 2; r++)
         for (int k = 0; k < 4; k++) c[r][k] = m[r * 4 + k] - ndc[r] * m[12 + k];
     double e0 = -(c[0][2] * plane_z + c[0][3]), e1 = -(c[1][2] * plane_z + c[1][3]), det = c[0][0] * c[1][1] - c[0][1] * c[1][0];
     double px = (e0 * c[1][1] - c[0][1] * e1) / det, py = (c[0][0] * e1 - e0 * c[1][0]) / det;
-    return checker(px / pixel_on_plane, -py / pixel_on_plane);
+    return checker_cell(px / pixel_on_plane, -py / pixel_on_plane);
+}
+
+// Every run sees the same frames and is measured against the same supersampled last frame: both are made once.
+static std::vector<unsigned char> cells;
+static std::vector<float> truth;
+
+static void render_frames() {
+    if (!cells.empty()) return;
+    cells.resize((size_t)frames * width * height);
+    for (int i = 0; i < frames; i++) {
+        float m[16], jx, jy;
+        camera_at(i, m);
+        jitter_of(i, &jx, &jy);
+        add_jitter(m, jx, jy, width, height);
+        unsigned char *frame = &cells[(size_t)i * width * height];
+        for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++) frame[(size_t)y * width + x] = (unsigned char)sample(m, x + 0.5, y + 0.5);
+    }
+    float last[16];
+    camera_at(frames - 1, last);
+    truth.resize((size_t)width * height);
+    for (int y = border; y < height - border; y++)
+        for (int x = border; x < width - border; x++) {
+            double sum = 0;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) sum += checker_levels[sample(last, x + (a + 0.5) / 4, y + (b + 0.5) / 4)];
+            truth[(size_t)y * width + x] = (float)(sum / 16);
+        }
 }
 
 enum Motion { GIVEN, NONE, SWAPPED };
@@ -48,18 +76,16 @@ static double run(float kx, float ky, Motion motion) {
     context->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, (float)camera.depth(plane_z), 0);
     dsv->Release();
     bool ok = fsr.create(color, depth, NULL, NULL, NULL, 0) == 0;
+    render_frames();
     std::vector<float> grey((size_t)width * height);
-    float last[16];
     for (int i = 0; ok && i < frames; i++) {
         S2FsrFrame f = {};
-        float now[16], before[16], jittered[16];
+        float now[16], before[16];
         camera_at(i, now);
         camera_at(i ? i - 1 : 0, before);
         jitter_of(i, &f.jitter_x, &f.jitter_y);
-        memcpy(jittered, now, sizeof now);
-        add_jitter(jittered, f.jitter_x, f.jitter_y, width, height);
-        for (int y = 0; y < height; y++)
-            for (int x = 0; x < width; x++) grey[(size_t)y * width + x] = sample(jittered, x + 0.5, y + 0.5);
+        const unsigned char *frame = &cells[(size_t)i * width * height];
+        for (size_t p = 0; p < grey.size(); p++) grey[p] = checker_levels[frame[p]];
         upload(context, color, grey);
         memcpy(f.view_projection, motion == SWAPPED ? before : now, sizeof now);
         memcpy(f.previous_view_projection, motion == GIVEN ? before : now, sizeof now);
@@ -67,18 +93,12 @@ static double run(float kx, float ky, Motion motion) {
         f.frame_ms = 16.7f, f.camera_near = (float)camera.near_z, f.camera_far = (float)camera.far_z;
         f.fov_y = (float)camera.fov_y, f.reset = i == 0;
         ok = fsr.frame(context, &f) == 0;
-        memcpy(last, now, sizeof now);
     }
     double err = 0;
     if (ok) {
         std::vector<float> got = read_channel(device, context, color, 0);
         for (int y = border; y < height - border; y++)
-            for (int x = border; x < width - border; x++) {
-                double truth = 0;
-                for (int a = 0; a < 4; a++)
-                    for (int b = 0; b < 4; b++) truth += sample(last, x + (a + 0.5) / 4, y + (b + 0.5) / 4);
-                err += fabs(got[(size_t)y * width + x] - truth / 16);
-            }
+            for (int x = border; x < width - border; x++) err += fabs(got[(size_t)y * width + x] - truth[(size_t)y * width + x]);
         err /= (double)(width - 2 * border) * (height - 2 * border);
     }
     fsr.release();
