@@ -8,10 +8,12 @@ VERSION_NUMBERS=$(echo "$VERSION" | sed -nE 's/^v([0-9]+)\.([0-9]+)\.([0-9]+)(-p
 VERSION_NUMBERS=${VERSION_NUMBERS:-0,0,0,0}
 case $VERSION in *-pre-release) VERSION_FLAGS=VS_FF_PRERELEASE ;; *) VERSION_FLAGS=0 ;; esac
 
-# versioninfo <dll> <description> writes <dll without .dll>.version.o, to link into it.
+# versioninfo <dll> <description> writes <dll without .dll>.version.o, to link into it; with a third argument res,
+# <dll without .dll>.res instead, for MSVC's link.
 versioninfo() {
     name=$(basename "$1" .dll)
-    "$WINDRES" -J rc -O coff -o "${1%.dll}.version.o" <<EOF
+    if [ "$3" = res ]; then format=res out="${1%.dll}.res"; else format=coff out="${1%.dll}.version.o"; fi
+    "$WINDRES" -J rc -O $format -o "$out" <<EOF
 #include <winver.h>
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION $VERSION_NUMBERS

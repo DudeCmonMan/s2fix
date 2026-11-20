@@ -3,7 +3,7 @@
 // pixel centres through the view-projection with the jitter added as the module adds it (Halton(2,3), 32 phases), and
 // s2fsr_frame gets the unjittered matrices and the jitter. After 96 frames FSR's output is compared with the plane
 // supersampled through the unjittered camera. The jitter as passed must clearly beat each axis flipped, and the previous
-// camera as passed must clearly beat none (previous = current) and the two swapped. On WARP, then on this PC's GPU.
+// camera as passed must clearly beat none (previous = current) and the two swapped. On WARP, then on the machine's GPU.
 // Usage: test_fsrjit [s2fsr.dll]
 #include "test_fsr.h"
 
@@ -13,7 +13,7 @@ static ID3D11DeviceContext *context;
 static const int width = 1280, height = 640, frames = 96, border = 16;
 static const double pan = 1.5, plane_z = 20;
 static const Camera camera = {0.8, (double)width / height, 1, 1000};
-// Clearly: 10% less error. The runs are deterministic, and flipping the Halton base-3 axis costs FSR only about 17%.
+// Clearly: 10% less error. The runs are deterministic, and a flipped Halton base-3 axis costs FSR little more than that.
 static const double margin = 0.9;
 
 static const double pixel_on_plane = 2 * plane_z * tan(camera.fov_y / 2) / height;

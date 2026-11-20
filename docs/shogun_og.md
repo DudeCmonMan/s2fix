@@ -6,7 +6,7 @@
 - The Steam version with the May 2023 update: `empire.retail.dll` with PE timestamp `0x645e92bb` (SHA-256 starting `022fae2e2da92b59`). If `empire.retail.dll` is a different build, or another mod's copy of it, a warning asks whether to launch. Either way, each fix checks the engine code it depends on and stays off if it was changed; the log lists which.
 - DirectX 11 mode. The fixes are for DirectX 11 only: in DirectX 9 mode they don't load, and the game runs unchanged. If the game falls back to DirectX 9 on its own, a message says so and the fixes stay off.
 - Tested with an NVIDIA driver.
-- AMD FSR 3.1 needs a graphics card with Direct3D feature level 11.1 (NVIDIA GeForce GTX 900 series, AMD Radeon HD 7000 series, Intel 4th-generation Core graphics, or newer). Without one, the FSR entries don't appear and everything else works as before.
+- AMD FSR 3.1 needs a graphics card with Direct3D feature level 11.1 (NVIDIA GeForce GTX 900 series, AMD Radeon HD 7700 series, Intel 4th-generation Core graphics, or newer). Without one, the FSR entries don't appear and everything else works as before.
 
 ## Files
 
@@ -47,6 +47,8 @@ FSR builds each frame from several earlier ones, so it needs to know how everyth
 If FSR can't start (for example after a driver problem), a message says so and the game's own anti-aliasing is used for the rest of that session.
 
 To remove the FSR entries, set `enabled=0` under `[fsr]` in `s2prof.ini` and restart the game; that's only needed if FSR causes a problem.
+
+Without s2fix, or with the entries removed, a saved FSR choice falls back to the game's highest MSAA level; there is nothing to change.
 
 FSR's sharpening is `sharpness` under `[fsr]`, from 0 (off) to 1; the default is 0.5.
 

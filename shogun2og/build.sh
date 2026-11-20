@@ -23,4 +23,6 @@ for module in modules/*.c; do
 done
 # The fsr fix's FSR 3.1 library is MSVC-built: AMD's backend needs C++ exceptions and its static runtime. The build
 # fetches AMD's SDK at a fixed commit, each file checked against its hash.
+mkdir -p fsr/build
+versioninfo fsr/build/s2fsr.dll "s2fix AMD FSR 3.1 library (FidelityFX SDK, MIT) for $GAME" res
 cmd //c "$(cygpath -w fsr/build.cmd)"

@@ -15,6 +15,8 @@ if not defined VS (echo s2fsr: no MSVC x86 tools & exit /b 1)
 python -I "%HERE%get_fsr_sdk.py" "%SDK%" || exit /b 1
 set "PATH=%PATH%;%ProgramFiles(x86)%\Microsoft Visual Studio\Installer"
 call "%VS%\VC\Auxiliary\Build\vcvarsall.bat" amd64_x86 >nul || exit /b 1
+rem The compiler's version goes in the build log: releases are built with whatever MSVC the build machine has.
+cl 2>&1 | findstr /c:"Version"
 python -I "%HERE%shaders.py" "%SDK%" "%OUT%\fsr_shaders" || exit /b 1
 python -I "%HERE%patch_backend.py" "%SDK%" "%OUT%\fsr_backend" || exit /b 1
 fxc /nologo /T cs_5_0 /E main /O3 /Vn motion_cs /Fh "%OUT%\motion_cs.h" "%HERE%motion.hlsl" >nul || exit /b 1
@@ -29,7 +31,10 @@ cl /nologo /c /O2 /MT /EHs /std:c++17 /W3 /DFFX_GCC /D_SILENCE_CXX17_CODECVT_HEA
 cl /nologo /c /O2 /MT /W3 "%S%\src\backends\dx11\DXBCChecksum.c" "%S%\src\backends\dx11\md5.c" /Fo"%OUT%\obj/" || exit /b 1
 cl /nologo /c /O2 /MT /EHs /std:c++17 /W4 /WX /DFFX_GCC /external:W0 /external:I"%S%\include" ^
   /external:I"%S%\src\backends\shared" /I"%OUT%" "%HERE%s2fsr.cpp" "%HERE%shaderblobs.cpp" /Fo"%OUT%\obj/" || exit /b 1
-link /nologo /DLL /OUT:"%OUT%\s2fsr.dll" /IMPLIB:"%OUT%\obj\s2fsr.lib" "%OUT%\obj\*.obj" d3d11.lib dxguid.lib || exit /b 1
+rem Version info, when the caller wrote it as s2fsr.res beforehand (s2fix's build does).
+set RES=
+if exist "%OUT%\s2fsr.res" set RES="%OUT%\s2fsr.res"
+link /nologo /DLL /OUT:"%OUT%\s2fsr.dll" /IMPLIB:"%OUT%\obj\s2fsr.lib" "%OUT%\obj\*.obj" %RES% d3d11.lib dxguid.lib || exit /b 1
 for %%t in (test_fsrdll test_fsrjit) do (
   cl /nologo /O2 /MT /EHsc /std:c++17 /W4 /WX /I"%OUT%" "%HERE%%%t.cpp" /Fo"%OUT%\obj\tests/" /Fe"%OUT%\%%t.exe" ^
     d3d11.lib dxgi.lib || exit /b 1

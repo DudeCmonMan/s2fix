@@ -1,6 +1,6 @@
 /* Generated from the game's own shaders with FSR's changes: the G-buffer shaders of the objects with their own
    motion (vegetation, units, imposters, banners, cloth, rigid models) and the unit shaders that read the widened
-   bone rows, as compiled bytecode by the engine's cache name. Regenerate, never edit. */
+   bone rows, as compiled bytecode by the engine's cache name. Not edited by hand. */
 #ifndef OBJECT_BLOBS_H
 #define OBJECT_BLOBS_H
 

@@ -46,7 +46,7 @@ To get the game's own fullscreen or framed window back, set `borderless=0` under
 
 The original game's anti-aliasing options gain five AMD FSR 3.1 entries: FSR 3.1 (AA) at full resolution, and Quality, Balanced, Performance and Ultra Performance, which render below your resolution for more frames. Pick one like any anti-aliasing setting; the game keeps it for the next start.
 
-FSR needs a graphics card with Direct3D feature level 11.1 (NVIDIA GeForce GTX 900 series, AMD Radeon HD 7000 series, Intel 4th-generation Core graphics, or newer). Its sharpening is `sharpness` under `[fsr]` in `s2prof.ini` (0 to 1, 0.5 by default).
+FSR needs a graphics card with Direct3D feature level 11.1 (NVIDIA GeForce GTX 900 series, AMD Radeon HD 7700 series, Intel 4th-generation Core graphics, or newer). Its sharpening is `sharpness` under `[fsr]` in `s2prof.ini` (0 to 1, 0.5 by default).
 
 ## Hotkeys
 
@@ -90,4 +90,4 @@ The `docs` folder of [the source repository](https://github.com/DudeCmonMan/s2fi
 
 GNU General Public License v3.0; see `LICENSE`.
 
-The original game's `fixes\fsr\s2fsr.dll` includes AMD FidelityFX FSR 3.1 (MapleHinata's Direct3D 11 port of AMD's SDK), under the MIT licence in `fixes\fsr\FidelityFX-LICENSE.txt`.
+The original game's `fixes\fsr\s2fsr.dll` includes AMD FidelityFX FSR 3.1 (MapleHinata's Direct3D 11 port of AMD's SDK), under the MIT licence in `fixes\fsr\FidelityFX-LICENSE.txt`. It also contains the RSA Data Security, Inc. MD5 Message-Digest Algorithm, from AMD's SDK.
