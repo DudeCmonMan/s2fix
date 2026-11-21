@@ -2,7 +2,8 @@
 // feature level 11_0 device and create a depth that isn't R32_TYPELESS; frames at a few sizes write FSR's anti-aliased
 // output into the colour; every frame leaves the compute and output-merger state as it was, also when FSR's backend
 // throws, and the engine's compute samplers don't reach FSR; a known camera move gives the expected motion vectors and a
-// still camera none; release and create again work; nothing leaks.
+// still camera none; the engine's own mask makes FSR's reactive mask with the generated one; release and create again
+// work; nothing leaks.
 // Usage: test_fsrdll [s2fsr.dll]
 #include "test_fsr.h"
 #include <stdarg.h>
@@ -198,8 +199,8 @@ static void check_motion(const Target &t, double dx, double dy, double dz, float
     camera.view_projection(dx, dy, dz, f.view_projection);
     f.jitter_x = jx, f.jitter_y = jy;
     expect(fsr.frame(context, &f) == 0, "frame with the camera moved by (%.2f, %.2f, %.2f)", dx, dy, dz);
-    void *motion, *output;
-    fsr.textures(&motion, &output);
+    void *motion, *output, *reactive;
+    fsr.textures(&motion, &output, &reactive);
     std::vector<float> mx = read_channel(device, context, (ID3D11Texture2D *)motion, 0);
     std::vector<float> my = read_channel(device, context, (ID3D11Texture2D *)motion, 1);
     double z = camera.view_z((float)camera.depth(20)), a = 2.0 * jx / t.w, b = -2.0 * jy / t.h, worst = 0, largest = 0;
@@ -236,17 +237,17 @@ static void check_objects(const Target &t) {
     camera.view_projection(0.3, -0.2, 0, f.view_projection);
     f.jitter_x = 0.37f, f.jitter_y = -0.29f;
     std::vector<float> camera_x, camera_y;
-    if (expect(fsr.create(t.color, t.depth, NULL, NULL, NULL, 0) == 0 && fsr.frame(context, &f) == 0, "a frame without objects")) {
-        void *motion, *output;
-        fsr.textures(&motion, &output);
+    if (expect(fsr.create(t.color, t.depth, NULL, NULL, NULL, NULL, 0) == 0 && fsr.frame(context, &f) == 0, "a frame without objects")) {
+        void *motion, *output, *reactive;
+        fsr.textures(&motion, &output, &reactive);
         camera_x = read_channel(device, context, (ID3D11Texture2D *)motion, 0);
         camera_y = read_channel(device, context, (ID3D11Texture2D *)motion, 1);
     }
     ULONG velocity_refs = refs(velocity), stamp_refs = refs(stamp);
-    if (expect(fsr.create(t.color, t.depth, velocity, stamp, NULL, 0) == 0 && fsr.frame(context, &f) == 0, "the same frame with objects") &&
+    if (expect(fsr.create(t.color, t.depth, velocity, stamp, NULL, NULL, 0) == 0 && fsr.frame(context, &f) == 0, "the same frame with objects") &&
         !camera_x.empty()) {
-        void *motion, *output;
-        fsr.textures(&motion, &output);
+        void *motion, *output, *reactive;
+        fsr.textures(&motion, &output, &reactive);
         std::vector<float> mx = read_channel(device, context, (ID3D11Texture2D *)motion, 0), my = read_channel(device, context, (ID3D11Texture2D *)motion, 1);
         int object_off = 0, camera_off = 0;
         for (int y = 0; y < t.h; y++)
@@ -261,7 +262,7 @@ static void check_objects(const Target &t) {
     fsr.release();
     expect(refs(velocity) == velocity_refs && refs(stamp) == stamp_refs, "release lets go of velocity and the stamp");
     ID3D11Texture2D *wrong = texture(device, t.w, t.h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-    expect(fsr.create(t.color, t.depth, wrong, stamp, NULL, 0) != 0 && fsr.create(t.color, t.depth, velocity, NULL, NULL, 0) != 0,
+    expect(fsr.create(t.color, t.depth, wrong, stamp, NULL, NULL, 0) != 0 && fsr.create(t.color, t.depth, velocity, NULL, NULL, NULL, 0) != 0,
            "create refuses a velocity that isn't R16G16_FLOAT, and velocity without a stamp");
     fsr.release();
     wrong->Release(), velocity->Release(), stamp->Release();
@@ -270,7 +271,7 @@ static void check_objects(const Target &t) {
 // The reactive mask from an opaque copy, and FSR writing a target twice the colour's size.
 static void check_reactive_and_upscale(const Target &t) {
     S2FsrFrame f = still_frame(1);
-    if (expect(fsr.create(t.color, t.depth, NULL, NULL, NULL, 0) == 0, "create for the reactive mask")) {
+    if (expect(fsr.create(t.color, t.depth, NULL, NULL, NULL, NULL, 0) == 0, "create for the reactive mask")) {
         f.reactive = 1;
         fsr.opaque(context);
         expect(fsr.frame(context, &f) == 0, "a frame with the reactive mask from an opaque copy");
@@ -281,7 +282,7 @@ static void check_reactive_and_upscale(const Target &t) {
     ID3D11Texture2D *half = texture(device, t.w / 2, t.h / 2, c.Format, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
     f.reactive = 0;
     int failed = 0;
-    if (expect(fsr.create(t.color, t.depth, NULL, NULL, big, 0) == 0, "create upscaling %dx%d to %dx%d", t.w, t.h, 2 * t.w, 2 * t.h)) {
+    if (expect(fsr.create(t.color, t.depth, NULL, NULL, NULL, big, 0) == 0, "create upscaling %dx%d to %dx%d", t.w, t.h, 2 * t.w, 2 * t.h)) {
         std::vector<float> grey((size_t)t.w * t.h);
         for (int i = 0; i < 8; i++) {
             f = still_frame(i);
@@ -298,9 +299,57 @@ static void check_reactive_and_upscale(const Target &t) {
         double mean = sum / r.size();
         expect(!failed && !bad && mean > 0.35 && mean < 0.5, "8 upscaled frames, the target finite with the checker's mean (%.3f)", mean);
     }
-    expect(fsr.create(t.color, t.depth, NULL, NULL, half, 0) != 0, "create refuses a target smaller than the colour");
+    expect(fsr.create(t.color, t.depth, NULL, NULL, NULL, half, 0) != 0, "create refuses a target smaller than the colour");
     fsr.release();
     big->Release(), half->Release();
+}
+
+// The engine's own mask (rain and snow mark themselves 1), its left half 1: with an opaque copy, where the colour after
+// the copy is brighter (the top half), FSR's reactive mask is the larger of the two; on the next frame, without a copy,
+// it is that mask alone (the last frame's generated one gone).
+static void check_mask(const Target &t) {
+    ID3D11Texture2D *mask = texture(device, t.w, t.h, DXGI_FORMAT_R8_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+    std::vector<unsigned char> m((size_t)t.w * t.h);
+    std::vector<float> dark((size_t)t.w * t.h, 0.05f), lit(dark);
+    for (int y = 0; y < t.h; y++)
+        for (int x = 0; x < t.w; x++) {
+            m[(size_t)y * t.w + x] = x < t.w / 2 ? 255 : 0;
+            if (y < t.h / 2) lit[(size_t)y * t.w + x] = 0.8f;
+        }
+    context->UpdateSubresource(mask, 0, NULL, m.data(), t.w, 0);
+    ULONG mask_refs = refs(mask);
+    S2FsrFrame f = still_frame(1);
+    if (expect(fsr.create(t.color, t.depth, NULL, NULL, mask, NULL, 0) == 0, "create with the engine's mask")) {
+        void *motion, *output, *reactive;
+        upload(context, t.color, dark);
+        fsr.opaque(context);
+        upload(context, t.color, lit);
+        f.reactive = 1;
+        expect(fsr.frame(context, &f) == 0, "a frame with the mask and a reactive mask from an opaque copy");
+        fsr.textures(&motion, &output, &reactive);
+        std::vector<unsigned char> got = reactive ? read_bytes(device, context, (ID3D11Texture2D *)reactive) : std::vector<unsigned char>();
+        int off = got.empty();
+        for (int y = 0; y < t.h && !got.empty(); y++)
+            for (int x = 0; x < t.w; x++) {
+                unsigned char v = got[(size_t)y * t.w + x];
+                // The generated mask's 0.9 above the cut-off.
+                bool generated = v > 200 && v < 255;
+                off += x < t.w / 2 ? v != 255 : y < t.h / 2 ? !generated : v != 0;
+            }
+        expect(!off, "the larger of the two: 1 where the engine marked, 0.9 where only the colour changed, 0 elsewhere (%d pixels off)", off);
+        f.reactive = 0;
+        expect(fsr.frame(context, &f) == 0, "the next frame with the mask, no opaque copy");
+        fsr.textures(&motion, &output, &reactive);
+        expect(reactive && read_bytes(device, context, (ID3D11Texture2D *)reactive) == m, "FSR's reactive mask is the engine's mask alone");
+    }
+    fsr.release();
+    expect(refs(mask) == mask_refs, "release lets go of the mask");
+    ID3D11Texture2D *wide = texture(device, t.w, t.h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D *narrow = texture(device, t.w / 2, t.h, DXGI_FORMAT_R8_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+    expect(fsr.create(t.color, t.depth, NULL, NULL, wide, NULL, 0) != 0 && fsr.create(t.color, t.depth, NULL, NULL, narrow, NULL, 0) != 0,
+           "create refuses a mask that isn't R8_UNORM, or not the colour's size");
+    fsr.release();
+    wide->Release(), narrow->Release(), mask->Release();
 }
 
 static void run(const char *name) {
@@ -322,7 +371,7 @@ static void run(const char *name) {
     for (auto &bad : bad_depths) {
         ID3D11Texture2D *depth = texture(device, 64, 64, bad.format, bad.bind);
         ULONG device_refs = refs(device), color_refs = refs(refused.color), depth_refs = refs(depth);
-        expect(fsr.create(refused.color, depth, NULL, NULL, NULL, 0) != 0, "create refuses an %s depth", bad.name);
+        expect(fsr.create(refused.color, depth, NULL, NULL, NULL, NULL, 0) != 0, "create refuses an %s depth", bad.name);
         expect(refs(device) == device_refs && refs(refused.color) == color_refs && refs(depth) == depth_refs,
                "a refused create holds nothing");
         depth->Release();
@@ -343,7 +392,7 @@ static void run(const char *name) {
         Target t;
         t.make(s.w, s.h, s.format);
         ULONG device_refs = refs(device), color_refs = refs(t.color), depth_refs = refs(t.depth);
-        if (!expect(fsr.create(t.color, t.depth, NULL, NULL, NULL, s.sharpness) == 0, "create %dx%d %s, sharpness %.1f", s.w, s.h,
+        if (!expect(fsr.create(t.color, t.depth, NULL, NULL, NULL, NULL, s.sharpness) == 0, "create %dx%d %s, sharpness %.1f", s.w, s.h,
                     s.format_name, s.sharpness)) {
             t.release();
             continue;
@@ -351,8 +400,8 @@ static void run(const char *name) {
         state_changes = 0;
         expect(!still_frames(&engine, t, frames), "%d frames of a still camera over a jittered checker", frames);
         expect(!state_changes, "each frame kept the compute and output-merger state (%d bindings changed)", state_changes);
-        void *motion, *output;
-        fsr.textures(&motion, &output);
+        void *motion, *output, *reactive;
+        fsr.textures(&motion, &output, &reactive);
         expect(read_bytes(device, context, t.color) == read_bytes(device, context, (ID3D11Texture2D *)output),
                "the colour holds FSR's output");
         check_output(t, s.format);
@@ -366,6 +415,7 @@ static void run(const char *name) {
         check_motion(t, -0.1, 0.25, 5, -0.41f, 0.13f);
         check_objects(t);
         check_reactive_and_upscale(t);
+        check_mask(t);
         fsr.release();
         expect(refs(device) == device_refs && refs(t.color) == color_refs && refs(t.depth) == depth_refs,
                "release lets go of everything create and the frames made");
@@ -374,10 +424,10 @@ static void run(const char *name) {
 
     Target same;
     same.make(256, 144, DXGI_FORMAT_R11G11B10_FLOAT);
-    expect(fsr.create(same.color, same.depth, NULL, NULL, NULL, 0) == 0 && !still_frames(NULL, same, frames),
+    expect(fsr.create(same.color, same.depth, NULL, NULL, NULL, NULL, 0) == 0 && !still_frames(NULL, same, frames),
            "create again after release, %d frames without the engine's bindings", frames);
     std::vector<unsigned char> alone = read_bytes(device, context, same.color);
-    expect(fsr.create(same.color, same.depth, NULL, NULL, NULL, 0) == 0 && !still_frames(&engine, same, frames) &&
+    expect(fsr.create(same.color, same.depth, NULL, NULL, NULL, NULL, 0) == 0 && !still_frames(&engine, same, frames) &&
                read_bytes(device, context, same.color) == alone,
            "create over a context, the same frames with the engine's point, wrapping compute samplers bound: the same output");
     int errors = debug_errors(device);
@@ -387,7 +437,7 @@ static void run(const char *name) {
 
     Target unreadable;
     unreadable.make(128, 128, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET);
-    expect(fsr.create(unreadable.color, unreadable.depth, NULL, NULL, NULL, 0) == 0, "create on a colour without a shader view");
+    expect(fsr.create(unreadable.color, unreadable.depth, NULL, NULL, NULL, NULL, 0) == 0, "create on a colour without a shader view");
     state_changes = 0;
     expect(call_frame(&engine, unreadable, still_frame(0)) == ffx_error_backend_api_error,
            "FSR's backend throwing comes back as FFX_ERROR_BACKEND_API_ERROR");

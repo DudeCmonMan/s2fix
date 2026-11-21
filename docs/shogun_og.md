@@ -42,7 +42,7 @@ s2fix adds AMD FSR 3.1 to the game's own anti-aliasing options, after the game's
 
 Pick one like any anti-aliasing setting and apply. The game keeps your choice for the next start. Switching back to the game's own anti-aliasing works the same way, at any time.
 
-FSR builds each frame from several earlier ones, so it needs to know how everything on screen moved. s2fix gives it the camera's motion and each moving object's own: soldiers (near and far, the far ones drawn as flat imposters too), severed limbs, banners, flags, vegetation in the wind, and projectiles. Smoke, fire, other particles and projectile trails are marked as see-through effects, so FSR doesn't smear them. Like FSR in other games, fast motion can leave a little softness or ghosting.
+FSR builds each frame from several earlier ones, so it needs to know how everything on screen moved. s2fix gives it the camera's motion and each moving object's own: soldiers (near and far, the far ones drawn as flat imposters too), severed limbs, banners, flags, vegetation in the wind, and projectiles. Smoke, fire, other particles, projectile trails, rain and snow are marked as see-through effects, so FSR doesn't smear them. Like FSR in other games, fast motion can leave a little softness or ghosting.
 
 If FSR can't start (for example after a driver problem), a message says so and the game's own anti-aliasing is used for the rest of that session.
 

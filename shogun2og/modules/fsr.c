@@ -134,8 +134,18 @@
 #define TARGET_BIND 0x84
 #define FORMAT_R16G16_FLOAT 0x2c
 #define FORMAT_R32_FLOAT 0xd
+#define FORMAT_R8_UNORM 2
 #define RESOURCE_RTV_OBJECT 0x4c
 #define RTV_OBJECT_VIEW 0x20
+// Rain and snow draw in Deferred Alpha: its target getter (vtbl+0x70, the light accumulation whatever the index) and its
+// count (+0x78, 1); their shaders' constructor (thiscall shader; name, library) at its two calls, whose blend
+// description (a D3D11_BLEND_DESC at +0x8 of the blend object at +0x490) becomes a state when the resources are made.
+#define ALPHA_TARGET_SLOT_RVA 0x1760830
+#define ALPHA_COUNT_SLOT_RVA 0x1760838
+#define RAIN_SHADER_CALL_RVA 0x13abea8
+#define SNOW_SHADER_CALL_RVA 0x13ac951
+#define WEATHER_SHADER_CTOR_RVA 0x13bbaf0
+#define WEATHER_BLEND_DESC 0x498
 // The shader-cache loader (cdecl): ours are handed over by cache name as if read from the cache.
 #define SHADER_LOAD_RVA 0x14050e0
 #define DEVICE_NEW_BLOB_SLOT (0x88 / 4)
@@ -339,6 +349,7 @@ typedef BYTE(__cdecl *ShaderLoadFn)(BYTE *device, void *source, EngineWString *s
 typedef BYTE *(__attribute__((thiscall)) *NewBlobFn)(BYTE *device, DWORD size);
 typedef void *(__attribute__((thiscall)) *BlobDataFn)(BYTE *blob);
 typedef BYTE *(__attribute__((thiscall)) *ShaderCtorFn)(BYTE *shader, BYTE *library);
+typedef BYTE *(__attribute__((thiscall)) *WeatherShaderCtorFn)(BYTE *shader, void *name, BYTE *library);
 typedef void(__attribute__((thiscall)) *AddElementFn)(BYTE *stream, DWORD semantic, DWORD type);
 typedef struct {
     DWORD bytes, stride;
@@ -457,6 +468,7 @@ static const BYTE banner_shader_call[] = {0xe8, 0x94, 0xab, 0xff, 0xff}, banner_
 static const BYTE cloth_shader_call[] = {0xe8, 0x26, 0x99, 0xfe, 0xff};
 static const BYTE rigid_legacy_shader_call[] = {0xe8, 0x49, 0x99, 0xff, 0xff}, rigid_standard_shader_call[] = {0xe8, 0x34, 0xa7, 0xff, 0xff};
 static const BYTE projectile_draw_call[] = {0xe8, 0x91, 0x00, 0x00, 0x00};
+static const BYTE rain_shader_call[] = {0xe8, 0x43, 0xfc, 0x00, 0x00}, snow_shader_call[] = {0xe8, 0x9a, 0xf1, 0x00, 0x00};
 static const BYTE aa_list_call[] = {0xe8, 0x13, 0xa8, 0xca, 0xff}, start_clamp_call[] = {0xe8, 0xb8, 0x80, 0xff, 0xff};
 static const BYTE save_aa_call[] = {0xff, 0x90, 0xec, 0x00, 0x00, 0x00};
 static const BYTE aa_branch[] = {0x0f, 0x84, 0xf3, 0x00, 0x00, 0x00};
@@ -515,6 +527,8 @@ __declspec(dllexport) volatile LONG fsr_jitter = 1;
 __declspec(dllexport) volatile LONG fsr_mip_bias = 1;
 __declspec(dllexport) volatile LONG fsr_objects = 1;
 __declspec(dllexport) volatile LONG fsr_units = 1;
+// 0 leaves Deferred Alpha its one target: rain and snow mark nothing for FSR.
+__declspec(dllexport) volatile LONG fsr_weather = 1;
 // 0 hands the bone fill, the gathers and the soldier hooks back to the engine's own work, to time the wider layout.
 __declspec(dllexport) volatile LONG fsr_fill = 1, fsr_gather = 1, fsr_track = 1;
 // 0 leaves the engine its own shaders from the next shader load (an AA change).
@@ -541,7 +555,7 @@ static BOOL effects_seen, effects_ran, opaque_taken;
 static float jitter_x, jitter_y;
 static unsigned jitter_index;
 static ID3D11Device *fsr_device;
-static ID3D11Texture2D *fsr_color, *fsr_depth;
+static ID3D11Texture2D *fsr_color, *fsr_depth, *fsr_mask;
 static float previous_view_projection[16];
 static BOOL have_previous;
 static DWORD last_frame;
@@ -556,7 +570,10 @@ static CountSlotFn original_gbuffer_count;
 static ViewPassFn original_gbuffer_targets;
 static ViewDtorFn original_gbuffer_dtor;
 static ShaderLoadFn original_shader_load;
-static BYTE *extra_targets[2], *extra_view;
+// The G-buffer's targets 3 and 4 (the objects' motion and its depth stamp), and the weather's mask (Deferred Alpha's target 1).
+static BYTE *extra_targets[3], *extra_view;
+static TargetSlotFn original_alpha_target;
+static CountSlotFn original_alpha_count;
 static ID3D11Texture2D *fsr_velocity;
 static LONG shaders_served;
 static History *histories[2];
@@ -705,7 +722,7 @@ static void stop(const char *why) {
 static void release_targets(void) {
     if (fsr_device) fsr_shutdown();
     fsr_device = NULL;
-    fsr_color = fsr_depth = fsr_velocity = fsr_target = NULL;
+    fsr_color = fsr_depth = fsr_velocity = fsr_mask = fsr_target = NULL;
 }
 
 static void resources_created(void) {
@@ -857,7 +874,7 @@ static BYTE *make_target(BYTE *view, DWORD format) {
 
 // As the view deletes its own targets: the deleting destructor of the sub-object at +8.
 static void drop_extra_targets(void) {
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         if (!extra_targets[i]) continue;
         BYTE *sub = extra_targets[i] + 8;
         ((DeleteFn)(**(void ***)sub))(sub, 1);
@@ -875,8 +892,9 @@ static BYTE __attribute__((thiscall)) gbuffer_targets_hook(BYTE *view) {
     if (made && constants && fsr_active() && !*(void **)(view + GBUFFER_LINEAR_DEPTH_OFFSET)) {
         extra_targets[0] = make_target(view, FORMAT_R16G16_FLOAT);
         extra_targets[1] = make_target(view, FORMAT_R32_FLOAT);
+        extra_targets[2] = make_target(view, FORMAT_R8_UNORM);
         extra_view = view;
-        api->log_line("fsr: G-buffer targets 3 and 4 made for the objects' motion");
+        api->log_line("fsr: G-buffer targets 3 and 4 made for the objects' motion, and the weather's mask");
     }
     return made;
 }
@@ -893,6 +911,36 @@ static BYTE *__attribute__((thiscall)) gbuffer_target_slot(BYTE *view, DWORD ind
 static DWORD __attribute__((thiscall)) gbuffer_count_slot(BYTE *view) {
     DWORD count = original_gbuffer_count(view);
     return view == extra_view && count == 3 ? 5 : count;
+}
+
+// While FSR draws the main scene, Deferred Alpha's target 1 is the weather's mask, which our rain and snow shaders write.
+static BYTE *weather_mask(BYTE *view) {
+    BYTE *scene = *(BYTE **)(view + VIEW_SCENE_OFFSET);
+    return fsr_weather && fsr_drawing() && extra_targets[2] && *(BYTE **)(scene + SCENE_GBUFFER_VIEW_OFFSET) == extra_view ? extra_targets[2] : NULL;
+}
+
+static BYTE *__attribute__((thiscall)) alpha_target_slot(BYTE *view, DWORD index) {
+    BYTE *mask = index == 1 ? weather_mask(view) : NULL;
+    return mask ? mask : original_alpha_target(view, index);
+}
+
+static DWORD __attribute__((thiscall)) alpha_count_slot(BYTE *view) {
+    DWORD count = original_alpha_count(view);
+    return count == 1 && weather_mask(view) ? 2 : count;
+}
+
+// The mask adds up (ONE, ONE), so a pixel rain or snow covers ends at 1 whatever its alpha; the colour keeps its blend.
+// Only where FSR can run: a feature level 10_0 device refuses a blend with independent targets.
+static BYTE *__attribute__((thiscall)) weather_shader_ctor(BYTE *shader, void *name, BYTE *library) {
+    BYTE *made = ((WeatherShaderCtorFn)(engine + WEATHER_SHADER_CTOR_RVA))(shader, name, library);
+    static BOOL logged;
+    if (!render_device() && !logged) logged = TRUE, api->log_line("fsr: rain and snow's shaders made before the device; they mark nothing for FSR");
+    if (!device_supports_fsr()) return made;
+    D3D11_BLEND_DESC *blend = (D3D11_BLEND_DESC *)(shader + WEATHER_BLEND_DESC);
+    blend->IndependentBlendEnable = TRUE;
+    blend->RenderTarget[1] = (D3D11_RENDER_TARGET_BLEND_DESC){TRUE, D3D11_BLEND_ONE, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE,
+                                                              D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL};
+    return made;
 }
 
 static const struct object_blob *our_shader(const EngineWString *path) {
@@ -943,6 +991,7 @@ static void prepare_objects(BYTE *view, BYTE *scene) {
     static const float zero[4] = {0}, no_depth[4] = {-1, -1, -1, -1};
     ID3D11DeviceContext_ClearRenderTargetView(context, screen_target(extra_targets[0]), zero);
     ID3D11DeviceContext_ClearRenderTargetView(context, screen_target(extra_targets[1]), no_depth);
+    ID3D11DeviceContext_ClearRenderTargetView(context, screen_target(extra_targets[2]), zero);
     BYTE *camera = scene + SCENE_CAMERA_OFFSET;
     float view_projection[16];
     ((MatrixFn)(*(void ***)camera)[CAMERA_VIEW_PROJECTION_SLOT])(camera, view_projection);
@@ -1059,7 +1108,7 @@ static void run_fsr(BYTE *scene, BOOL reactive) {
     if (d3d != fsr_device) {
         release_targets();
         fsr_device = d3d;
-        fsr_color = fsr_depth = fsr_velocity = fsr_target = NULL;
+        fsr_color = fsr_depth = fsr_velocity = fsr_mask = fsr_target = NULL;
         int error = fsr_init(d3d, fsr_log);
         if (error) {
             char why[64];
@@ -1077,17 +1126,18 @@ static void run_fsr(BYTE *scene, BOOL reactive) {
     BOOL objects = fsr_objects && extra_view == gbuffer;
     ID3D11Texture2D *velocity = objects ? screen_texture(extra_targets[0]) : NULL;
     ID3D11Texture2D *stamp = objects ? screen_texture(extra_targets[1]) : NULL;
+    ID3D11Texture2D *mask = extra_view == gbuffer ? screen_texture(extra_targets[2]) : NULL;
     BOOL reset = FALSE, made = FALSE;
-    if (color != fsr_color || depth != fsr_depth || velocity != fsr_velocity || target != fsr_target) {
-        fsr_color = fsr_depth = fsr_velocity = NULL;
-        int error = fsr_create(color, depth, velocity, stamp, target, sharpness);
+    if (color != fsr_color || depth != fsr_depth || velocity != fsr_velocity || mask != fsr_mask || target != fsr_target) {
+        fsr_color = fsr_depth = fsr_velocity = fsr_mask = NULL;
+        int error = fsr_create(color, depth, velocity, stamp, mask, target, sharpness);
         if (error) {
             char why[64];
             snprintf(why, sizeof why, "creating FSR's context failed (%d)", error);
             stop(why);
             return;
         }
-        fsr_color = color, fsr_depth = depth, fsr_velocity = velocity, fsr_target = target;
+        fsr_color = color, fsr_depth = depth, fsr_velocity = velocity, fsr_mask = mask, fsr_target = target;
         reset = made = TRUE;
         fsr_counts[FSR_RESET_CONTEXT]++;
     }
@@ -1120,7 +1170,7 @@ static void run_fsr(BYTE *scene, BOOL reactive) {
     if (error) {
         char why[64];
         snprintf(why, sizeof why, "FSR failed on a frame (%d)", error);
-        fsr_color = fsr_depth = fsr_velocity = fsr_target = NULL;
+        fsr_color = fsr_depth = fsr_velocity = fsr_mask = fsr_target = NULL;
         stop(why);
         return;
     }
@@ -1897,6 +1947,14 @@ static const char *install_units(void) {
     return error;
 }
 
+static const char *install_weather(void) {
+    const char *error = patch_call(RAIN_SHADER_CALL_RVA, rain_shader_call, (void *)weather_shader_ctor);
+    if (!error) error = patch_call(SNOW_SHADER_CALL_RVA, snow_shader_call, (void *)weather_shader_ctor);
+    if (!error) error = patch_slot(ALPHA_TARGET_SLOT_RVA, (void *)alpha_target_slot, (void **)&original_alpha_target);
+    if (!error) error = patch_slot(ALPHA_COUNT_SLOT_RVA, (void *)alpha_count_slot, (void **)&original_alpha_count);
+    return error;
+}
+
 static const char *install_modes(void) {
     fsr_branch_skip = engine + AA_BRANCH_SKIP_RVA;
     BYTE branch[6] = {0xe8, 0, 0, 0, 0, 0x90}, save[6] = {0xe8, 0, 0, 0, 0, 0x90};
@@ -1955,6 +2013,8 @@ __declspec(dllexport) const char *s2_module_main(const S2Api *host) {
     if ((error = install_objects())) return error;
     api->begin_fix("fsrunits");
     if ((error = install_units())) return error;
+    api->begin_fix("fsrweather");
+    if ((error = install_weather())) return error;
     api->begin_fix("fsrmodes");
     if ((error = install_modes())) return error;
     api->begin_fix("fsrpass");

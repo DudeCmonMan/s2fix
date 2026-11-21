@@ -75,7 +75,7 @@ static double run(float kx, float ky, Motion motion) {
     device->CreateDepthStencilView(depth, &dd, &dsv);
     context->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, (float)camera.depth(plane_z), 0);
     dsv->Release();
-    bool ok = fsr.create(color, depth, NULL, NULL, NULL, 0) == 0;
+    bool ok = fsr.create(color, depth, NULL, NULL, NULL, NULL, 0) == 0;
     render_frames();
     std::vector<float> grey((size_t)width * height);
     for (int i = 0; ok && i < frames; i++) {

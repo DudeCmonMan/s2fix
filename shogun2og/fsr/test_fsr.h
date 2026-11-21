@@ -165,7 +165,7 @@ inline void upload(ID3D11DeviceContext *c, ID3D11Texture2D *t, const std::vector
 inline std::vector<unsigned char> read_bytes(ID3D11Device *dev, ID3D11DeviceContext *c, ID3D11Texture2D *t) {
     D3D11_TEXTURE2D_DESC d;
     t->GetDesc(&d);
-    UINT pixel = d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
+    UINT pixel = d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : d.Format == DXGI_FORMAT_R8_UNORM ? 1 : 4;
     ID3D11Texture2D *staging = texture(dev, d.Width, d.Height, d.Format, 0, D3D11_USAGE_STAGING);
     c->CopyResource(staging, t);
     D3D11_MAPPED_SUBRESOURCE m;

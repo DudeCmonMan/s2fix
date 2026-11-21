@@ -24,9 +24,11 @@ typedef void (*S2FsrLog)(const char *line);
 typedef int (*S2FsrInit)(void *device, S2FsrLog log);
 // color: the HDR scene colour at render size; depth: R32_TYPELESS. velocity (R16G16_FLOAT) and stamp (R32_FLOAT):
 // the G-buffer's object motion and the depth each object wrote it at, both or neither; where the stamp equals the
-// final depth the object's motion is used, elsewhere the camera's. All ID3D11Texture2D*, the render size. target:
-// where FSR's output goes, at the output size in color's format; NULL writes it back into color (no upscaling).
-typedef int (*S2FsrCreate)(void *color, void *depth, void *velocity, void *stamp, void *target, float sharpness);
+// final depth the object's motion is used, elsewhere the camera's. mask (R8_UNORM) or NULL: pixels the engine's own
+// transparent draws marked (rain, snow), reactive and FSR's transparency mask at its value. All ID3D11Texture2D*, the
+// render size. target: where FSR's output goes, at the output size in color's format; NULL writes it back into color
+// (no upscaling).
+typedef int (*S2FsrCreate)(void *color, void *depth, void *velocity, void *stamp, void *mask, void *target, float sharpness);
 // On the immediate context: copies the colour as it is before the transparent effects, for this frame's reactive mask.
 typedef void (*S2FsrOpaque)(void *context);
 // On the immediate context: the motion vectors, the reactive mask when asked, FSR, the copy into the target; the
@@ -34,8 +36,9 @@ typedef void (*S2FsrOpaque)(void *context);
 typedef int (*S2FsrFrameFn)(void *context, const S2FsrFrame *frame);
 typedef void (*S2FsrRelease)(void);
 typedef void (*S2FsrShutdown)(void);
-// For diagnostics: the motion vectors (R16G16_FLOAT, UV, previous minus current, y down) and FSR's output.
-typedef void (*S2FsrTextures)(void **motion, void **output);
+// For diagnostics: the motion vectors (R16G16_FLOAT, UV, previous minus current, y down), FSR's output and the reactive
+// mask the last frame gave FSR (R8_UNORM; NULL if none).
+typedef void (*S2FsrTextures)(void **motion, void **output, void **reactive);
 
 #ifdef __cplusplus
 }

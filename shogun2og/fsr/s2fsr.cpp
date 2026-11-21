@@ -13,6 +13,7 @@
 #include <FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_resources.h>
 #include "s2fsr.h"
 #include "motion_cs.h"
+#include "mask_cs.h"
 
 #define EXPORT extern "C" __declspec(dllexport)
 
@@ -20,6 +21,10 @@ struct MotionConstants {
     float previous_from_jittered[16];
     float size[2], jitter[2];
     UINT objects, pad[3];
+};
+
+struct CombineConstants {
+    UINT size[2], generated, pad;
 };
 
 struct Failure {
@@ -30,16 +35,18 @@ static S2FsrLog log_sink;
 static ID3D11Device *device;
 static void *scratch;
 static FfxInterface backend;
-static ID3D11ComputeShader *motion_shader;
-static ID3D11Buffer *motion_constants;
+static ID3D11ComputeShader *motion_shader, *mask_shader;
+static ID3D11Buffer *motion_constants, *mask_constants;
 static ID3D11SamplerState *linear_clamp;
 static FfxFsr3UpscalerContext fsr;
 static bool created;
-static ID3D11Texture2D *color, *depth, *velocity, *stamp, *target, *output, *motion, *opaque, *reactive;
+static ID3D11Texture2D *color, *depth, *velocity, *stamp, *mask, *target, *output, *motion, *opaque, *reactive, *combined;
+// What the last frame gave FSR as its reactive mask, for diagnostics.
+static ID3D11Texture2D *given_reactive;
 // FSR 3.1 leaves these three to its caller to make.
 static ID3D11Texture2D *shared[3];
-static ID3D11ShaderResourceView *depth_view, *velocity_view, *stamp_view;
-static ID3D11UnorderedAccessView *motion_view;
+static ID3D11ShaderResourceView *depth_view, *velocity_view, *stamp_view, *reactive_view, *mask_view;
+static ID3D11UnorderedAccessView *motion_view, *combined_view;
 static UINT width, height, output_width, output_height;
 static float sharpening;
 
@@ -96,13 +103,15 @@ EXPORT void s2fsr_release(void) {
         created = false;
         for (ID3D11Texture2D *&t : shared) drop(t);
         drop(depth_view), drop(velocity_view), drop(stamp_view), drop(motion_view), drop(motion), drop(output);
+        drop(reactive_view), drop(mask_view), drop(combined_view), drop(combined), drop(mask);
         drop(opaque), drop(reactive), drop(target), drop(stamp), drop(velocity), drop(depth), drop(color);
+        given_reactive = NULL;
     });
 }
 
 EXPORT void s2fsr_shutdown(void) {
     s2fsr_release();
-    drop(motion_shader), drop(motion_constants), drop(linear_clamp);
+    drop(motion_shader), drop(motion_constants), drop(mask_shader), drop(mask_constants), drop(linear_clamp);
     free(scratch);
     scratch = NULL, device = NULL;
 }
@@ -123,6 +132,9 @@ EXPORT int s2fsr_init(void *d3d_device, S2FsrLog log) {
         check(device->CreateComputeShader(motion_cs, sizeof motion_cs, NULL, &motion_shader), "the motion-vector shader");
         D3D11_BUFFER_DESC b = {sizeof(MotionConstants), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
         check(device->CreateBuffer(&b, NULL, &motion_constants), "the motion-vector constants");
+        check(device->CreateComputeShader(mask_cs, sizeof mask_cs, NULL, &mask_shader), "the mask shader");
+        b.ByteWidth = sizeof(CombineConstants);
+        check(device->CreateBuffer(&b, NULL, &mask_constants), "the mask constants");
         CD3D11_SAMPLER_DESC s(D3D11_DEFAULT);
         check(device->CreateSamplerState(&s, &linear_clamp), "FSR's sampler");
     });
@@ -148,15 +160,16 @@ static ID3D11Texture2D *shared_texture(const FfxCreateResourceDescription &r) {
     return texture(d, "an FSR shared texture");
 }
 
-EXPORT int s2fsr_create(void *color_texture, void *depth_texture, void *velocity_texture, void *stamp_texture, void *target_texture,
-                        float sharpness) {
+EXPORT int s2fsr_create(void *color_texture, void *depth_texture, void *velocity_texture, void *stamp_texture, void *mask_texture,
+                        void *target_texture, float sharpness) {
     s2fsr_release();
     color = (ID3D11Texture2D *)color_texture, depth = (ID3D11Texture2D *)depth_texture;
-    velocity = (ID3D11Texture2D *)velocity_texture, stamp = (ID3D11Texture2D *)stamp_texture;
+    velocity = (ID3D11Texture2D *)velocity_texture, stamp = (ID3D11Texture2D *)stamp_texture, mask = (ID3D11Texture2D *)mask_texture;
     target = target_texture ? (ID3D11Texture2D *)target_texture : color;
     color->AddRef(), depth->AddRef(), target->AddRef();
     if (velocity) velocity->AddRef();
     if (stamp) stamp->AddRef();
+    if (mask) mask->AddRef();
     int e = guarded("create", [=] {
         D3D11_TEXTURE2D_DESC c, d;
         color->GetDesc(&c), depth->GetDesc(&d);
@@ -170,6 +183,14 @@ EXPORT int s2fsr_create(void *color_texture, void *depth_texture, void *velocity
                      v.Format, v.Width, v.Height, s.Format, s.Width, s.Height, c.Width, c.Height);
             check(device->CreateShaderResourceView(velocity, NULL, &velocity_view), "velocity's view");
             check(device->CreateShaderResourceView(stamp, NULL, &stamp_view), "the stamp's view");
+        }
+        if (mask) {
+            D3D11_TEXTURE2D_DESC m;
+            mask->GetDesc(&m);
+            if (m.Format != DXGI_FORMAT_R8_UNORM || m.Width != c.Width || m.Height != c.Height)
+                fail(FFX_ERROR_INVALID_ARGUMENT, "s2fsr: the mask (format %d, %ux%u) must be R8_UNORM at %ux%u", m.Format, m.Width, m.Height,
+                     c.Width, c.Height);
+            check(device->CreateShaderResourceView(mask, NULL, &mask_view), "the mask's view");
         }
         if (c.Format != DXGI_FORMAT_R11G11B10_FLOAT && c.Format != DXGI_FORMAT_R16G16B16A16_FLOAT)
             fail(FFX_ERROR_INVALID_ARGUMENT, "s2fsr: the scene colour is DXGI format %d, not R11G11B10_FLOAT or R16G16B16A16_FLOAT",
@@ -203,6 +224,11 @@ EXPORT int s2fsr_create(void *color_texture, void *depth_texture, void *velocity
         output = texture(t, "FSR's output");
         c.Format = DXGI_FORMAT_R8_UNORM;
         reactive = texture(c, "the reactive mask");
+        if (mask) {
+            combined = texture(c, "the combined reactive mask");
+            check(device->CreateShaderResourceView(reactive, NULL, &reactive_view), "the reactive mask's view");
+            check(device->CreateUnorderedAccessView(combined, NULL, &combined_view), "the combined reactive mask's view");
+        }
         c.Format = DXGI_FORMAT_R16G16_FLOAT;
         motion = texture(c, "the motion vectors");
         D3D11_SHADER_RESOURCE_VIEW_DESC v = {};
@@ -256,6 +282,20 @@ static void motion_pass(ID3D11DeviceContext *c, const S2FsrFrame *f) {
     c->CSSetUnorderedAccessViews(0, 1, &motion_view, NULL);
     c->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
     // FSR reads the vectors next, and a texture bound as a UAV can't be bound for reading.
+    ID3D11UnorderedAccessView *none = NULL;
+    c->CSSetUnorderedAccessViews(0, 1, &none, NULL);
+}
+
+// The reactive mask with the engine's own: the larger of the two, the generated one only when made this frame.
+static void mask_pass(ID3D11DeviceContext *c, bool generated) {
+    CombineConstants k = {{width, height}, generated, 0};
+    c->UpdateSubresource(mask_constants, 0, NULL, &k, 0, 0);
+    c->CSSetShader(mask_shader, NULL, 0);
+    c->CSSetConstantBuffers(0, 1, &mask_constants);
+    ID3D11ShaderResourceView *inputs[2] = {reactive_view, mask_view};
+    c->CSSetShaderResources(0, 2, inputs);
+    c->CSSetUnorderedAccessViews(0, 1, &combined_view, NULL);
+    c->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
     ID3D11UnorderedAccessView *none = NULL;
     c->CSSetUnorderedAccessViews(0, 1, &none, NULL);
 }
@@ -330,8 +370,13 @@ EXPORT int s2fsr_frame(void *context, const S2FsrFrame *f) {
             r.flags = FFX_FSR3UPSCALER_AUTOREACTIVEFLAGS_APPLY_TONEMAP | FFX_FSR3UPSCALER_AUTOREACTIVEFLAGS_APPLY_THRESHOLD |
                       FFX_FSR3UPSCALER_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX;
             check_ffx(ffxFsr3UpscalerContextGenerateReactiveMask(&fsr, &r), "FSR's reactive mask");
-            x.reactive = resource(reactive, FFX_RESOURCE_STATE_COMPUTE_READ);
         }
+        if (mask) {
+            mask_pass(c, f->reactive != 0);
+            x.transparencyAndComposition = resource(mask, FFX_RESOURCE_STATE_COMPUTE_READ);
+        }
+        given_reactive = mask ? combined : f->reactive ? reactive : NULL;
+        if (given_reactive) x.reactive = resource(given_reactive, FFX_RESOURCE_STATE_COMPUTE_READ);
         x.color = resource(color, FFX_RESOURCE_STATE_COMPUTE_READ);
         x.depth = resource(depth, FFX_RESOURCE_STATE_COMPUTE_READ);
         x.motionVectors = resource(motion, FFX_RESOURCE_STATE_COMPUTE_READ);
@@ -363,8 +408,8 @@ EXPORT void s2fsr_opaque(void *context) {
     ((ID3D11DeviceContext *)context)->CopyResource(opaque, color);
 }
 
-EXPORT void s2fsr_textures(void **motion_texture, void **output_texture) {
-    *motion_texture = motion, *output_texture = output;
+EXPORT void s2fsr_textures(void **motion_texture, void **output_texture, void **reactive_texture) {
+    *motion_texture = motion, *output_texture = output, *reactive_texture = given_reactive;
 }
 
 // The GCC module calls through s2fsr.h's types.

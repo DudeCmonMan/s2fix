@@ -20,6 +20,7 @@ cl 2>&1 | findstr /c:"Version"
 python -I "%HERE%shaders.py" "%SDK%" "%OUT%\fsr_shaders" || exit /b 1
 python -I "%HERE%patch_backend.py" "%SDK%" "%OUT%\fsr_backend" || exit /b 1
 fxc /nologo /T cs_5_0 /E main /O3 /Vn motion_cs /Fh "%OUT%\motion_cs.h" "%HERE%motion.hlsl" >nul || exit /b 1
+fxc /nologo /T cs_5_0 /E main /O3 /Vn mask_cs /Fh "%OUT%\mask_cs.h" "%HERE%mask.hlsl" >nul || exit /b 1
 if not exist "%OUT%\obj\tests" mkdir "%OUT%\obj\tests"
 del /q "%OUT%\obj\*.obj" 2>nul
 set INC=/I"%S%\include" /I"%S%\src\backends\shared" /I"%S%\src\components" /I"%S%\src\shared" /I"%OUT%\fsr_shaders"
