@@ -106,7 +106,7 @@ Settings marked "at start" apply when the game starts. The hotkeys don't switch 
 | `cpuplace` | keeps the game's other threads on the main thread's CCD or P-cores, as `[cpu] ccd` sets |
 | `maincore` | gives the main thread the best CPU core and keeps the game's other threads off it |
 | `timerperiod` | holds Windows' 1 ms timer period, which the game otherwise switches on and off around every timestamp |
-| `fpslimit` | a frame rate cap, off by default (`[fps] fps_limit`): after each frame the game waits for the end of that frame's time slot, and a frame that runs late doesn't make the next ones hurry; loading screens aren't held |
+| `fpslimit` | a frame rate cap, off by default (`[fps] fps_limit`): after each frame the game waits for the end of that frame's time slot, and a frame more than one slot late doesn't make the next ones hurry; loading screens aren't held |
 | `fsr` | AMD FSR 3.1 as anti-aliasing or upscaling, picked in the game's anti-aliasing options (see "AMD FSR 3.1" above); uses AMD's FidelityFX SDK, MIT licence |
 
 On the campaign map:
