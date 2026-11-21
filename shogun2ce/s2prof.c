@@ -1072,7 +1072,8 @@ static S2Api module_api = {.fix_enabled = &fixes_enabled,
                            .begin_fix = begin_fix,
                            .check_engine = check_engine,
                            .request_graphics_reset = graphics_reset_request,
-                           .on_graphics_reset = graphics_reset_listen};
+                           .on_graphics_reset = graphics_reset_listen,
+                           .report_running = report_running};
 
 static void load_module(const char *utf8_path) {
     wchar_t path[MAX_PATH];
