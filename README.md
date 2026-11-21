@@ -48,6 +48,10 @@ The original game's anti-aliasing options gain five AMD FSR 3.1 entries: FSR 3.1
 
 FSR needs a graphics card with Direct3D feature level 11.1 (NVIDIA GeForce GTX 900 series, AMD Radeon HD 7700 series, Intel 4th-generation Core graphics, or newer). Its sharpening is `sharpness` under `[fsr]` in `s2prof.ini` (0 to 1, 0.5 by default).
 
+### Frame rate cap (original game)
+
+To cap the frame rate, set `fps_limit` under `[fps]` in `s2prof.ini` to the frames a second you want (for example 60) and restart the game. 0, the default, is no cap.
+
 ## Hotkeys
 
 You don't need any hotkeys to play. Most are for comparing the game with the fixes off and on.

@@ -64,6 +64,7 @@ Settings marked "at start" apply when the game starts. The hotkeys don't switch 
 | `[flipmodel] buffers` | 3 | at start: flip-model back buffers, 2 to 4 |
 | `[flipmodel] tearing` | 1 | at start: allows tearing (an uncapped frame rate, variable refresh in a window) when Windows supports it |
 | `[flipmodel] latency` | 2 | at start: at most this many frames queued, waiting for room after each Present instead of blocking inside it; 0 keeps Windows' 3 |
+| `[fps] fps_limit` | 0 | at start: caps the frame rate at this many frames a second, a whole number; 0 is no cap. The debug report runs uncapped |
 | `[window] borderless` | 1 | at start: runs the game in a borderless window that covers its monitor whatever its fullscreen setting, at the resolution set in the game's options, scaled to fit; 0 gives the game its own fullscreen and framed window back |
 | `[window] clip_cursor` | 1 | with borderless: keeps the cursor on the game's monitor while the game has focus, so edge scrolling works with several monitors |
 | `[fsr] enabled` | 1 | at start: adds AMD FSR 3.1 to the game's anti-aliasing options (needs Direct3D feature level 11.1); 0 leaves them out, only if FSR causes a problem |
@@ -105,6 +106,7 @@ Settings marked "at start" apply when the game starts. The hotkeys don't switch 
 | `cpuplace` | keeps the game's other threads on the main thread's CCD or P-cores, as `[cpu] ccd` sets |
 | `maincore` | gives the main thread the best CPU core and keeps the game's other threads off it |
 | `timerperiod` | holds Windows' 1 ms timer period, which the game otherwise switches on and off around every timestamp |
+| `fpslimit` | a frame rate cap, off by default (`[fps] fps_limit`): after each frame the game waits for the end of that frame's time slot, and a frame that runs late doesn't make the next ones hurry; loading screens aren't held |
 | `fsr` | AMD FSR 3.1 as anti-aliasing or upscaling, picked in the game's anti-aliasing options (see "AMD FSR 3.1" above); uses AMD's FidelityFX SDK, MIT licence |
 
 On the campaign map:

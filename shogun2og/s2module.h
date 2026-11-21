@@ -40,6 +40,8 @@ typedef struct {
     void (*request_graphics_reset)(const char *reason);
     // On main, whatever the cause: before each GPU release (may repeat), after each re-creation. Either may be NULL.
     void (*on_graphics_reset)(void (*before)(void), void (*after)(void));
+    // TRUE while the debug report runs: a fix that shapes frame times, as the frame cap does, stands aside meanwhile.
+    BOOL (*report_running)(void);
 } S2Api;
 
 typedef const char *(*S2ModuleMain)(const S2Api *api);
