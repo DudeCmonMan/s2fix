@@ -50,7 +50,7 @@ FSR needs a graphics card with Direct3D feature level 11.1 (NVIDIA GeForce GTX 9
 
 ### Frame rate cap
 
-To cap the frame rate, set `fps_limit` under `[fps]` in `s2prof.ini` to the frames a second you want (for example 60) and restart the game. 0, the default, is no cap.
+To cap the frame rate, set `battle_fps_limit` (battles and the menus, the main menu included) and `campaign_fps_limit` (the campaign map) under `[fps]` in `s2prof.ini` to the frames a second you want (for example 60) and restart the game. 0, the default, is no cap. An older `s2prof.ini` with `fps_limit` still works: it caps both.
 
 ## Hotkeys
 

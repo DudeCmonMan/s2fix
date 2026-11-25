@@ -26,7 +26,9 @@ Settings marked "at start" apply when the game starts. The hotkeys don't switch 
 | `[device] multithreaded_device` | 1 | at start: creates the D3D11 device without the single-thread flag; the overhaul's worker threads need it |
 | `[device] wrap_context` | 1 | at start: gives the game forwarding wrappers of the device and context |
 | `[cpu] ccd` | auto | which CPUs the game's threads use: `auto` gives the main thread the best core of the CPU's largest cache group (the 3D V-Cache CCD of an X3D chip, the P-cores of an Intel chip) and keeps the other threads on that group when it leaves them 10 CPUs, else on every CPU; a number picks a cache group (0 holds CPU 0); `off` leaves the other threads to Windows, and the main thread still gets its core. `cache`, the old default, means `auto` |
-| `[fps] fps_limit` | 0 | at start: caps the frame rate at this many frames a second, a whole number; 0 is no cap. The debug report runs uncapped |
+| `[fps] battle_fps_limit` | 0 | at start: caps the frame rate in battles and the menus, the main menu included, at this many frames a second, a whole number; 0 is no cap. The debug report runs uncapped |
+| `[fps] campaign_fps_limit` | 0 | at start: the same on the campaign map |
+| `[fps] fps_limit` | none | older `s2prof.ini` files only: both caps, where `battle_fps_limit` or `campaign_fps_limit` isn't set |
 | `[campthrottle] hz` | 30 | at start: how many times a second each of your settlements on the campaign map checks whether it can build something; a whole number, 1 or more (anything else keeps 30). Lower gives more frames on a large empire, and the answer can be up to that fraction of a second old. 0 turns this off and checks every frame, as the game does |
 | `[camplabels] hz` | 30 | at start: how many times a second the label of each of your settlements on the campaign map checks whether a rebellion is imminent while the camera moves; a whole number, 1 or more (anything else keeps 30), and the answer can be up to that fraction of a second old. 0 checks every time, as the game does. Other factions' labels skip the check either way, since the game discards its answer for them |
 | `[s2prof] console` | 0 | 1 opens a window that shows the log live |
@@ -57,7 +59,7 @@ Settings marked "at start" apply when the game starts. The hotkeys don't switch 
 | `buildingblock` | skips work the building draw throws away every frame: a loop over each building piece's neighbours, and the value that decided it (most noticeable in sieges and towns) |
 | `cpuplace` | keeps the game's other threads on the main thread's CCD or P-cores, as `[cpu] ccd` sets |
 | `maincore` | gives the main thread the best CPU core and keeps the game's other threads off it |
-| `fpslimit` | a frame rate cap, off by default (`[fps] fps_limit`): after each frame the game waits for the end of that frame's time slot, and a frame more than one slot late doesn't make the next ones hurry; loading screens aren't held |
+| `fpslimit` | a frame rate cap, off by default (`[fps] battle_fps_limit` for battles and the menus, `campaign_fps_limit` for the campaign map): after each frame the game waits for the end of that frame's time slot, and a frame more than one slot late doesn't make the next ones hurry; loading screens aren't held |
 
 On the campaign map:
 
